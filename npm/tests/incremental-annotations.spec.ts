@@ -281,20 +281,15 @@ test.describe("Incremental Annotation Performance", () => {
     );
     console.log("═".repeat(70));
 
-    // Assertions: all operations must complete successfully (benchmarks ran)
-    expect(results.fullConversion.medianMs).toBeGreaterThan(0);
-    expect(results.incrementalProjection.medianMs).toBeGreaterThan(0);
-    expect(results.singleAdd.medianMs).toBeGreaterThan(0);
-    expect(results.singleRemove.medianMs).toBeGreaterThan(0);
-
-    // Log the raw verdict for CI - let the numbers speak for themselves
-    if (speedup <= 1) {
-      console.log(
-        "\n⚠ Incremental projection was NOT faster than full re-conversion."
-      );
-      console.log(
-        "  This means the DOCX parsing overhead is small relative to annotation projection."
-      );
-    }
+    // The incremental approach must be faster than re-converting the whole DOCX
+    expect(results.incrementalProjection.medianMs).toBeLessThan(
+      results.fullConversion.medianMs
+    );
+    expect(results.singleAdd.medianMs).toBeLessThan(
+      results.fullConversion.medianMs
+    );
+    expect(results.singleRemove.medianMs).toBeLessThan(
+      results.fullConversion.medianMs
+    );
   });
 });
