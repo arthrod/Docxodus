@@ -55,6 +55,11 @@ test.describe("Incremental Annotation Performance", () => {
       const annotationSet = setResult.annotationSet;
 
       // Step 2: Add several annotations to the set via text search
+      // C# JSON serializer uses PascalCase; handle both casings
+      const docContent =
+        annotationSet.Content || annotationSet.content || "";
+      const labelledText =
+        annotationSet.LabelledText || annotationSet.labelledText || [];
       const searchTerms = ["the", "and", "of", "to", "in"];
       const labels: Record<string, any> = {};
 
@@ -70,15 +75,19 @@ test.describe("Incremental Annotation Performance", () => {
         const annResult = Tests.createAnnotationFromSearch(
           `ann-${i}`,
           labelId,
-          annotationSet.content,
+          docContent,
           searchTerms[i],
           1
         );
         if (annResult.annotation) {
-          annotationSet.labelledText.push(annResult.annotation);
+          labelledText.push(annResult.annotation);
         }
       }
+      // Set fields in both casings so serialization works either way
       annotationSet.textLabels = labels;
+      annotationSet.TextLabels = labels;
+      annotationSet.labelledText = labelledText;
+      annotationSet.LabelledText = labelledText;
 
       const annotationSetJson = JSON.stringify(annotationSet);
 
@@ -161,7 +170,7 @@ test.describe("Incremental Annotation Performance", () => {
       const newAnn = Tests.createAnnotationFromSearch(
         "ann-new",
         "LABEL_0",
-        annotationSet.content,
+        docContent,
         "document",
         1
       );
