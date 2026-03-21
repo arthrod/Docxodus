@@ -1100,9 +1100,12 @@ namespace Docxodus
         /// </list>
         /// </para>
         /// <para>
-        /// LIMITATION: sectPr elements inside tables or text boxes are NOT detected.
-        /// This is an edge case - most documents don't have section breaks inside tables.
-        /// See GitHub issue #51 for tracking this enhancement.
+        /// NOTE: sectPr elements inside tables or text boxes are intentionally NOT detected.
+        /// Per ECMA-376 5th Ed., Part 1, §17.6.18 (sectPr): "If this element is contained within
+        /// the paragraph properties for a paragraph which is contained within a table cell, then
+        /// the section properties shall be ignored." Word and LibreOffice both ignore these.
+        /// This is correct behavior, not a limitation. See GitHub issue #51 and
+        /// docs/ooxml_corner_cases.md for details.
         /// </para>
         /// </remarks>
         private static List<(XElement sectPr, List<XElement> paragraphs, List<XElement> tables)> CollectSectionData(XElement body)

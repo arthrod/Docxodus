@@ -8,7 +8,9 @@ This document tracks edge cases and quirks in Open XML document processing where
    - [Legal Numbering with Multi-Level Format Strings](#legal-numbering-with-multi-level-format-strings)
 2. [Footnotes](#footnotes)
    - [Footnote Count Discrepancy in Legal Templates](#footnote-count-discrepancy-in-legal-templates)
-3. [Contributing](#contributing)
+3. [Section Properties](#section-properties)
+   - [sectPr Inside Table Cells Must Be Ignored](#sectpr-inside-table-cells-must-be-ignored)
+4. [Contributing](#contributing)
 
 ---
 
@@ -221,6 +223,82 @@ The ECMA-376 specification clarifies how footnote numbering works:
 
 - [ECMA-376 Part 1, Section 17.11.7 - footnoteReference](https://www.ecma-international.org/publications-and-standards/standards/ecma-376/)
 - [ECMA-376 Part 1, Section 17.11.10 - footnotes part](https://www.ecma-international.org/publications-and-standards/standards/ecma-376/)
+
+---
+
+## Section Properties
+
+### sectPr Inside Table Cells Must Be Ignored
+
+**Status:** Not a bug — current behavior is correct (March 2026)
+**Discovered:** 2026-03-21
+**Related Issue:** [#51](https://github.com/JSv4/Docxodus/issues/51)
+
+#### The Problem
+
+Issue #51 reported that `GetDocumentMetadata()` does not detect `w:sectPr` elements nested inside table cells or text boxes, and proposed using `body.Descendants(W.sectPr)` to find them.
+
+#### ECMA-376 Specification
+
+ECMA-376 5th Edition, Part 1, §17.6.18 (sectPr) is explicit:
+
+> "If this element is contained within the paragraph properties for a paragraph which is contained within a table cell, then the section properties shall be ignored."
+
+This means section breaks inside table cells are **not valid** — conforming applications must ignore them.
+
+#### Minimal XML Reproducer
+
+```xml
+<w:body>
+  <w:p><w:r><w:t>Before table</w:t></w:r></w:p>
+  <w:tbl>
+    <w:tr>
+      <w:tc>
+        <w:p>
+          <w:pPr>
+            <!-- This sectPr MUST be ignored per spec -->
+            <w:sectPr>
+              <w:pgSz w:w="15840" w:h="12240"/>
+            </w:sectPr>
+          </w:pPr>
+          <w:r><w:t>Cell with sectPr</w:t></w:r>
+        </w:p>
+      </w:tc>
+    </w:tr>
+  </w:tbl>
+  <w:p><w:r><w:t>After table</w:t></w:r></w:p>
+  <w:sectPr>
+    <w:pgSz w:w="12240" w:h="15840"/>
+  </w:sectPr>
+</w:body>
+```
+
+#### Renderer Comparison
+
+| Renderer | Sections Detected | Behavior |
+|----------|------------------|----------|
+| Microsoft Word | 1 (body-level only) | Ignores table-cell sectPr |
+| LibreOffice Writer | 1 (body-level only) | Ignores table-cell sectPr |
+| Docxodus | 1 (body-level only) | Correct — only processes top-level elements |
+
+#### Analysis
+
+The `CollectSectionData` method in `WmlToHtmlConverter.cs` iterates over `body.Elements()` (top-level block elements only). This is the correct approach because:
+
+1. `w:sectPr` in `w:pPr` of top-level paragraphs → valid section breaks (handled)
+2. `w:sectPr` as direct child of `w:body` → final section (handled)
+3. `w:sectPr` inside table cells → must be ignored per spec (correctly not detected)
+4. `w:sectPr` inside text boxes (`w:txbxContent`) → separate content flow, not a document section
+
+Using `body.Descendants(W.sectPr)` as proposed in #51 would be **incorrect** — it would pick up table-cell sectPr elements that the spec says to ignore.
+
+#### Relevant Code
+
+- `Docxodus/WmlToHtmlConverter.cs`: `CollectSectionData()` method (line ~1108)
+
+#### Test Coverage
+
+- `DM070_GetDocumentMetadata_IgnoresSectPrInsideTableCells` — verifies only 1 section is detected when a sectPr exists inside a table cell
 
 ---
 

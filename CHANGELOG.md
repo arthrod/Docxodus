@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - .NET 8 / Open XML SDK 3.x Migration
 
+### Documentation
+- **Clarified sectPr handling in table cells (Issue #51)** - Investigated and documented that `GetDocumentMetadata()` correctly ignores `w:sectPr` inside table cells per ECMA-376 §17.6.18. The spec mandates that section properties within table cells "shall be ignored". Added OOXML corner case documentation and a test (`DM070`) verifying spec compliance. The issue's proposed fix (`body.Descendants(W.sectPr)`) would have been incorrect.
+
 ### Fixed (npm)
 - **TypeScript subpath exports not resolving under `moduleResolution: "node"` (Issue #113)** - Added `typesVersions` fallback to npm package.json so `docxodus/react` and `docxodus/worker` subpath imports resolve types correctly under all TypeScript module resolution modes. Also reordered export conditions to put `types` before `import` per TypeScript requirements.
 
