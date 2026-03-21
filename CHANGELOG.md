@@ -15,6 +15,10 @@ All notable changes to this project will be documented in this file.
   - CSS-based label filtering enables responsive toggle without any re-rendering
 
 ### Fixed
+- **Paginated rendering: text clipped at page bottom + inconsistent paragraph spacing (Issue #114)**
+  - Fixed `lineRule` default handling: when `w:lineRule` is absent but `w:line` is present, treat as "auto" per OOXML spec (ISO/IEC 29500). Previously the line value was ignored, causing accumulated line-height mismatches that clipped the last line on pages.
+  - Fixed `contextualSpacing` handling: now suppresses both `spacingAfter` (margin-bottom) AND `spacingBefore` (margin-top) for consecutive same-style paragraphs. Previously only `spacingAfter` was suppressed, leaving inconsistent inter-paragraph gaps.
+  - Fixed pagination engine bottom margin over-reservation: the last block's bottom margin is no longer counted against page space since it's invisible (clipped by `overflow: hidden`). This prevents premature page breaks where content would have been visible.
 - **Annotation projection fails on sanitized HTML (Issue #110)** - `ProjectAnnotationsOntoHtml`, `AddAnnotationToHtml`, and `RemoveAnnotationFromHtml` now handle HTML fragments with multiple root elements (e.g., DOMPurify-sanitized output) and HTML named entities (`&nbsp;`, `&ndash;`, etc.)
   - Root cause: `XElement.Parse()` requires valid XML with a single root element; sanitized HTML strips `<html>`/`<body>` wrappers leaving multiple roots
   - Fix: Auto-wraps multi-root HTML in a synthetic container for parsing, unwraps on serialization; replaces common HTML entities with numeric XML equivalents
