@@ -1024,8 +1024,11 @@ export class PaginationEngine {
         // Margin collapsing: use the larger of the two adjacent margins
         effectiveMarginTop = Math.max(block.marginTopPt, prevMarginBottomPt) - prevMarginBottomPt;
       }
-      // Total height = top margin gap + content + bottom margin + footnote space
-      const blockSpace = effectiveMarginTop + block.heightPt + block.marginBottomPt + additionalFootnoteHeight;
+      // Visible height = top margin gap + content + footnote space
+      // Note: bottom margin is NOT included in the fit check because the last block's
+      // bottom margin extends beyond the content area and is clipped by overflow:hidden.
+      // It is still tracked in remainingHeight for correct margin collapsing with the next block.
+      const blockSpace = effectiveMarginTop + block.heightPt + additionalFootnoteHeight;
 
       // Calculate needed height (including keepWithNext)
       let neededHeight = blockSpace;
@@ -1033,7 +1036,7 @@ export class PaginationEngine {
         // For keepWithNext, include the next block with collapsed margins
         const collapsedMargin = Math.max(block.marginBottomPt, nextBlock.marginTopPt);
         neededHeight = effectiveMarginTop + block.heightPt + collapsedMargin +
-                       nextBlock.heightPt + nextBlock.marginBottomPt + additionalFootnoteHeight;
+                       nextBlock.heightPt + additionalFootnoteHeight;
       }
 
       // Effective remaining height (content area minus footnotes already on page)
@@ -1055,9 +1058,9 @@ export class PaginationEngine {
           currentFootnoteIds.push(...newFootnoteIds);
           currentFootnoteHeight += additionalFootnoteHeight;
         }
-      } else if (block.heightPt + block.marginTopPt + block.marginBottomPt <= effectiveContentHeight) {
+      } else if (block.heightPt + block.marginTopPt <= effectiveContentHeight) {
         // Block doesn't fit with current allocation - try expanding footnote area
-        const blockSpaceWithoutFootnotes = effectiveMarginTop + block.heightPt + block.marginBottomPt;
+        const blockSpaceWithoutFootnotes = effectiveMarginTop + block.heightPt;
 
         // Check if block fits if we expand footnote area
         // We can expand footnotes up to maxFootnoteArea, leaving room for body content

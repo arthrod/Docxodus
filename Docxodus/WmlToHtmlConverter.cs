@@ -2363,7 +2363,8 @@ namespace Docxodus
         private static object ConvertToHtmlTransform(WordprocessingDocument wordDoc,
             WmlToHtmlConverterSettings settings, XNode node,
             bool suppressTrailingWhiteSpace,
-            decimal currentMarginLeft)
+            decimal currentMarginLeft,
+            bool suppressLeadingWhiteSpace = false)
         {
             var element = node as XElement;
             if (element == null) return null;
@@ -2489,7 +2490,7 @@ namespace Docxodus
             // have a style separator).
             if (element.Name == W.p)
             {
-                return ProcessParagraph(wordDoc, settings, element, suppressTrailingWhiteSpace, currentMarginLeft);
+                return ProcessParagraph(wordDoc, settings, element, suppressTrailingWhiteSpace, currentMarginLeft, suppressLeadingWhiteSpace);
             }
 
             // Transform hyperlinks to the XHTML h:a element.
@@ -4276,7 +4277,7 @@ namespace Docxodus
         // the element (e.g., h:h2) created from the w:p element having the (first)
         // style separator (i.e., a w:specVanish element).
         private static object ProcessParagraph(WordprocessingDocument wordDoc, WmlToHtmlConverterSettings settings,
-            XElement element, bool suppressTrailingWhiteSpace, decimal currentMarginLeft)
+            XElement element, bool suppressTrailingWhiteSpace, decimal currentMarginLeft, bool suppressLeadingWhiteSpace = false)
         {
             // Ignore this paragraph if the previous paragraph has a style separator.
             // We have already transformed this one together with the previous one.
@@ -4286,7 +4287,7 @@ namespace Docxodus
             var elementName = GetParagraphElementName(element, wordDoc);
             var isBidi = IsBidi(element);
             var paragraph = (XElement) ConvertParagraph(wordDoc, settings, element, elementName,
-                suppressTrailingWhiteSpace, currentMarginLeft, isBidi);
+                suppressTrailingWhiteSpace, currentMarginLeft, isBidi, suppressLeadingWhiteSpace);
 
             // The paragraph conversion might have created empty spans.
             // These can and should be removed because empty spans are
@@ -4955,7 +4956,7 @@ namespace Docxodus
          * - autoSpaceDE
          * - autoSpaceDN
          * - bidi
-         * - contextualSpacing
+         * - contextualSpacing (handled via GroupAndVerticallySpaceNumberedParagraphs)
          * - divId
          * - framePr
          * - keepLines
@@ -4978,9 +4979,10 @@ namespace Docxodus
          */
 
         private static object ConvertParagraph(WordprocessingDocument wordDoc, WmlToHtmlConverterSettings settings,
-            XElement paragraph, XName elementName, bool suppressTrailingWhiteSpace, decimal currentMarginLeft, bool isBidi)
+            XElement paragraph, XName elementName, bool suppressTrailingWhiteSpace, decimal currentMarginLeft, bool isBidi,
+            bool suppressLeadingWhiteSpace = false)
         {
-            var style = DefineParagraphStyle(paragraph, elementName, suppressTrailingWhiteSpace, currentMarginLeft, isBidi);
+            var style = DefineParagraphStyle(paragraph, elementName, suppressTrailingWhiteSpace, currentMarginLeft, isBidi, suppressLeadingWhiteSpace);
             var rtl = isBidi ? new XAttribute("dir", "rtl") : new XAttribute("dir", "ltr");
             var firstMark = isBidi ? new XEntity("#x200f") : null;
 
@@ -5113,7 +5115,7 @@ namespace Docxodus
         }
 
         private static Dictionary<string, string> DefineParagraphStyle(XElement paragraph, XName elementName,
-            bool suppressTrailingWhiteSpace, decimal currentMarginLeft, bool isBidi)
+            bool suppressTrailingWhiteSpace, decimal currentMarginLeft, bool isBidi, bool suppressLeadingWhiteSpace = false)
         {
             var style = new Dictionary<string, string>();
 
@@ -5124,7 +5126,7 @@ namespace Docxodus
             var pPr = paragraph.Element(W.pPr);
             if (pPr == null) return style;
 
-            CreateStyleFromSpacing(style, pPr.Element(W.spacing), elementName, suppressTrailingWhiteSpace);
+            CreateStyleFromSpacing(style, pPr.Element(W.spacing), elementName, suppressTrailingWhiteSpace, suppressLeadingWhiteSpace);
             CreateStyleFromInd(style, pPr.Element(W.ind), elementName, currentMarginLeft, isBidi);
 
             // todo need to handle
@@ -5217,18 +5219,19 @@ namespace Docxodus
         }
 
         private static void CreateStyleFromSpacing(Dictionary<string, string> style, XElement spacing, XName elementName,
-            bool suppressTrailingWhiteSpace)
+            bool suppressTrailingWhiteSpace, bool suppressLeadingWhiteSpace = false)
         {
             if (spacing == null) return;
 
-            var spacingBefore = (decimal?) spacing.Attribute(W.before);
+            var spacingBefore = suppressLeadingWhiteSpace ? 0 : (decimal?) spacing.Attribute(W.before);
             if (spacingBefore != null && elementName != Xhtml.span)
                 style.AddIfMissing("margin-top",
                     spacingBefore > 0m
                         ? string.Format(NumberFormatInfo.InvariantInfo, "{0}pt", spacingBefore/20.0m)
                         : "0");
 
-            var lineRule = (string) spacing.Attribute(W.lineRule);
+            // Per OOXML spec (ISO/IEC 29500), when lineRule is absent the default is "auto"
+            var lineRule = (string) spacing.Attribute(W.lineRule) ?? (spacing.Attribute(W.line) != null ? "auto" : null);
             if (lineRule == "auto")
             {
                 var line = (decimal) spacing.Attribute(W.line);
@@ -7189,7 +7192,13 @@ namespace Docxodus
                     if (g.Key == "")
                         return g.Select(e => ConvertToHtmlTransform(wordDoc, settings, e, false, currentMarginLeft));
                     var last = g.Count() - 1;
-                    return g.Select((e, i) => ConvertToHtmlTransform(wordDoc, settings, e, i != last, currentMarginLeft));
+                    // For contextualSpacing groups (sty: prefix), suppress both trailing whitespace
+                    // for non-last paragraphs AND leading whitespace for non-first paragraphs.
+                    // Word removes all inter-paragraph spacing for same-style contextualSpacing paragraphs.
+                    var isContextualGroup = g.Key.StartsWith("sty:");
+                    return g.Select((e, i) => ConvertToHtmlTransform(wordDoc, settings, e,
+                        i != last, currentMarginLeft,
+                        suppressLeadingWhiteSpace: isContextualGroup && i != 0));
                 });
             return (IEnumerable<object>)newContent;
         }
