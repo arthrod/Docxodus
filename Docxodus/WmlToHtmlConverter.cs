@@ -4464,6 +4464,52 @@ namespace Docxodus
                     }
                 }
             }
+            // Handle table spacing from w:tblpPr (floating table positioning properties)
+            var tblpPr = element.Elements(W.tblPr).Elements(W.tblpPr).FirstOrDefault();
+            if (tblpPr != null)
+            {
+                var topFromText = (decimal?)tblpPr.Attribute(W.topFromText);
+                if (topFromText != null && topFromText > 0)
+                    style.AddIfMissing("margin-top",
+                        string.Format(NumberFormatInfo.InvariantInfo, "{0}pt", topFromText / 20m));
+
+                var bottomFromText = (decimal?)tblpPr.Attribute(W.bottomFromText);
+                if (bottomFromText != null && bottomFromText > 0)
+                    style.AddIfMissing("margin-bottom",
+                        string.Format(NumberFormatInfo.InvariantInfo, "{0}pt", bottomFromText / 20m));
+            }
+
+            // Look for spacing from the preceding paragraph's w:spacing w:after.
+            // If the preceding sibling is a paragraph with no after-spacing (or zero),
+            // the table needs its own top margin for visual separation.
+            // Word applies implicit spacing between paragraphs and tables; replicate
+            // that by examining the preceding element's spacing.
+            if (!style.ContainsKey("margin-top"))
+            {
+                var precedingSibling = element.ElementsBeforeSelf().LastOrDefault();
+                bool needsDefaultTopMargin = false;
+
+                if (precedingSibling != null && precedingSibling.Name == W.p)
+                {
+                    var precedingPPr = precedingSibling.Element(W.pPr);
+                    var precedingSpacing = precedingPPr?.Element(W.spacing);
+                    var afterVal = (decimal?)precedingSpacing?.Attribute(W.after);
+
+                    // If preceding paragraph has no spacing-after or zero, table needs top margin
+                    if (precedingSpacing == null || afterVal == null || afterVal == 0)
+                        needsDefaultTopMargin = true;
+                }
+                else if (precedingSibling != null)
+                {
+                    // Non-paragraph preceding element (e.g., another table) also needs separation
+                    needsDefaultTopMargin = true;
+                }
+
+                if (needsDefaultTopMargin)
+                    style.AddIfMissing("margin-top", "7.5pt");
+            }
+            style.AddIfMissing("margin-top", ".001pt");
+
             var tableDirection = bidiVisual != null ? new XAttribute("dir", "rtl") : new XAttribute("dir", "ltr");
             style.AddIfMissing("margin-bottom", ".001pt");
             var table = new XElement(Xhtml.table,

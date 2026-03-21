@@ -15,6 +15,9 @@ All notable changes to this project will be documented in this file.
   - CSS-based label filtering enables responsive toggle without any re-rendering
 
 ### Fixed
+- **Table container missing top margin (Issue #108)** - Tables preceded by paragraphs with no after-spacing now get a default `margin-top: 7.5pt` for visual separation
+  - Also handles floating table spacing from `w:tblpPr` (`topFromText`/`bottomFromText` attributes)
+  - Tables preceded by paragraphs with explicit after-spacing correctly skip the default margin
 - **Move markup Word compatibility (Issue #96)** - Documents with move operations no longer cause Word "unreadable content" warnings
   - Root cause: `FixUpRevMarkIds()` was overwriting IDs of `w:del`/`w:ins` after `FixUpRevisionIds()` had already assigned unique IDs, causing collisions with move element IDs
   - Fix: Removed redundant `FixUpRevMarkIds()` call - `FixUpRevisionIds()` already handles all revision element IDs correctly

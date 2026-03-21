@@ -2905,6 +2905,121 @@ namespace OxPt
         }
 
         [Fact]
+        public void HC056_TablePrecededByParagraph_HasTopMargin()
+        {
+            // Test that a table preceded by a paragraph with no after-spacing gets a default margin-top
+            using (MemoryStream ms = new MemoryStream())
+            {
+                using (WordprocessingDocument wDoc = WordprocessingDocument.Create(ms, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
+                {
+                    var mainPart = wDoc.AddMainDocumentPart();
+
+                    var stylesPart = mainPart.AddNewPart<StyleDefinitionsPart>();
+                    stylesPart.Styles = new Styles(
+                        new DocDefaults(
+                            new RunPropertiesDefault(
+                                new RunPropertiesBaseStyle(
+                                    new RunFonts { Ascii = "Times New Roman" },
+                                    new FontSize { Val = "24" }))));
+                    stylesPart.Styles.Save();
+
+                    var settingsPart = mainPart.AddNewPart<DocumentSettingsPart>();
+                    settingsPart.Settings = new Settings();
+                    settingsPart.Settings.Save();
+
+                    // Create a paragraph followed by a table, with no explicit spacing
+                    mainPart.Document = new Document(
+                        new Body(
+                            new Paragraph(
+                                new Run(new Text("Text before table"))),
+                            new DocumentFormat.OpenXml.Wordprocessing.Table(
+                                new TableProperties(
+                                    new TableWidth { Width = "5000", Type = TableWidthUnitValues.Pct }),
+                                new DocumentFormat.OpenXml.Wordprocessing.TableRow(
+                                    new DocumentFormat.OpenXml.Wordprocessing.TableCell(
+                                        new TableCellProperties(
+                                            new TableCellWidth { Width = "5000", Type = TableWidthUnitValues.Pct }),
+                                        new Paragraph(
+                                            new Run(new Text("Table cell"))))))));
+
+                    mainPart.Document.Save();
+
+                    var settings = new WmlToHtmlConverterSettings
+                    {
+                        PageTitle = "Table Spacing Test"
+                    };
+
+                    var html = WmlToHtmlConverter.ConvertToHtml(wDoc, settings);
+                    var htmlString = html.ToString();
+
+                    // Table should have a margin-top for visual separation
+                    Assert.Contains("margin-top: 7.5pt", htmlString);
+                    Assert.Contains("Text before table", htmlString);
+                    Assert.Contains("Table cell", htmlString);
+                }
+            }
+        }
+
+        [Fact]
+        public void HC057_TableWithParagraphSpacing_NoExtraMargin()
+        {
+            // Test that when the preceding paragraph has after-spacing, no extra margin-top is added
+            using (MemoryStream ms = new MemoryStream())
+            {
+                using (WordprocessingDocument wDoc = WordprocessingDocument.Create(ms, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
+                {
+                    var mainPart = wDoc.AddMainDocumentPart();
+
+                    var stylesPart = mainPart.AddNewPart<StyleDefinitionsPart>();
+                    stylesPart.Styles = new Styles(
+                        new DocDefaults(
+                            new ParagraphPropertiesDefault(
+                                new ParagraphPropertiesBaseStyle(
+                                    new SpacingBetweenLines { After = "200" })),
+                            new RunPropertiesDefault(
+                                new RunPropertiesBaseStyle(
+                                    new RunFonts { Ascii = "Times New Roman" },
+                                    new FontSize { Val = "24" }))));
+                    stylesPart.Styles.Save();
+
+                    var settingsPart = mainPart.AddNewPart<DocumentSettingsPart>();
+                    settingsPart.Settings = new Settings();
+                    settingsPart.Settings.Save();
+
+                    // Create a paragraph with after-spacing followed by a table
+                    mainPart.Document = new Document(
+                        new Body(
+                            new Paragraph(
+                                new Run(new Text("Spaced paragraph"))),
+                            new DocumentFormat.OpenXml.Wordprocessing.Table(
+                                new TableProperties(
+                                    new TableWidth { Width = "5000", Type = TableWidthUnitValues.Pct }),
+                                new DocumentFormat.OpenXml.Wordprocessing.TableRow(
+                                    new DocumentFormat.OpenXml.Wordprocessing.TableCell(
+                                        new TableCellProperties(
+                                            new TableCellWidth { Width = "5000", Type = TableWidthUnitValues.Pct }),
+                                        new Paragraph(
+                                            new Run(new Text("Table cell"))))))));
+
+                    mainPart.Document.Save();
+
+                    var settings = new WmlToHtmlConverterSettings
+                    {
+                        PageTitle = "Table Spacing Test"
+                    };
+
+                    var html = WmlToHtmlConverter.ConvertToHtml(wDoc, settings);
+                    var htmlString = html.ToString();
+
+                    // Table should NOT have the default 7.5pt margin-top since paragraph has spacing
+                    Assert.DoesNotContain("margin-top: 7.5pt", htmlString);
+                    Assert.Contains("Spaced paragraph", htmlString);
+                    Assert.Contains("Table cell", htmlString);
+                }
+            }
+        }
+
+        [Fact]
         public void HC042_UnknownSerifFont_GetsSerifFallback()
         {
             // Test that unknown fonts without "sans" or "mono" patterns get serif fallback
