@@ -154,6 +154,8 @@ The core library compiles in two modes controlled by the `WASM_BUILD` MSBuild pr
 
 When touching image/font/color code, check whether your change compiles under `WASM_BUILD` before shipping — the npm build will fail loudly if it doesn't.
 
+**Switching back from a WASM build to the default build:** after `scripts/build-wasm.sh` runs, the cached `Docxodus.dll` in `Docxodus/bin/Debug/net8.0/` is the WASM-mode assembly (no `SkiaSharp`, no `ImageInfo.SaveImage`). The next `dotnet build Docxodus.sln` won't recompile it because nothing changed in `Docxodus/`, but `Docxodus.Tests` links against the stale binary and fails with `error CS1061: 'ImageInfo' does not contain a definition for 'SaveImage'`. Fix: run `dotnet clean Docxodus.sln` once before going back to the non-WASM workflow.
+
 ### Document Wrapper Classes
 
 The library uses in-memory byte array wrappers for documents:
@@ -275,7 +277,7 @@ Tests target: `net8.0`
 
 ### Dependencies
 
-- **DocumentFormat.OpenXml**: 3.2.0 (Open XML SDK)
+- **DocumentFormat.OpenXml**: 3.4.1 (Open XML SDK)
 - **SkiaSharp**: 2.88.9 (cross-platform graphics, replaces System.Drawing)
 
 ### Test Data

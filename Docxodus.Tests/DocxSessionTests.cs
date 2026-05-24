@@ -623,4 +623,91 @@ public class DocxSessionTests
         Assert.True(r.Success, r.Error?.Message);
         Assert.Contains("EDITED: First paragraph.", s.Project().Markdown);
     }
+
+    // ─── Bug-fix regressions (post-PR-131 verification) ──────────────────
+
+    [Fact]
+    public void DS080_StalePrefix_FallsBackToUnidLookup()
+    {
+        // A cached anchor id whose kind-prefix has gone stale (e.g., `p:body:abcd`
+        // after promoting the paragraph to `h:body:abcd` via SetParagraphStyle)
+        // must still resolve via FindAnchor's Unid fallback, as promised by
+        // `docs/architecture/docx_mutation_api.md`.
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var oldId = s.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Kind == "p" && t.Anchor.Scope == "body").Anchor.Id;
+        Assert.StartsWith("p:body:", oldId);
+
+        var promote = s.SetParagraphStyle(oldId, "Heading2");
+        Assert.True(promote.Success, promote.Error?.Message);
+        Assert.Equal("h", promote.Modified[0].Kind);
+        Assert.NotEqual(oldId, promote.Modified[0].Id);
+
+        // Operations using the stale id should still succeed via fallback.
+        Assert.True(s.Exists(oldId), "Exists() must accept stale-prefix id");
+        Assert.NotNull(s.GetAnchorInfo(oldId));
+
+        var r = s.ReplaceText(oldId, "Replaced via stale id.");
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains("Replaced via stale id.", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS081_StalePrefix_UnknownIdStillReturnsAnchorNotFound()
+    {
+        // Sanity guard: the fallback must NOT make every malformed id resolve —
+        // a totally unknown Unid still fails AnchorNotFound.
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var bogus = "p:body:" + new string('0', 32);
+        Assert.False(s.Exists(bogus));
+        var r = s.ReplaceText(bogus, "anything");
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.AnchorNotFound, r.Error!.Code);
+    }
+
+    [Fact]
+    public void DS082_ValidateRawOps_SucceedsWhenNoNewErrors()
+    {
+        // ValidateRawOps must use delta semantics, not "zero errors total" —
+        // every Project() call adds PtOpenXml:Unid attributes which are not in
+        // the OOXML schema and would otherwise trip Sch_UndeclaredAttribute on
+        // every op. Filtering those + counting deltas is what the doc promises.
+        var settings = new DocxSessionSettings { ValidateRawOps = true };
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(), settings);
+        var anchor = s.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Kind == "p").Anchor.Id;
+
+        var ok = """
+            <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:t xml:space="preserve">VALIDATED</w:t></w:r>
+            </w:p>
+            """;
+        var r = s.Raw.ReplaceXml(anchor, ok);
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains("VALIDATED", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS083_ValidateRawOps_RollsBackWhenSchemaInvalid()
+    {
+        // A fragment with an undeclared element in the w: namespace must
+        // increment the validator error count and trigger rollback.
+        var settings = new DocxSessionSettings { ValidateRawOps = true };
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(), settings);
+        var anchor = s.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Kind == "p").Anchor.Id;
+        var before = s.Project().Markdown;
+
+        // A w:jc with an unknown alignment enum value trips
+        // Sch_AttributeValueDataTypeDetailed (Enumeration constraint failed).
+        var bad = """
+            <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr><w:jc w:val="NOT_A_REAL_ALIGNMENT"/></w:pPr>
+            </w:p>
+            """;
+        var r = s.Raw.ReplaceXml(anchor, bad);
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.ValidationFailed, r.Error!.Code);
+        Assert.Equal(before, s.Project().Markdown);
+    }
 }

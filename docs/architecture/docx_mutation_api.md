@@ -60,7 +60,7 @@ An anchor id looks like `{#h:body:7b9f61007f9341c8aa5878ee63ffc874}`. The parts:
 - `scope` — which package part it lives in (`body`, `hdr1`/`hdr2`/…, `ftr1`/…, `fn`, `en`, `cmt`).
 - `unid` — a 32-char hex stable identifier (Docxodus's `PtOpenXml.Unid`).
 
-**The Unid is the identity.** The `kind:scope:` prefix is descriptive metadata and can change across mutations. Promoting a `Normal` paragraph to `Heading2` flips its anchor id from `{#p:body:abcd}` to `{#h:body:abcd}`, but `AnchorTarget.Resolve` walks by Unid alone, so the old full id still resolves. Agents that cache full ids can treat the prefix as stale-friendly; prefer the `Modified` entry returned in each `EditResult` for the current canonical form.
+**The Unid is the identity.** The `kind:scope:` prefix is descriptive metadata and can change across mutations. Promoting a `Normal` paragraph to `Heading2` flips its anchor id from `{#p:body:abcd}` to `{#h:body:abcd}`. The session's lookup helper (`DocxSession.FindAnchor`) does a direct dictionary hit first, then falls back to a Unid-only scan, so a cached id whose prefix has gone stale still resolves. Even so, prefer the `Modified` entry returned in each `EditResult` for the current canonical form — the fallback is cheap insurance, not a long-term substitute for tracking renames.
 
 **Created/Removed/Modified are the contract.** Each mutation returns three anchor lists in its `EditResult`. The lifecycle policy is documented in the [Anchor lifecycle](#anchor-lifecycle) section below — that's the contract the agent's mental model is supposed to track.
 
@@ -76,6 +76,11 @@ This is symmetric by design: anything the projector can emit, the parser can acc
 - For everything OOXML can do that markdown can't (complex tables, math, content controls, drawings) → `session.Raw.*`.
 
 We didn't pick CommonMark or GFM as the input language because the projector's subset is small and well-defined; running a full parser against that subset would import surprise (e.g., GFM tables silently splitting paragraphs, autolinks mis-classifying spans). The hand-rolled parser is ~300 LOC, has no dependencies, and gives us complete control over what gets rejected and why.
+
+Two round-trip quirks worth knowing when you write tests against the markdown output:
+
+- **The projector escapes markdown punctuation in text content.** `-`, `*`, `_`, `` ` ``, `~`, `\`, and other characters that could be parsed as markdown are backslash-escaped (e.g., `RAWSIBLING-INSERTED` projects as `RAWSIBLING\-INSERTED`). Don't write literal `Contains(...)` assertions over hyphenated tokens; either strip backslashes from the projection or use tokens without markdown-significant characters.
+- **`InsertParagraph` with a bulleted markdown payload does not inherit list numbering.** A payload like `- item one` parses as a `BulletItem` block and the created anchor has kind `li`, but the inserted paragraph has no `w:numPr`, so Word renders it as a plain paragraph (and `SetListLevel` will return `AnchorWrongKind` because there is no numbering to adjust). To get a real bulleted item in v1, use `Raw.InsertXml` with a fragment derived from `Raw.GetXml(existingListItemAnchor)` so the `w:numPr` and numbering id come along for free. A first-class numbering-inheritance path is on the v2 list (see Known limits).
 
 ## Anchor lifecycle
 
@@ -153,7 +158,7 @@ What am I editing?
 
 `session.Raw` exposes three operations: `GetXml(anchorId)` returns the element's OOXML as a string (useful as a template), `InsertXml(anchor, position, xml)` inserts a sibling fragment, `ReplaceXml(anchor, xml)` swaps the element for a fragment. Newly-inserted elements automatically get Unids and become addressable on the next projection.
 
-The validation pipeline is short-circuit ordered: well-formedness (`MalformedXml`), namespace whitelist check (`DisallowedNamespace` — only `w:`, `m:` for math, `wp:`/`a:` for drawing, `r:`, and our own PtOpenXml namespace are allowed), structural slot check (`IncompatibleElementType`). Setting `Settings.ValidateRawOps = true` additionally runs `OpenXmlValidator` on the affected part post-apply and rolls back via the snapshot if validation errors increase — slower but bulletproof for untrusted agent input.
+The validation pipeline is short-circuit ordered: well-formedness (`MalformedXml`), namespace whitelist check (`DisallowedNamespace` — only `w:`, `m:` for math, `wp:`/`a:` for drawing, `r:`, and our own PtOpenXml namespace are allowed), structural slot check (`IncompatibleElementType`). Setting `Settings.ValidateRawOps = true` additionally runs `OpenXmlValidator` before and after the op and rolls back via the snapshot if the post-op error count is greater than the pre-op count. Pre-existing schema issues in the input document are tolerated (the validator is only used to detect deltas, not to gate the document overall), and the projector's internal `PtOpenXml:Unid` attributes are filtered out before counting since they are not in the OOXML schema by design. Slower than the default path but bulletproof for untrusted agent input.
 
 **The round-trip recipe.** This is the safe pattern for raw mutations the agent should always prefer over authoring XML from scratch:
 

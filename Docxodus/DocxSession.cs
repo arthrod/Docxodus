@@ -122,20 +122,44 @@ public sealed class DocxSession : IDisposable
             WmlToMarkdownConverter.Convert(_doc!, _settings.ProjectionSettings);
     }
 
+    /// <summary>
+    /// Looks up an anchor id with a fallback to Unid-only resolution. The dictionary
+    /// is keyed by full <c>kind:scope:unid</c> id, so when a mutation flips the kind
+    /// prefix (e.g., <c>p:body:abcd</c> → <c>h:body:abcd</c> after promoting to a
+    /// heading), a cached old id would otherwise miss. This helper trails through
+    /// to a Unid scan, so agents that hold cached ids keep working — matching the
+    /// promise in <c>docs/architecture/docx_mutation_api.md</c>.
+    /// </summary>
+    internal AnchorTarget? FindAnchor(string? anchorId)
+    {
+        if (anchorId is null) return null;
+        var index = Project().AnchorIndex;
+        if (index.TryGetValue(anchorId, out var direct)) return direct;
+        int lastColon = anchorId.LastIndexOf(':');
+        if (lastColon <= 0 || lastColon == anchorId.Length - 1) return null;
+        var unid = anchorId.Substring(lastColon + 1);
+        foreach (var v in index.Values)
+        {
+            if (v.Unid == unid) return v;
+        }
+        return null;
+    }
+
     public bool Exists(string anchorId)
     {
         ThrowIfDisposed();
-        return anchorId is not null && Project().AnchorIndex.ContainsKey(anchorId);
+        return FindAnchor(anchorId) is not null;
     }
 
     public AnchorInfo? GetAnchorInfo(string anchorId)
     {
         ThrowIfDisposed();
-        if (anchorId is null || !Project().AnchorIndex.TryGetValue(anchorId, out var target)) return null;
+        var target = FindAnchor(anchorId);
+        if (target is null) return null;
 
         var element = target.Resolve(_doc!);
         var preview = element is null ? "" : ElementTextPreview(element);
-        return new AnchorInfo(anchorId, target.Anchor.Kind, target.Anchor.Scope, preview);
+        return new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, preview);
     }
 
     public byte[] Save()
@@ -152,8 +176,8 @@ public sealed class DocxSession : IDisposable
     public EditResult ReplaceText(string anchorId, string markdownPayload)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        if (anchorId is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "null anchor");
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
         if (target.Anchor.Kind is not ("p" or "h" or "li"))
             return EditResult.Fail(EditErrorCode.AnchorWrongKind,
@@ -199,7 +223,8 @@ public sealed class DocxSession : IDisposable
     public EditResult DeleteBlock(string anchorId)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
         if (target.Anchor.Kind is not ("p" or "h" or "li" or "tbl"))
             return EditResult.Fail(EditErrorCode.AnchorWrongKind,
@@ -259,7 +284,8 @@ public sealed class DocxSession : IDisposable
     public EditResult InsertParagraph(string anchorId, Position pos, string markdownPayload)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
 
         var parsed = Internal.MarkdownPayloadParser.Parse(markdownPayload);
@@ -318,7 +344,8 @@ public sealed class DocxSession : IDisposable
     public EditResult SplitParagraph(string anchorId, int characterOffset)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
         if (target.Anchor.Kind is not ("p" or "h" or "li"))
             return EditResult.Fail(EditErrorCode.AnchorWrongKind, "SplitParagraph requires a paragraph anchor", anchorId);
@@ -382,10 +409,11 @@ public sealed class DocxSession : IDisposable
     public EditResult MergeParagraphs(string firstAnchorId, string secondAnchorId)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        var idx = Project().AnchorIndex;
-        if (!idx.TryGetValue(firstAnchorId, out var firstTarget))
+        var firstTarget = FindAnchor(firstAnchorId);
+        if (firstTarget is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, "first anchor not found", firstAnchorId);
-        if (!idx.TryGetValue(secondAnchorId, out var secondTarget))
+        var secondTarget = FindAnchor(secondAnchorId);
+        if (secondTarget is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, "second anchor not found", secondAnchorId);
 
         var firstEl = firstTarget.Resolve(_doc!);
@@ -440,7 +468,8 @@ public sealed class DocxSession : IDisposable
     internal string RawGetXmlInternal(string anchorId)
     {
         ThrowIfDisposed();
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             throw new ArgumentException($"anchor not found: {anchorId}");
         var element = target.Resolve(_doc!);
         return element?.ToString() ?? "";
@@ -449,7 +478,8 @@ public sealed class DocxSession : IDisposable
     internal EditResult RawInsertXmlInternal(string anchorId, Position pos, string xml)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
 
         var (parsedXml, err) = ParseRawXml(xml);
@@ -459,6 +489,7 @@ public sealed class DocxSession : IDisposable
         var element = target.Resolve(_doc!);
         if (element is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", anchorId);
 
+        int baselineErrors = _settings.ValidateRawOps ? CountRealValidationErrors() : 0;
         _history.RecordPreOp(TakeSnapshot());
         try
         {
@@ -466,7 +497,7 @@ public sealed class DocxSession : IDisposable
             if (pos == Position.Before) element.AddBeforeSelf(parsedXml);
             else element.AddAfterSelf(parsedXml);
 
-            if (_settings.ValidateRawOps && !RunOpenXmlValidator())
+            if (_settings.ValidateRawOps && CountRealValidationErrors() > baselineErrors)
             {
                 var preOp = _history.PopForUndo();
                 if (preOp.ok) RestoreSnapshot(preOp.snapshot);
@@ -501,7 +532,8 @@ public sealed class DocxSession : IDisposable
     internal EditResult RawReplaceXmlInternal(string anchorId, string xml)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
 
         var (parsedXml, err) = ParseRawXml(xml);
@@ -511,13 +543,14 @@ public sealed class DocxSession : IDisposable
         var element = target.Resolve(_doc!);
         if (element is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", anchorId);
 
+        int baselineErrors = _settings.ValidateRawOps ? CountRealValidationErrors() : 0;
         _history.RecordPreOp(TakeSnapshot());
         try
         {
             UnidHelper.AssignToSelfAndDescendants(parsedXml);
             element.ReplaceWith(parsedXml);
 
-            if (_settings.ValidateRawOps && !RunOpenXmlValidator())
+            if (_settings.ValidateRawOps && CountRealValidationErrors() > baselineErrors)
             {
                 var preOp = _history.PopForUndo();
                 if (preOp.ok) RestoreSnapshot(preOp.snapshot);
@@ -579,10 +612,21 @@ public sealed class DocxSession : IDisposable
         }
     }
 
-    private bool RunOpenXmlValidator()
+    // PtOpenXml:Unid is an internal-only attribute added by the projector for anchor
+    // addressing; it is not in the OOXML schema, so the validator will emit
+    // Sch_UndeclaredAttribute for every occurrence. Filter those out before counting.
+    //
+    // Mutations operate directly on the part's in-memory XDocument; the validator
+    // reads the typed OOXML object model, which is hydrated from the part stream.
+    // Flush the XDocument back to the stream first so the validator sees the
+    // current state instead of the original document.
+    private int CountRealValidationErrors()
     {
+        _doc!.MainDocumentPart!.PutXDocument();
         var v = new DocumentFormat.OpenXml.Validation.OpenXmlValidator();
-        return !v.Validate(_doc!).Any();
+        return v.Validate(_doc!)
+            .Count(e => !(e.Description ?? string.Empty)
+                .Contains("http://powertools.codeplex.com/2011", StringComparison.Ordinal));
     }
 
     // ─── Tier D: table cell content ──────────────────────────────────────
@@ -590,7 +634,8 @@ public sealed class DocxSession : IDisposable
     public EditResult ReplaceCellContent(string cellAnchorId, string markdownPayload)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        if (!Project().AnchorIndex.TryGetValue(cellAnchorId, out var target))
+        var target = FindAnchor(cellAnchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, "anchor not found", cellAnchorId);
         if (target.Anchor.Kind != "tc")
             return EditResult.Fail(EditErrorCode.AnchorWrongKind, "ReplaceCellContent requires a cell anchor", cellAnchorId);
@@ -640,7 +685,8 @@ public sealed class DocxSession : IDisposable
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
         if (op is null) return EditResult.Fail(EditErrorCode.MalformedMarkdown, "null format op", anchorId);
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, "anchor not found", anchorId);
         if (target.Anchor.Kind is not ("p" or "h" or "li"))
             return EditResult.Fail(EditErrorCode.AnchorWrongKind, "ApplyFormat requires a paragraph anchor", anchorId);
@@ -691,7 +737,8 @@ public sealed class DocxSession : IDisposable
     public EditResult SetParagraphStyle(string anchorId, string styleId)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, "anchor not found", anchorId);
         if (target.Anchor.Kind is not ("p" or "h" or "li"))
             return EditResult.Fail(EditErrorCode.AnchorWrongKind, "SetParagraphStyle requires a paragraph anchor", anchorId);
@@ -737,7 +784,8 @@ public sealed class DocxSession : IDisposable
     public EditResult SetListLevel(string anchorId, int levelDelta)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, "anchor not found", anchorId);
         if (target.Anchor.Kind != "li")
             return EditResult.Fail(EditErrorCode.AnchorWrongKind, "SetListLevel requires a list-item anchor", anchorId);
@@ -770,7 +818,8 @@ public sealed class DocxSession : IDisposable
     public EditResult RemoveListMembership(string anchorId)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
-        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+        var target = FindAnchor(anchorId);
+        if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, "anchor not found", anchorId);
         if (target.Anchor.Kind != "li")
             return EditResult.Fail(EditErrorCode.AnchorWrongKind, "RemoveListMembership requires list-item anchor", anchorId);
