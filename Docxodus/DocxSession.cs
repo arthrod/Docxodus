@@ -100,7 +100,7 @@ public sealed class DocxSession : IDisposable
     private MarkdownProjection? _cachedProjection;
     private bool _disposed;
     private int _revisionCounter = 1000;
-    // RawDocxOps field lands in Phase 7.
+    private RawDocxOps? _raw;
 
     public DocxSession(byte[] docxBytes, DocxSessionSettings? settings = null)
     {
@@ -421,6 +421,168 @@ public sealed class DocxSession : IDisposable
             _ = _history.PopForUndo();
             return EditResult.Fail(EditErrorCode.InternalError, ex.Message);
         }
+    }
+
+    // ─── Raw escape hatch ────────────────────────────────────────────────
+
+    public RawDocxOps Raw => _raw ??= new RawDocxOps(this);
+
+    private static readonly HashSet<string> AllowedXmlNamespaces = new()
+    {
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",        // w:
+        "http://schemas.openxmlformats.org/officeDocument/2006/math",          // m:
+        "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing", // wp:
+        "http://schemas.openxmlformats.org/drawingml/2006/main",               // a:
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships", // r:
+        "http://powertools.codeplex.com/2011",                                 // PtOpenXml (Unid)
+    };
+
+    internal string RawGetXmlInternal(string anchorId)
+    {
+        ThrowIfDisposed();
+        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+            throw new ArgumentException($"anchor not found: {anchorId}");
+        var element = target.Resolve(_doc!);
+        return element?.ToString() ?? "";
+    }
+
+    internal EditResult RawInsertXmlInternal(string anchorId, Position pos, string xml)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
+
+        var (parsedXml, err) = ParseRawXml(xml);
+        if (parsedXml is null)
+            return new EditResult { Success = false, Error = err! with { AnchorId = anchorId } };
+
+        var element = target.Resolve(_doc!);
+        if (element is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", anchorId);
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            UnidHelper.AssignToAllElements(parsedXml);
+            if (pos == Position.Before) element.AddBeforeSelf(parsedXml);
+            else element.AddAfterSelf(parsedXml);
+
+            if (_settings.ValidateRawOps && !RunOpenXmlValidator())
+            {
+                var preOp = _history.PopForUndo();
+                if (preOp.ok) RestoreSnapshot(preOp.snapshot);
+                return EditResult.Fail(EditErrorCode.ValidationFailed, "OpenXmlValidator found new errors", anchorId);
+            }
+
+            InvalidateProjectionCache();
+            var freshIndex = Project().AnchorIndex;
+            var created = new List<Anchor>();
+            foreach (var unid in CollectUnids(parsedXml))
+            {
+                var hit = freshIndex.Values.FirstOrDefault(t => t.Unid == unid);
+                if (hit is not null) created.Add(hit.Anchor);
+            }
+
+            return new EditResult
+            {
+                Success = true,
+                Created = created,
+                Patch = ProjectScope(target),
+            };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            var preOp = _history.PopForUndo();
+            if (preOp.ok) RestoreSnapshot(preOp.snapshot);
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId);
+        }
+    }
+
+    internal EditResult RawReplaceXmlInternal(string anchorId, string xml)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (!Project().AnchorIndex.TryGetValue(anchorId, out var target))
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
+
+        var (parsedXml, err) = ParseRawXml(xml);
+        if (parsedXml is null)
+            return new EditResult { Success = false, Error = err! with { AnchorId = anchorId } };
+
+        var element = target.Resolve(_doc!);
+        if (element is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", anchorId);
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            UnidHelper.AssignToAllElements(parsedXml);
+            element.ReplaceWith(parsedXml);
+
+            if (_settings.ValidateRawOps && !RunOpenXmlValidator())
+            {
+                var preOp = _history.PopForUndo();
+                if (preOp.ok) RestoreSnapshot(preOp.snapshot);
+                return EditResult.Fail(EditErrorCode.ValidationFailed, "OpenXmlValidator found new errors", anchorId);
+            }
+
+            InvalidateProjectionCache();
+            var freshIndex = Project().AnchorIndex;
+            var created = new List<Anchor>();
+            foreach (var unid in CollectUnids(parsedXml))
+            {
+                var hit = freshIndex.Values.FirstOrDefault(t => t.Unid == unid);
+                if (hit is not null) created.Add(hit.Anchor);
+            }
+
+            return new EditResult
+            {
+                Success = true,
+                Removed = new[] { target.Anchor },
+                Created = created,
+                Patch = ProjectScope(target),
+            };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            var preOp = _history.PopForUndo();
+            if (preOp.ok) RestoreSnapshot(preOp.snapshot);
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId);
+        }
+    }
+
+    private static (XElement? parsed, EditError? err) ParseRawXml(string xml)
+    {
+        try
+        {
+            var x = XElement.Parse(xml);
+            foreach (var el in x.DescendantsAndSelf())
+            {
+                var ns = el.Name.NamespaceName;
+                if (!string.IsNullOrEmpty(ns) && !AllowedXmlNamespaces.Contains(ns))
+                    return (null, new EditError(EditErrorCode.DisallowedNamespace,
+                        $"disallowed namespace: {ns}"));
+            }
+            return (x, null);
+        }
+        catch (System.Xml.XmlException ex)
+        {
+            return (null, new EditError(EditErrorCode.MalformedXml, ex.Message));
+        }
+    }
+
+    private static IEnumerable<string> CollectUnids(XElement root)
+    {
+        foreach (var el in root.DescendantsAndSelf())
+        {
+            var unid = (string?)el.Attribute(PtOpenXml.Unid);
+            if (unid is not null) yield return unid;
+        }
+    }
+
+    private bool RunOpenXmlValidator()
+    {
+        var v = new DocumentFormat.OpenXml.Validation.OpenXmlValidator();
+        return !v.Validate(_doc!).Any();
     }
 
     // ─── Tier D: table cell content ──────────────────────────────────────

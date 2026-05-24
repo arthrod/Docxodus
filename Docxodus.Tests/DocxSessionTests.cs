@@ -554,4 +554,73 @@ public class DocxSessionTests
         Assert.Empty(r.Removed);
         Assert.Contains(r.Modified, a => a.Id == anchor);
     }
+
+    // ─── Phase 7: raw escape hatch ───────────────────────────────────────
+
+    [Fact]
+    public void DS070_RawGetXml()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        var xml = s.Raw.GetXml(anchor);
+        Assert.Contains("First paragraph.", xml);
+        Assert.Contains("w:p", xml);
+    }
+
+    [Fact]
+    public void DS071_RawInsertXml()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        var newP = "<w:p xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:r><w:t>Raw inserted.</w:t></w:r></w:p>";
+        var r = s.Raw.InsertXml(anchor, Position.After, newP);
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Single(r.Created);
+        Assert.Contains("Raw inserted.", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS072_RawInsertXml_MalformedRejected()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        var r = s.Raw.InsertXml(anchor, Position.After, "<not-closed");
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.MalformedXml, r.Error!.Code);
+    }
+
+    [Fact]
+    public void DS073_RawInsertXml_DisallowedNs()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        var r = s.Raw.InsertXml(anchor, Position.After, "<foo xmlns=\"http://evil/\"/>");
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.DisallowedNamespace, r.Error!.Code);
+    }
+
+    [Fact]
+    public void DS074_RawReplaceXml()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        var newP = "<w:p xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:r><w:t>Raw replacement.</w:t></w:r></w:p>";
+        var r = s.Raw.ReplaceXml(anchor, newP);
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains("Raw replacement.", s.Project().Markdown);
+        Assert.Contains(r.Removed, a => a.Id == anchor);
+    }
+
+    [Fact]
+    public void DS075_Raw_GetThenReplaceRoundtrip()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        var xml = s.Raw.GetXml(anchor);
+        // Naive mutation: prefix the text with "EDITED: "
+        var mutated = xml.Replace("First paragraph.", "EDITED: First paragraph.");
+        var r = s.Raw.ReplaceXml(anchor, mutated);
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains("EDITED: First paragraph.", s.Project().Markdown);
+    }
 }
