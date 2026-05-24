@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.5.4] - 2026-05-24
+
+### Fixed
+- **NullReferenceException in `FindIndexOfNextParaMark` with body-level bookmarks (#124, thanks @papyria)** — `FindIndexOfNextParaMark` assumed all elements in the comparison-unit array were `ComparisonUnitWord`, but documents with `bookmarkStart`/`bookmarkEnd` as direct children of `w:body` produce other `ComparisonUnit` types. Now handles any `ComparisonUnit` with `Contents` (including `ComparisonUnitGroup`) and adds a null guard for the `LastOrDefault()` call.
+
+### Added
+- **`WmlToMarkdownConverter` scaffold (#127)** — Public surface for an anchor-addressed markdown projection of Word documents. `Convert(WmlDocument, WmlToMarkdownConverterSettings)` / `Convert(WordprocessingDocument, ...)` return a `MarkdownProjection` (markdown text + anchor index) with anchors of the form `{#kind:scope:unid}` derived from Docxodus' existing Unid system. **Scaffold only** — projection logic ships in subsequent phases. See `docs/architecture/markdown_projection.md` for the spec.
+
+### Maintenance
+- **Bump `Microsoft.NET.Test.Sdk` from 18.4.0 to 18.5.1 (#125)**
+
 ## [Unreleased] - .NET 8 / Open XML SDK 3.x Migration
 
 ### Fixed (npm)
