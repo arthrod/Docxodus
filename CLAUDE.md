@@ -240,6 +240,11 @@ See `docs/architecture/comment_rendering.md` for detailed comment rendering docu
 - Structural annotations (sections, paragraphs, tables) with relationships
 - See `docs/architecture/opencontracts_export.md` for detailed documentation
 
+**WmlToMarkdownConverter.cs** - Anchor-addressed markdown projection of a Word document. **Scaffold only** — public surface is fixed, projection logic ships in phases. A stable text view of a DOCX with stable IDs, suitable for LLM editing pipelines, structured search indexers, and diff/review UIs:
+- `Convert(WmlDocument, WmlToMarkdownConverterSettings)` / `Convert(WordprocessingDocument, ...)` - returns `MarkdownProjection` (markdown text + anchor index)
+- Anchors have the form `{#kind:scope:unid}` (e.g. `{#p:body:a1b2c3d4}`), derived from Docxodus' existing Unid system
+- See `docs/architecture/markdown_projection.md` for the projection spec and implementation phases
+
 **ExternalAnnotationProjector.cs** - Incremental annotation overlay API (Issue #106). Decouples annotation projection from DOCX conversion for dramatically better performance when annotations change:
 - `ProjectAnnotationsOntoHtml(html, set, settings)` - Project a full annotation set onto pre-converted HTML (~56ms vs ~892ms for full re-conversion, 15.9x faster)
 - `AddAnnotationToHtml(html, annotation, label, settings)` - Add a single annotation (~0.3ms, 2972x faster than full re-conversion)
@@ -291,6 +296,7 @@ Detailed design docs for the major subsystems live in `docs/architecture/`. Read
 - `comparison_engine.md`, `wml_comparer_gaps.md`, `native_move_markup.md`, `move_detection_implementation_plan.md`, `format_change_detection.md`, `tracked_changes.md` — WmlComparer internals
 - `docx_converter.md`, `comment_rendering.md`, `paginated_headers_footers.md`, `custom_annotations.md`, `unsupported_content_placeholders.md`, `wml_to_html_converter_gaps.md` — WmlToHtmlConverter internals
 - `opencontracts_export.md` — OpenContractExporter format
+- `markdown_projection.md` — WmlToMarkdownConverter design (scaffold; spec for the in-progress implementation)
 - `skiasharp-removal-plan.md`, `wasm-optimization-plan.md`, `ui_responsiveness.md`, `profiling-results.md` — WASM/browser work
 
 ## OOXML Corner Cases
