@@ -214,6 +214,90 @@ public enum TrackedChangeMode { Accept, RenderInline, StripDeletions }
 
 Each phase ships with tests in `Docxodus.Tests/WmlToMarkdownConverterTests.cs` (test prefix `MD###`).
 
+## Getting Started (For Implementers)
+
+### Worked Example
+
+Given a DOCX whose body contains, in order:
+
+1. A paragraph styled `Heading1` with text "Indemnification"
+2. A paragraph (Normal style) with text "The Provider shall indemnify..."
+3. A two-item bulleted list with text "First obligation" / "Second obligation"
+
+The default-settings projection should produce:
+
+```markdown
+# Document
+
+{#h:body:a1b2c3d4} # Indemnification
+
+{#p:body:e5f6a7b8} The Provider shall indemnify...
+
+{#li:body:c9d0e1f2} - First obligation
+{#li:body:3a4b5c6d} - Second obligation
+```
+
+Notes on the example:
+- Anchor token sits on its own line preceding the block, separated by a single space from the markdown that follows.
+- The `# Document` header that opens the body scope is fixed (see Multipart Namespacing); no anchor — it's a scope marker, not addressable content.
+- Unid values are 32-char hex (shortened above for readability); they come from `Guid.NewGuid().ToString().Replace("-", "")`.
+- A blank line separates blocks. Lists are not separated internally.
+
+Phase 2's first test (`MD001_HeadingAndParagraph`) should round-trip a fixture matching this shape and assert the markdown is byte-identical to the expected string above (with the actual Unids substituted via a helper that reads them off the source DOCX after assignment).
+
+### Phase 1 in Detail
+
+**Goal:** every block-level element in every part of the package has a stable Unid, and `MarkdownProjection.AnchorIndex` lets you walk back from any anchor to its `XElement`.
+
+**Reuse, don't reinvent.**
+
+- Unid attribute name: `PtOpenXml.Unid` (defined in `Docxodus/PtOpenXmlUtil.cs`).
+- The existing Unid-assignment logic lives in two places, neither of which is general-purpose:
+  - `WmlComparer.AssignUnidToAllElements(XElement)` — private to `WmlComparer.cs:8655`. Walks descendants, adds a Unid where missing. Also handles the special `w:footnote`/`w:endnote` case where the container itself needs a Unid.
+  - `WmlToXmlUtil.AssignUnidToBlc` — block-level only, on a `WmlDocument` or `WordprocessingDocument`.
+- For Phase 1, **extract the `WmlComparer` helper into a shared internal utility** (e.g. `UnidHelper.AssignToAllBlockElements`) and call it from both `WmlComparer` and the new converter. Don't duplicate.
+
+**First deliverable (mergeable on its own):**
+
+1. Extract the Unid helper.
+2. Implement `WmlToMarkdownConverter.Convert(...)` such that it returns a `MarkdownProjection` with `Markdown = ""` and a populated `AnchorIndex` for every block-level element (`w:p`, `w:tbl`, `w:tr`, `w:tc`) across body, headers, footers, footnotes, endnotes, and comments.
+3. Implement `AnchorTarget.Resolve(WordprocessingDocument)` — given the anchor's `PartUri` and `Unid`, walk that part's XML to find the matching element.
+4. Tests:
+   - `MD001_AnchorIndexIsExhaustive` — every `w:p`/`w:tbl` in a fixture is reachable by some anchor.
+   - `MD002_AnchorsAreStable` — projecting twice gives the same anchor ids.
+   - `MD003_AnchorsResolve` — every anchor in the index round-trips through `Resolve` back to a non-null `XElement` whose `PtOpenXml.Unid` attribute matches.
+   - `MD004_AnchorsSurviveRoundTrip` — load → project → save (via `OpenXmlMemoryStreamDocument`) → re-load → re-project produces the same anchor ids for unchanged elements. **This is the doc's open question #1; if it fails, the converter must persist Unids back to the document before returning.**
+
+### Structural Template to Mirror
+
+The new converter's file organization should follow `Docxodus/WmlToHtmlConverter.cs`:
+
+- One public static class with `Convert` entry points.
+- Per-element handler methods (`WmlToHtmlConverter.ProcessParagraph` at line 4279 is the model — see the dispatch in `ConvertToHtmlTransform` around line 2493).
+- Recursive descent driven by element name; each handler returns the rendered fragment (string for markdown; for HTML it returns `object`/`XElement`).
+- Settings passed through every level — don't capture in fields on the static class.
+
+Don't copy `WmlToHtmlConverter`'s ~6000-line bulk; copy its *shape*. The markdown converter will be much smaller because it intentionally drops most styling.
+
+### WASM / npm Propagation (Phase 8)
+
+When Phase 7 is merged, follow the existing pattern from `OpenContractExporter`:
+
+1. Add `[JSExport]`-decorated methods to `wasm/DocxodusWasm/DocumentConverter.cs` that take/return JSON-serializable shapes (you can't return `XElement` or `IReadOnlyDictionary` directly — flatten to `MarkdownProjectionDto`).
+2. Add TypeScript types and a wrapper in `npm/src/types.ts` + `npm/src/index.ts`.
+3. Update the `DocxodusWasmExports` interface.
+4. Build with `cd npm && npm run build`, then add Playwright tests under `npm/tests/`.
+
+CLAUDE.md's "Feature Development Workflow" section is the canonical checklist for the cross-layer ripple.
+
+### Performance Budget (Targets, Not Hard Constraints)
+
+- Anchor index for a 100-page DOCX: < 200ms cold.
+- Full projection (Phase 2+): < 1s for a 100-page DOCX, < 5s for 500 pages.
+- Memory: O(document size), no full DOM duplication; reuse the OOXML SDK's `WordprocessingDocument` walk.
+
+If Phase 1 measurements are >2× these numbers, surface in the PR and discuss before adding more functionality.
+
 ## Open Questions
 
 - **Anchor stability across re-serialization.** Today Unids are assigned when needed; we should verify they survive `OpenXmlMemoryStreamDocument` round trips and document the lifecycle. If they don't, the converter must persist them back to the document.
