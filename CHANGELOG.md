@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Full `WmlToMarkdownConverter` implementation** — Replaces the v5.5.4 scaffold with the complete anchor-addressed Markdown projection described in `docs/architecture/markdown_projection.md`. Covers:
+  - Paragraphs and headings (Heading 1–6 + Title/Subtitle, with `HeadingLevelOffset`)
+  - Inline runs: bold, italic, code (rStyle/monospace heuristic), strikethrough, hyperlinks (internal + external), Markdown metacharacter escaping
+  - Lists with `ListItemRetriever`-resolved numbering ("1.", "1.2.", "a.", bullet); 2-space indent per level; `ResolveNumbering=false` falls back to "-" markers
+  - Tables: GFM pipe tables when the shape is simple (no `gridSpan>1` / `vMerge` / nested tables / oversized cells); opaque fenced ` ```table` blocks otherwise; addressable per-cell via `{#tc:body:UNID}` anchors
+  - Multipart scopes: `# Headers`/`## hdrN`, `# Footers`/`## ftrN`, GFM-style `[^fn-XXXX]`/`[^en-XXXX]` footnote and endnote references and definitions, `# Comments` list with author/date
+  - Tracked-change modes: `Accept` (default), `RenderInline` (`{+ins+}`/`{-del-}`), `StripDeletions`
+  - Per-element anchor index reachable via `MarkdownProjection.AnchorIndex` and `AnchorTarget.Resolve(WordprocessingDocument)`
+  - WASM `[JSExport] ConvertWmlToMarkdown` and npm `convertWmlToMarkdown` wrapper with TypeScript enums for `ProjectionScopes`, `AnchorRenderMode`, `TableRenderMode`, `TrackedChangeMode`
+
+### Changed
+- **`UnidHelper`** — Extracted the `PtOpenXml.Unid` assignment logic out of `WmlComparer` into an internal shared helper so the same code paths are used by both `WmlComparer` and `WmlToMarkdownConverter`. No behavior change.
+
 ## [5.5.4] - 2026-05-24
 
 ### Fixed

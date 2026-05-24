@@ -1,6 +1,6 @@
 # Markdown Projection
 
-> **Status:** Design — scaffold only. The `WmlToMarkdownConverter` class exists in source with the public surface defined, but conversion logic is not yet implemented. This document is the spec the implementation will follow.
+> **Status:** Implemented. All eight phases of the implementation plan landed; tests under `Docxodus.Tests/WmlToMarkdownConverterTests.cs` cover the surface and the WASM/npm bridge ships `convertWmlToMarkdown`. The "Implementation Plan (Phases)" section below documents the staging order that produced today's code.
 
 The markdown projection is a deterministic, **anchor-addressed** rendering of a DOCX as Markdown. It is a sibling to `WmlToHtmlConverter` and `OpenContractExporter` in the converter family, intended as a substrate for tooling that wants to operate on Word documents the way it would operate on source files — search, splice, diff, address by ID. Use cases include LLM-driven editing pipelines, structured search indexers, and diff/review UIs that need a text view richer than `WmlToHtmlConverter` strips down to.
 
