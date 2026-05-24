@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`DocxSession` — stateful in-memory DOCX mutation API** — The write-side counterpart to `WmlToMarkdownConverter` for agentic editing pipelines. Spec at `docs/architecture/docx_mutation_api.md`. Mutations are keyed by markdown-projection anchor ids; every method returns a typed `EditResult` envelope (no exceptions across the API boundary). Surface:
+  - Lifecycle: `new DocxSession(bytes, settings?)`, `Project()`, `Save()`, `Exists()`, `GetAnchorInfo()`, `Undo()`/`Redo()`, `Dispose()`
+  - Tier A (text CRUD): `ReplaceText`, `DeleteBlock`
+  - Tier B (structural): `InsertParagraph`, `SplitParagraph`, `MergeParagraphs`
+  - Tier C (formatting): `ApplyFormat` (whole-paragraph or `CharSpan`), `SetParagraphStyle`, `SetListLevel`, `RemoveListMembership`
+  - Tier D (advanced): `ReplaceCellContent`; `Settings.TrackedChanges = RenderInline` makes mutations land as `w:ins`/`w:del`
+  - Raw OOXML escape hatch: `session.Raw.GetXml/InsertXml/ReplaceXml` for content the markdown subset can't express (complex tables, math, content controls); optional `Settings.ValidateRawOps` runs `OpenXmlValidator` post-apply with rollback on failure
+  - Bounded snapshot undo/redo (default depth 50) over per-part XML clones
+  - Markdown payload parser (`Internal/MarkdownPayloadParser`) accepts the projector-symmetric subset (paragraphs, headings, lists, blockquotes, fenced code; bold/italic/code/strike/hyperlinks, escapes) and rejects out-of-subset syntax with typed `EditErrorCode`s (e.g. `TableInsertNotSupported`, `FootnoteRefNotSupported`)
+  - WASM `[JSExport]` bridge at `wasm/DocxodusWasm/DocxSessionBridge.cs` with explicit session handles (no JS-side GC observability)
+  - npm wrapper at `npm/src/session.ts` exposing `openDocxSession()` and the `DocxSession` class with `Symbol.dispose` support; full type surface in `npm/src/types.ts` (snake_case `EditErrorCode` union, `EditResult`, `AnchorRef`, `CharSpan`, `FormatOp`, `DocxSessionSettings`)
 - **Full `WmlToMarkdownConverter` implementation** — Replaces the v5.5.4 scaffold with the complete anchor-addressed Markdown projection described in `docs/architecture/markdown_projection.md`. Covers:
   - Paragraphs and headings (Heading 1–6 + Title/Subtitle, with `HeadingLevelOffset`)
   - Inline runs: bold, italic, code (rStyle/monospace heuristic), strikethrough, hyperlinks (internal + external), Markdown metacharacter escaping
@@ -16,7 +27,7 @@ All notable changes to this project will be documented in this file.
   - WASM `[JSExport] ConvertWmlToMarkdown` and npm `convertWmlToMarkdown` wrapper with TypeScript enums for `ProjectionScopes`, `AnchorRenderMode`, `TableRenderMode`, `TrackedChangeMode`
 
 ### Changed
-- **`UnidHelper`** — Extracted the `PtOpenXml.Unid` assignment logic out of `WmlComparer` into an internal shared helper so the same code paths are used by both `WmlComparer` and `WmlToMarkdownConverter`. No behavior change.
+- **`UnidHelper`** — Extracted the `PtOpenXml.Unid` assignment logic out of `WmlComparer` into an internal shared helper so the same code paths are used by both `WmlComparer` and `WmlToMarkdownConverter`. Added `AssignToSelfAndDescendants(XElement)` overload that assigns a Unid to the root unconditionally — used by `DocxSession` when inserting freshly-built block elements that need to be addressable on the next projection.
 - **`WmlToMarkdownConverter` projection fidelity** — Surfaced and fixed during smoketesting against the NVCA Model Certificate of Incorporation (a heading-heavy legal document):
   - **Numbered headings keep their auto-number.** A `Heading{1..9}` paragraph that also carries `w:numPr` (the standard legal-doc convention for `FIRST: …` / `1.1 …` clause numbering) now prepends the resolved number to the heading text. Previously the auto-number was silently dropped, leaving headings like `## : The name of this corporation is …`.
   - **`w:sectPr` emits `---` thematic break with anchor.** Section breaks inside a paragraph's `pPr` now produce a `{#sec:scope:UNID}\n---` pair so callers can navigate sections; the trailing top-level `sectPr` (metadata only) is still suppressed in output but registered in `AnchorIndex` for editing.
