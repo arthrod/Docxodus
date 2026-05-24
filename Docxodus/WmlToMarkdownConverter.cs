@@ -5,6 +5,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
 using System.Xml.Linq;
 using DocumentFormat.OpenXml.Packaging;
 
@@ -139,9 +142,27 @@ public sealed class AnchorTarget
     /// </summary>
     public XElement? Resolve(WordprocessingDocument document)
     {
-        throw new NotImplementedException(
-            "Anchor resolution is part of the scaffolded WmlToMarkdownConverter. " +
-            "See docs/architecture/markdown_projection.md for the design.");
+        ArgumentNullException.ThrowIfNull(document);
+
+        var main = document.MainDocumentPart;
+        if (main == null) return null;
+
+        OpenXmlPart? part = null;
+        var targetUri = PartUri;
+        if (main.Uri.ToString() == targetUri) part = main;
+        else
+        {
+            foreach (var h in main.HeaderParts) if (h.Uri.ToString() == targetUri) { part = h; break; }
+            if (part == null)
+                foreach (var f in main.FooterParts) if (f.Uri.ToString() == targetUri) { part = f; break; }
+            if (part == null && main.FootnotesPart?.Uri.ToString() == targetUri) part = main.FootnotesPart;
+            if (part == null && main.EndnotesPart?.Uri.ToString() == targetUri) part = main.EndnotesPart;
+            if (part == null && main.WordprocessingCommentsPart?.Uri.ToString() == targetUri) part = main.WordprocessingCommentsPart;
+        }
+
+        var root = part?.GetXDocument().Root;
+        return root?.DescendantsAndSelf()
+            .FirstOrDefault(e => (string?)e.Attribute(PtOpenXml.Unid) == Unid);
     }
 }
 
@@ -178,29 +199,149 @@ public partial class WmlDocument
 public static class WmlToMarkdownConverter
 {
     /// <summary>
-    /// Convert a <see cref="WmlDocument"/> to its markdown projection.
+    /// Convert a <see cref="WmlDocument"/> to its markdown projection. Persists any newly
+    /// assigned <c>PtOpenXml.Unid</c> attributes back into <paramref name="document"/>'s
+    /// underlying byte array so subsequent <see cref="AnchorTarget.Resolve"/> calls against
+    /// the same bytes succeed.
     /// </summary>
     public static MarkdownProjection Convert(WmlDocument document, WmlToMarkdownConverterSettings settings)
     {
         ArgumentNullException.ThrowIfNull(document);
         ArgumentNullException.ThrowIfNull(settings);
 
-        throw new NotImplementedException(
-            "WmlToMarkdownConverter is scaffolded — projection logic ships in phases. " +
-            "See docs/architecture/markdown_projection.md.");
+        using var stream = new OpenXmlMemoryStreamDocument(document);
+        MarkdownProjection projection;
+        using (var wdoc = stream.GetWordprocessingDocument())
+        {
+            projection = Convert(wdoc, settings);
+        }
+        var modified = stream.GetModifiedWmlDocument();
+        document.DocumentByteArray = modified.DocumentByteArray;
+        return projection;
     }
 
     /// <summary>
     /// Convert an open <see cref="WordprocessingDocument"/> to its markdown projection
-    /// without round-tripping through <see cref="WmlDocument"/>.
+    /// without round-tripping through <see cref="WmlDocument"/>. Mutates the in-memory
+    /// XDocument of each in-scope part to add missing <c>PtOpenXml.Unid</c> attributes and
+    /// persists those mutations via <c>PutXDocument</c>; the caller is responsible for
+    /// saving the package itself.
     /// </summary>
     public static MarkdownProjection Convert(WordprocessingDocument document, WmlToMarkdownConverterSettings settings)
     {
         ArgumentNullException.ThrowIfNull(document);
         ArgumentNullException.ThrowIfNull(settings);
 
-        throw new NotImplementedException(
-            "WmlToMarkdownConverter is scaffolded — projection logic ships in phases. " +
-            "See docs/architecture/markdown_projection.md.");
+        var (index, scopes) = BuildAnchorIndex(document, settings);
+        var markdown = EmitMarkdown(document, settings, scopes);
+        return new MarkdownProjection { Markdown = markdown, AnchorIndex = index };
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 1: anchor index
+    // ------------------------------------------------------------------
+
+    private sealed class ScopeInfo
+    {
+        required public string Name { get; init; }
+        required public OpenXmlPart Part { get; init; }
+        required public XElement Root { get; init; }
+    }
+
+    private static (IReadOnlyDictionary<string, AnchorTarget> Index, List<ScopeInfo> Scopes)
+        BuildAnchorIndex(WordprocessingDocument doc, WmlToMarkdownConverterSettings settings)
+    {
+        var main = doc.MainDocumentPart
+            ?? throw new InvalidOperationException("Document has no MainDocumentPart.");
+
+        var scopes = new List<ScopeInfo>();
+        if (settings.Scopes.HasFlag(ProjectionScopes.Body))
+            scopes.Add(new ScopeInfo { Name = "body", Part = main, Root = main.GetXDocument().Root! });
+        if (settings.Scopes.HasFlag(ProjectionScopes.Headers))
+        {
+            var i = 1;
+            foreach (var hp in main.HeaderParts)
+                scopes.Add(new ScopeInfo { Name = $"hdr{i++}", Part = hp, Root = hp.GetXDocument().Root! });
+        }
+        if (settings.Scopes.HasFlag(ProjectionScopes.Footers))
+        {
+            var i = 1;
+            foreach (var fp in main.FooterParts)
+                scopes.Add(new ScopeInfo { Name = $"ftr{i++}", Part = fp, Root = fp.GetXDocument().Root! });
+        }
+        if (settings.Scopes.HasFlag(ProjectionScopes.Footnotes) && main.FootnotesPart != null)
+            scopes.Add(new ScopeInfo { Name = "fn", Part = main.FootnotesPart, Root = main.FootnotesPart.GetXDocument().Root! });
+        if (settings.Scopes.HasFlag(ProjectionScopes.Endnotes) && main.EndnotesPart != null)
+            scopes.Add(new ScopeInfo { Name = "en", Part = main.EndnotesPart, Root = main.EndnotesPart.GetXDocument().Root! });
+        if (settings.Scopes.HasFlag(ProjectionScopes.Comments) && main.WordprocessingCommentsPart != null)
+            scopes.Add(new ScopeInfo { Name = "cmt", Part = main.WordprocessingCommentsPart, Root = main.WordprocessingCommentsPart.GetXDocument().Root! });
+
+        var index = new Dictionary<string, AnchorTarget>(StringComparer.Ordinal);
+        foreach (var scope in scopes)
+        {
+            UnidHelper.AssignToAllElements(scope.Root);
+            foreach (var el in scope.Root.DescendantsAndSelf())
+            {
+                var kind = KindFor(el);
+                if (kind == null) continue;
+                var unid = (string?)el.Attribute(PtOpenXml.Unid);
+                if (unid == null) continue;
+                var id = $"{kind}:{scope.Name}:{unid}";
+                if (index.ContainsKey(id)) continue;
+                var anchor = new Anchor(id, kind, scope.Name, unid);
+                index[id] = new AnchorTarget
+                {
+                    Anchor = anchor,
+                    PartUri = scope.Part.Uri.ToString(),
+                    Unid = unid,
+                };
+            }
+            scope.Part.PutXDocument();
+        }
+
+        return (index, scopes);
+    }
+
+    /// <summary>
+    /// Classify an element to its anchor <c>kind</c>. Returns <c>null</c> for elements that
+    /// are not addressable by the projection (runs, inline children, formatting properties).
+    /// </summary>
+    private static string? KindFor(XElement el)
+    {
+        var n = el.Name;
+        if (n == W.p) return IsHeading(el) ? "h" : IsListItem(el) ? "li" : "p";
+        if (n == W.tbl) return "tbl";
+        if (n == W.tr) return "tr";
+        if (n == W.tc) return "tc";
+        if (n == W.footnote) return "fn";
+        if (n == W.endnote) return "en";
+        if (n == W.comment) return "cmt";
+        return null;
+    }
+
+    private static bool IsHeading(XElement p)
+    {
+        var styleId = (string?)p.Element(W.pPr)?.Element(W.pStyle)?.Attribute(W.val);
+        if (string.IsNullOrEmpty(styleId)) return false;
+        return styleId.StartsWith("Heading", StringComparison.OrdinalIgnoreCase)
+            || styleId.Equals("Title", StringComparison.OrdinalIgnoreCase)
+            || styleId.Equals("Subtitle", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsListItem(XElement p)
+        => p.Element(W.pPr)?.Element(W.numPr) != null;
+
+    // ------------------------------------------------------------------
+    // Markdown emission. Phase 1 produces an empty string; subsequent phases
+    // append to this. Implemented in this file under Phase 2+ markers below.
+    // ------------------------------------------------------------------
+
+    private static string EmitMarkdown(
+        WordprocessingDocument document,
+        WmlToMarkdownConverterSettings settings,
+        List<ScopeInfo> scopes)
+    {
+        // Placeholder; phases 2-7 fill this in.
+        return string.Empty;
     }
 }
