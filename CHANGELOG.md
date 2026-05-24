@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Full `WmlToMarkdownConverter` implementation** — Replaces the v5.5.4 scaffold with the complete anchor-addressed Markdown projection described in `docs/architecture/markdown_projection.md`. Covers:
+  - Paragraphs and headings (Heading 1–6 + Title/Subtitle, with `HeadingLevelOffset`)
+  - Inline runs: bold, italic, code (rStyle/monospace heuristic), strikethrough, hyperlinks (internal + external), Markdown metacharacter escaping
+  - Lists with `ListItemRetriever`-resolved numbering ("1.", "1.2.", "a.", bullet); 2-space indent per level; `ResolveNumbering=false` falls back to "-" markers
+  - Tables: GFM pipe tables when the shape is simple (no `gridSpan>1` / `vMerge` / nested tables / oversized cells); opaque fenced ` ```table` blocks otherwise; addressable per-cell via `{#tc:body:UNID}` anchors
+  - Multipart scopes: `# Headers`/`## hdrN`, `# Footers`/`## ftrN`, GFM-style `[^fn-XXXX]`/`[^en-XXXX]` footnote and endnote references and definitions, `# Comments` list with author/date
+  - Tracked-change modes: `Accept` (default), `RenderInline` (`{+ins+}`/`{-del-}`), `StripDeletions`
+  - Per-element anchor index reachable via `MarkdownProjection.AnchorIndex` and `AnchorTarget.Resolve(WordprocessingDocument)`
+  - WASM `[JSExport] ConvertWmlToMarkdown` and npm `convertWmlToMarkdown` wrapper with TypeScript enums for `ProjectionScopes`, `AnchorRenderMode`, `TableRenderMode`, `TrackedChangeMode`
+
+### Changed
+- **`UnidHelper`** — Extracted the `PtOpenXml.Unid` assignment logic out of `WmlComparer` into an internal shared helper so the same code paths are used by both `WmlComparer` and `WmlToMarkdownConverter`. No behavior change.
+- **`WmlToMarkdownConverter` projection fidelity** — Surfaced and fixed during smoketesting against the NVCA Model Certificate of Incorporation (a heading-heavy legal document):
+  - **Numbered headings keep their auto-number.** A `Heading{1..9}` paragraph that also carries `w:numPr` (the standard legal-doc convention for `FIRST: …` / `1.1 …` clause numbering) now prepends the resolved number to the heading text. Previously the auto-number was silently dropped, leaving headings like `## : The name of this corporation is …`.
+  - **`w:sectPr` emits `---` thematic break with anchor.** Section breaks inside a paragraph's `pPr` now produce a `{#sec:scope:UNID}\n---` pair so callers can navigate sections; the trailing top-level `sectPr` (metadata only) is still suppressed in output but registered in `AnchorIndex` for editing.
+  - **Inter-scope `---` separators.** A horizontal rule is emitted between adjacent non-empty scope sections (`# Document` / `# Headers` / `# Footers` / `# Footnotes` / `# Endnotes` / `# Comments`) so downstream parsers can split per scope without inspecting heading text.
+  - **Heading7-9 preserve depth.** Word styles `Heading7`/`8`/`9` now emit 7/8/9 hashes instead of being silently clamped to `######`. Strict CommonMark renderers will treat 7+ hashes as literal text; LLM consumers and structured parsers can recover the original outline depth.
+  - **Empty header/footer scopes are suppressed.** DOCX files commonly declare 6+ header/footer parts for first-page/even-page/default variants and leave the unused ones blank; the projection no longer emits `## hdrN` titles for scopes whose only content is whitespace.
+  - **Anchor-only paragraph lines no longer carry a trailing space.** Empty paragraphs (visual spacers in Word) now render as `{#p:body:UNID}\n` instead of `{#p:body:UNID} \n`.
+
 ## [5.5.4] - 2026-05-24
 
 ### Fixed
