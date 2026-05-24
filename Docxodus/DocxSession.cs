@@ -280,7 +280,7 @@ public sealed class DocxSession : IDisposable
             foreach (var block in parsed.Blocks)
             {
                 var p = BuildParagraphFromParsedBlock(block);
-                UnidHelper.AssignToAllElements(p);
+                UnidHelper.AssignToSelfAndDescendants(p);
                 newElements.Add(p);
                 var unid = (string)p.Attribute(PtOpenXml.Unid)!;
                 var kind = ParserBlockKindToAnchorKind(block.Kind);
@@ -354,7 +354,7 @@ public sealed class DocxSession : IDisposable
                 second.Add(run);
             }
 
-            UnidHelper.AssignToAllElements(second);
+            UnidHelper.AssignToSelfAndDescendants(second);
             element.AddAfterSelf(second);
 
             var secondUnid = (string)second.Attribute(PtOpenXml.Unid)!;
@@ -462,7 +462,7 @@ public sealed class DocxSession : IDisposable
         _history.RecordPreOp(TakeSnapshot());
         try
         {
-            UnidHelper.AssignToAllElements(parsedXml);
+            UnidHelper.AssignToSelfAndDescendants(parsedXml);
             if (pos == Position.Before) element.AddBeforeSelf(parsedXml);
             else element.AddAfterSelf(parsedXml);
 
@@ -514,7 +514,7 @@ public sealed class DocxSession : IDisposable
         _history.RecordPreOp(TakeSnapshot());
         try
         {
-            UnidHelper.AssignToAllElements(parsedXml);
+            UnidHelper.AssignToSelfAndDescendants(parsedXml);
             element.ReplaceWith(parsedXml);
 
             if (_settings.ValidateRawOps && !RunOpenXmlValidator())
@@ -610,7 +610,7 @@ public sealed class DocxSession : IDisposable
             foreach (var block in parsed.Blocks)
             {
                 var p = BuildParagraphFromParsedBlock(block);
-                UnidHelper.AssignToAllElements(p);
+                UnidHelper.AssignToSelfAndDescendants(p);
                 cell.Add(p);
                 PromoteHyperlinkRelationships(p);
             }

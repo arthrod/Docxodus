@@ -40,4 +40,21 @@ internal static class UnidHelper
             }
         }
     }
+
+    /// <summary>
+    /// Like <see cref="AssignToAllElements"/> but also assigns to the root element
+    /// itself (regardless of element name). Use this for freshly-built block elements
+    /// inserted into a document by <c>DocxSession</c>, where the caller wants the
+    /// inserted root to be addressable immediately.
+    /// </summary>
+    internal static void AssignToSelfAndDescendants(XElement root)
+    {
+        if (root.Attribute(PtOpenXml.Unid) == null)
+            root.Add(new XAttribute(PtOpenXml.Unid, GenerateUnid()));
+        foreach (var d in root.Descendants())
+        {
+            if (d.Attribute(PtOpenXml.Unid) == null)
+                d.Add(new XAttribute(PtOpenXml.Unid, GenerateUnid()));
+        }
+    }
 }
