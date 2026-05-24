@@ -563,17 +563,34 @@ public static class WmlToMarkdownConverter
     // run's text is escaped before delimiters are wrapped around it.
     // ------------------------------------------------------------------
 
+    private enum Revision { None, Inserted, Deleted }
+
     private readonly record struct RunFormatting(
         bool Bold,
         bool Italic,
         bool Code,
         bool Strike,
-        string? HyperlinkUrl);
+        string? HyperlinkUrl,
+        Revision Revision);
 
     private static void EmitInlineRuns(XElement p, EmitContext ctx)
     {
         foreach (var (fmt, runs) in GroupInlineRuns(p))
         {
+            // Tracked-change mode shapes what we keep before any formatting is applied.
+            switch (ctx.Settings.TrackedChanges)
+            {
+                case TrackedChangeMode.Accept:
+                    if (fmt.Revision == Revision.Deleted) continue;
+                    break;
+                case TrackedChangeMode.StripDeletions:
+                    if (fmt.Revision == Revision.Deleted) continue;
+                    break;
+                case TrackedChangeMode.RenderInline:
+                    // Both ins and del are wrapped in brace markers below.
+                    break;
+            }
+
             if (fmt.HyperlinkUrl != null)
             {
                 ctx.Sb.Append('[');
@@ -583,6 +600,12 @@ public static class WmlToMarkdownConverter
             }
 
             var (open, close) = MarkdownDelimiters(fmt);
+            if (ctx.Settings.TrackedChanges == TrackedChangeMode.RenderInline)
+            {
+                if (fmt.Revision == Revision.Inserted) { open = "{+" + open; close += "+}"; }
+                else if (fmt.Revision == Revision.Deleted) { open = "{-" + open; close += "-}"; }
+            }
+
             ctx.Sb.Append(open);
             foreach (var r in runs) AppendRunText(r, ctx);
             ctx.Sb.Append(close);
@@ -635,15 +658,28 @@ public static class WmlToMarkdownConverter
         {
             if (child.Name == W.r)
             {
-                Add(child, ReadRunFormatting(child, hyperlinkUrl: null));
+                Add(child, ReadRunFormatting(child, hyperlinkUrl: null, revision: Revision.None));
             }
             else if (child.Name == W.hyperlink)
             {
                 var url = ResolveHyperlinkUrl(child);
-                // Hyperlink always forms its own group.
                 Flush();
                 foreach (var r in child.Elements(W.r))
-                    Add(r, ReadRunFormatting(r, hyperlinkUrl: url));
+                    Add(r, ReadRunFormatting(r, hyperlinkUrl: url, revision: Revision.None));
+                Flush();
+            }
+            else if (child.Name == W.ins)
+            {
+                Flush();
+                foreach (var r in child.Descendants(W.r))
+                    Add(r, ReadRunFormatting(r, hyperlinkUrl: null, revision: Revision.Inserted));
+                Flush();
+            }
+            else if (child.Name == W.del)
+            {
+                Flush();
+                foreach (var r in child.Descendants(W.r))
+                    Add(r, ReadRunFormatting(r, hyperlinkUrl: null, revision: Revision.Deleted));
                 Flush();
             }
         }
@@ -651,7 +687,7 @@ public static class WmlToMarkdownConverter
         return groups;
     }
 
-    private static RunFormatting ReadRunFormatting(XElement run, string? hyperlinkUrl)
+    private static RunFormatting ReadRunFormatting(XElement run, string? hyperlinkUrl, Revision revision)
     {
         var rPr = run.Element(W.rPr);
         return new RunFormatting(
@@ -659,7 +695,8 @@ public static class WmlToMarkdownConverter
             Italic: HasToggle(rPr, W.i),
             Code: IsCodeRun(rPr),
             Strike: HasToggle(rPr, W.strike),
-            HyperlinkUrl: hyperlinkUrl);
+            HyperlinkUrl: hyperlinkUrl,
+            Revision: revision);
     }
 
     private static bool HasToggle(XElement? rPr, XName name)
@@ -741,6 +778,8 @@ public static class WmlToMarkdownConverter
         foreach (var node in r.Elements())
         {
             if (node.Name == W.t)
+                ctx.Sb.Append(EscapeMarkdown((string)node));
+            else if (node.Name == W.delText)
                 ctx.Sb.Append(EscapeMarkdown((string)node));
             else if (node.Name == W.br)
                 ctx.Sb.Append("  \n"); // hard line break in markdown

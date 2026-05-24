@@ -583,6 +583,69 @@ public class WmlToMarkdownConverterTests
         return new WmlDocument("test.docx", ms.ToArray());
     }
 
+    // ----- Phase 7: tracked changes -----
+
+    [Fact]
+    public void MD060_AcceptModeKeepsInsKeepsTextDropsDel()
+    {
+        var doc = BuildTrackedChangesDoc(
+            beforeText: "Hello ",
+            insertedText: "brave ",
+            deletedText: "cruel ",
+            afterText: "world");
+        var md = WmlToMarkdownConverter.Convert(doc,
+            new WmlToMarkdownConverterSettings { TrackedChanges = TrackedChangeMode.Accept }).Markdown;
+        Assert.Contains("Hello", md);
+        Assert.Contains("brave", md);
+        Assert.Contains("world", md);
+        Assert.DoesNotContain("cruel", md);
+    }
+
+    [Fact]
+    public void MD061_RenderInlineModeEmitsBraceMarkers()
+    {
+        var doc = BuildTrackedChangesDoc(
+            beforeText: "Hello ",
+            insertedText: "brave",
+            deletedText: "cruel",
+            afterText: " world");
+        var md = WmlToMarkdownConverter.Convert(doc,
+            new WmlToMarkdownConverterSettings { TrackedChanges = TrackedChangeMode.RenderInline }).Markdown;
+        Assert.Contains("{+brave+}", md);
+        Assert.Contains("{-cruel-}", md);
+    }
+
+    [Fact]
+    public void MD062_StripDeletionsKeepsInsDropsDel()
+    {
+        var doc = BuildTrackedChangesDoc(
+            beforeText: "Hello ",
+            insertedText: "brave ",
+            deletedText: "cruel ",
+            afterText: "world");
+        var md = WmlToMarkdownConverter.Convert(doc,
+            new WmlToMarkdownConverterSettings { TrackedChanges = TrackedChangeMode.StripDeletions }).Markdown;
+        Assert.Contains("brave", md);
+        Assert.DoesNotContain("cruel", md);
+        Assert.DoesNotContain("{+", md);
+        Assert.DoesNotContain("{-", md);
+    }
+
+    private static WmlDocument BuildTrackedChangesDoc(string beforeText, string insertedText, string deletedText, string afterText)
+    {
+        return BuildDoc(body =>
+        {
+            var paragraph = new Paragraph(
+                new Run(new Text(beforeText) { Space = SpaceProcessingModeValues.Preserve }),
+                new InsertedRun(new Run(new Text(insertedText) { Space = SpaceProcessingModeValues.Preserve }))
+                    { Id = "1", Author = "tester", Date = DateTime.UtcNow },
+                new DeletedRun(new Run(new DeletedText(deletedText) { Space = SpaceProcessingModeValues.Preserve }))
+                    { Id = "2", Author = "tester", Date = DateTime.UtcNow },
+                new Run(new Text(afterText) { Space = SpaceProcessingModeValues.Preserve }));
+            body.Append(paragraph);
+        });
+    }
+
     private static WmlDocument BuildHyperlinkDoc(string text, string url)
     {
         using var ms = new MemoryStream();
