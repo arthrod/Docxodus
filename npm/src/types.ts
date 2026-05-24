@@ -651,6 +651,112 @@ export interface DocxodusWasmExports {
       renderTrackedChanges: boolean
     ) => string;
   };
+  DocxSessionBridge: {
+    OpenSession: (bytes: Uint8Array, settingsJson: string) => number;
+    CloseSession: (handle: number) => void;
+    Project: (handle: number) => string;
+    ReplaceText: (handle: number, anchor: string, md: string) => string;
+    DeleteBlock: (handle: number, anchor: string) => string;
+    InsertParagraph: (handle: number, anchor: string, pos: string, md: string) => string;
+    SplitParagraph: (handle: number, anchor: string, offset: number) => string;
+    MergeParagraphs: (handle: number, first: string, second: string) => string;
+    ApplyFormat: (handle: number, anchor: string, spanJson: string, opJson: string) => string;
+    SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
+    SetListLevel: (handle: number, anchor: string, delta: number) => string;
+    RemoveListMembership: (handle: number, anchor: string) => string;
+    ReplaceCellContent: (handle: number, anchor: string, md: string) => string;
+    RawGetXml: (handle: number, anchor: string) => string;
+    RawInsertXml: (handle: number, anchor: string, pos: string, xml: string) => string;
+    RawReplaceXml: (handle: number, anchor: string, xml: string) => string;
+    Undo: (handle: number) => boolean;
+    Redo: (handle: number) => boolean;
+    Save: (handle: number) => Uint8Array;
+  };
+}
+
+// ─── DocxSession types ────────────────────────────────────────────────────
+
+export type EditErrorCode =
+  | "anchor_not_found"
+  | "anchor_wrong_kind"
+  | "anchors_not_adjacent"
+  | "session_disposed"
+  | "malformed_markdown"
+  | "unsupported_markdown_syntax"
+  | "table_insert_not_supported"
+  | "footnote_ref_not_supported"
+  | "comment_marker_not_supported"
+  | "image_insert_not_supported"
+  | "anchor_token_in_payload"
+  | "offset_out_of_range"
+  | "invalid_position"
+  | "unknown_style"
+  | "invalid_list_level"
+  | "malformed_xml"
+  | "disallowed_namespace"
+  | "incompatible_element_type"
+  | "validation_failed"
+  | "nothing_to_undo"
+  | "nothing_to_redo"
+  | "internal_error";
+
+export interface AnchorRef {
+  id: string;
+  kind: string;
+  scope: string;
+  unid: string;
+}
+
+export interface EditError {
+  code: EditErrorCode;
+  message: string;
+  anchorId?: string;
+}
+
+export interface MarkdownPatch {
+  scopeAnchorId: string;
+  markdown: string;
+}
+
+export interface EditResult {
+  success: boolean;
+  error?: EditError;
+  created: AnchorRef[];
+  removed: AnchorRef[];
+  modified: AnchorRef[];
+  patch?: MarkdownPatch;
+}
+
+export interface CharSpan {
+  start: number;
+  length: number;
+}
+
+export interface FormatOp {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  code?: boolean;
+  color?: string;
+  runStyle?: string;
+}
+
+export interface DocxSessionSettings {
+  undoDepth?: number;
+  validateRawOps?: boolean;
+  trackedChanges?: "accept" | "render_inline" | "strip_deletions";
+  revisionAuthor?: string;
+}
+
+export interface DocxSessionProjection {
+  markdown: string;
+  anchorIndex: Record<string, {
+    partUri: string;
+    unid: string;
+    kind: string;
+    scope: string;
+  }>;
 }
 
 /**

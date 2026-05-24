@@ -1,0 +1,110 @@
+import { test, expect, Page } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const TEST_FILES_DIR = path.join(__dirname, '../../TestFiles');
+
+function readTestFile(relativePath: string): Uint8Array {
+  return new Uint8Array(fs.readFileSync(path.join(TEST_FILES_DIR, relativePath)));
+}
+
+async function waitForDocxodus(page: Page) {
+  await page.waitForFunction(() => (window as any).DocxodusReady === true, { timeout: 30000 });
+}
+
+test.describe('DocxSession (WASM bridge)', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/test-harness.html');
+    await waitForDocxodus(page);
+  });
+
+  test('open, project, replaceText, save, reopen — round-trip', async ({ page }) => {
+    const bytes = readTestFile('HC001-5DayTourPlanTemplate.docx');
+
+    const result = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const bridge = (window as any).Docxodus.DocxSessionBridge;
+      const handle = bridge.OpenSession(bin, '');
+      try {
+        const proj = JSON.parse(bridge.Project(handle));
+        // Pick first body heading/paragraph anchor by document order
+        const anchorEntries = Object.entries(proj.anchorIndex) as [string, any][];
+        const firstBody = anchorEntries
+          .map(([id, t]) => ({ id, ...t }))
+          .filter(t => t.scope === 'body' && ['p', 'h', 'li'].includes(t.kind))
+          .map(t => ({ t, idx: proj.markdown.indexOf('{#' + t.id + '}') }))
+          .filter(x => x.idx >= 0)
+          .sort((a, b) => a.idx - b.idx)[0];
+
+        const replaceResult = JSON.parse(bridge.ReplaceText(handle, firstBody.t.id, '**JSMARKER** replaced.'));
+
+        const after = JSON.parse(bridge.Project(handle));
+        const saved = bridge.Save(handle);
+
+        return {
+          replaceSuccess: replaceResult.success,
+          replaceError: replaceResult.error,
+          targetAnchor: firstBody.t.id,
+          markdownContainsMarker: after.markdown.includes('JSMARKER'),
+          markdownExcerpt: after.markdown.substring(0, 400),
+          savedBytes: saved.length,
+        };
+      } finally {
+        bridge.CloseSession(handle);
+      }
+    }, Array.from(bytes));
+
+    expect(result.replaceSuccess).toBe(true);
+    expect(result.markdownContainsMarker, `target=${result.targetAnchor}\nexcerpt:\n${result.markdownExcerpt}`).toBe(true);
+    expect(result.savedBytes).toBeGreaterThan(0);
+  });
+
+  test('error envelope: malformed markdown gives typed error code', async ({ page }) => {
+    const bytes = readTestFile('HC001-5DayTourPlanTemplate.docx');
+
+    const result = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const bridge = (window as any).Docxodus.DocxSessionBridge;
+      const handle = bridge.OpenSession(bin, '');
+      try {
+        const proj = JSON.parse(bridge.Project(handle));
+        const anchorId = Object.keys(proj.anchorIndex)[0];
+        // Pipe table → TableInsertNotSupported
+        const r = JSON.parse(bridge.ReplaceText(handle, anchorId, '| a | b |\n|---|---|\n| 1 | 2 |'));
+        return { success: r.success, errorCode: r.error?.code };
+      } finally {
+        bridge.CloseSession(handle);
+      }
+    }, Array.from(bytes));
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('table_insert_not_supported');
+  });
+
+  test('Undo restores prior state', async ({ page }) => {
+    const bytes = readTestFile('HC001-5DayTourPlanTemplate.docx');
+
+    const result = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const bridge = (window as any).Docxodus.DocxSessionBridge;
+      const handle = bridge.OpenSession(bin, '');
+      try {
+        const before = JSON.parse(bridge.Project(handle)).markdown;
+        const proj = JSON.parse(bridge.Project(handle));
+        const anchorId = Object.keys(proj.anchorIndex).find(k => k.startsWith('h:body:'))!;
+        bridge.ReplaceText(handle, anchorId, '**TEMPORARY**');
+        const undidOk = bridge.Undo(handle);
+        const after = JSON.parse(bridge.Project(handle)).markdown;
+        return { undidOk, restored: before === after };
+      } finally {
+        bridge.CloseSession(handle);
+      }
+    }, Array.from(bytes));
+
+    expect(result.undidOk).toBe(true);
+    expect(result.restored).toBe(true);
+  });
+});
