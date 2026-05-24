@@ -13,6 +13,9 @@ using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using Docxodus;
 using Xunit;
+using WTable = DocumentFormat.OpenXml.Wordprocessing.Table;
+using WTableRow = DocumentFormat.OpenXml.Wordprocessing.TableRow;
+using WTableCell = DocumentFormat.OpenXml.Wordprocessing.TableCell;
 
 namespace Docxodus.Tests;
 
@@ -383,6 +386,93 @@ public class WmlToMarkdownConverterTests
             mainPart.Document.Save();
         }
         return new WmlDocument("test.docx", ms.ToArray());
+    }
+
+    // ----- Phase 5: tables -----
+
+    [Fact]
+    public void MD040_SimpleTableRendersAsGfmPipeTable()
+    {
+        var doc = BuildSimpleTable(new[,] { { "a", "b" }, { "c", "d" } });
+        var md = MarkdownOf(doc);
+        Assert.Contains("| a | b |", md);
+        Assert.Contains("| --- | --- |", md);
+        Assert.Contains("| c | d |", md);
+    }
+
+    [Fact]
+    public void MD041_TableWithMergedCellsFallsBackToOpaque()
+    {
+        var doc = BuildTableWithMergedHeader();
+        var md = MarkdownOf(doc);
+        Assert.Contains("```table", md);
+        Assert.Contains("rows:", md);
+        Assert.Contains("cols:", md);
+        Assert.DoesNotContain("| --- |", md);
+    }
+
+    [Fact]
+    public void MD042_TableInlineCellMaxTriggersOpaque()
+    {
+        var doc = BuildSimpleTable(new[,] { { "abcdef", "x" } });
+        var md = WmlToMarkdownConverter.Convert(doc,
+            new WmlToMarkdownConverterSettings { TableInlineCellMax = 4 }).Markdown;
+        // Cell "abcdef" is 6 chars and exceeds the limit; expect opaque fallback.
+        Assert.Contains("```table", md);
+    }
+
+    [Fact]
+    public void MD043_AlwaysOpaqueAlwaysEmitsOpaqueBlock()
+    {
+        var doc = BuildSimpleTable(new[,] { { "a", "b" }, { "c", "d" } });
+        var md = WmlToMarkdownConverter.Convert(doc,
+            new WmlToMarkdownConverterSettings { TableMode = TableRenderMode.AlwaysOpaque }).Markdown;
+        Assert.Contains("```table", md);
+        Assert.DoesNotContain("| --- |", md);
+    }
+
+    [Fact]
+    public void MD044_TableAnchorPrecedesContent()
+    {
+        var doc = BuildSimpleTable(new[,] { { "a", "b" } });
+        var md = MarkdownOf(doc);
+        // The anchor token for the table should appear before the table content.
+        Assert.Matches(@"\{#tbl:body:[0-9a-f]{32}\}\s+\|\s+a\s+\|\s+b\s+\|", md);
+    }
+
+    private static WmlDocument BuildSimpleTable(string[,] cells)
+    {
+        var rows = cells.GetLength(0);
+        var cols = cells.GetLength(1);
+        return BuildDoc(body =>
+        {
+            var table = new WTable();
+            for (var r = 0; r < rows; r++)
+            {
+                var row = new WTableRow();
+                for (var c = 0; c < cols; c++)
+                {
+                    row.Append(new WTableCell(new Paragraph(new Run(new Text(cells[r, c])))));
+                }
+                table.Append(row);
+            }
+            body.Append(table);
+        });
+    }
+
+    private static WmlDocument BuildTableWithMergedHeader()
+    {
+        return BuildDoc(body =>
+        {
+            var row1Cell1 = new WTableCell(
+                new TableCellProperties(new GridSpan { Val = 2 }),
+                new Paragraph(new Run(new Text("merged header"))));
+            var row1 = new WTableRow(row1Cell1);
+            var row2 = new WTableRow(
+                new WTableCell(new Paragraph(new Run(new Text("a")))),
+                new WTableCell(new Paragraph(new Run(new Text("b")))));
+            body.Append(new WTable(row1, row2));
+        });
     }
 
     private static WmlDocument BuildHyperlinkDoc(string text, string url)

@@ -683,8 +683,78 @@ public static class WmlToMarkdownConverter
         }
     }
 
+    // ------------------------------------------------------------------
+    // Phase 5: tables. GFM pipe tables when the shape is simple; otherwise
+    // an opaque ```table``` block referenced by the table's anchor, with cell
+    // contents addressable individually via {#tc:body:…} anchors in the index.
+    // ------------------------------------------------------------------
+
     private static void EmitTable(XElement tbl, EmitContext ctx)
     {
-        // Phase 5 fills this in.
+        var anchor = AnchorPrefix(tbl, ctx).TrimEnd();
+        if (ctx.Settings.TableMode == TableRenderMode.AlwaysOpaque || !CanRenderAsGfm(tbl, ctx))
+        {
+            EmitOpaqueTable(tbl, anchor, ctx);
+            return;
+        }
+        EmitGfmTable(tbl, anchor, ctx);
+    }
+
+    private static bool CanRenderAsGfm(XElement tbl, EmitContext ctx)
+    {
+        if (ctx.Settings.TableMode == TableRenderMode.AlwaysGfm) return true;
+
+        // Merged cells disqualify (Word's gridSpan val>1 or any vMerge).
+        if (tbl.Descendants(W.gridSpan).Any(g => ((int?)g.Attribute(W.val) ?? 1) > 1)) return false;
+        if (tbl.Descendants(W.vMerge).Any()) return false;
+        // Nested tables disqualify.
+        if (tbl.Elements(W.tr).Elements(W.tc).Elements(W.tbl).Any()) return false;
+        // Per-cell text length cap.
+        var max = ctx.Settings.TableInlineCellMax;
+        foreach (var tc in tbl.Elements(W.tr).Elements(W.tc))
+        {
+            if (CellTextRaw(tc).Length > max) return false;
+        }
+        return true;
+    }
+
+    private static void EmitGfmTable(XElement tbl, string anchor, EmitContext ctx)
+    {
+        if (anchor.Length > 0) { ctx.Sb.Append(anchor); ctx.Sb.AppendLine(); }
+        var rows = tbl.Elements(W.tr).ToList();
+        if (rows.Count == 0) return;
+
+        var headerCells = rows[0].Elements(W.tc).Select(CellTextForGfm).ToList();
+        ctx.Sb.Append("| ").Append(string.Join(" | ", headerCells)).AppendLine(" |");
+        ctx.Sb.Append('|').Append(string.Concat(Enumerable.Repeat(" --- |", headerCells.Count))).AppendLine();
+        foreach (var r in rows.Skip(1))
+        {
+            var cells = r.Elements(W.tc).Select(CellTextForGfm);
+            ctx.Sb.Append("| ").Append(string.Join(" | ", cells)).AppendLine(" |");
+        }
+        ctx.Sb.AppendLine();
+    }
+
+    private static void EmitOpaqueTable(XElement tbl, string anchor, EmitContext ctx)
+    {
+        var rows = tbl.Elements(W.tr).Count();
+        var cols = tbl.Elements(W.tr).FirstOrDefault()?.Elements(W.tc).Count() ?? 0;
+        if (anchor.Length > 0) { ctx.Sb.Append(anchor); ctx.Sb.AppendLine(); }
+        ctx.Sb.AppendLine("```table");
+        ctx.Sb.Append("rows: ").Append(rows).AppendLine();
+        ctx.Sb.Append("cols: ").Append(cols).AppendLine();
+        ctx.Sb.AppendLine("```");
+        ctx.Sb.AppendLine();
+    }
+
+    private static string CellTextRaw(XElement tc)
+        => string.Concat(tc.Descendants(W.t).Select(t => (string)t));
+
+    private static string CellTextForGfm(XElement tc)
+    {
+        // GFM pipe tables: every "|" must be escaped, every newline collapsed. Strip the
+        // anchor markers — they live in the AnchorIndex but would corrupt the pipe layout.
+        var raw = CellTextRaw(tc).Replace('\n', ' ').Replace('\r', ' ').Replace("|", @"\|").Trim();
+        return raw.Length == 0 ? " " : raw;
     }
 }
