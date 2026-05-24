@@ -300,6 +300,91 @@ public class WmlToMarkdownConverterTests
         Assert.Contains(@"a\*b\_c\[d\]", md);
     }
 
+    // ----- Phase 4: lists -----
+
+    [Theory]
+    [InlineData("HC031-Complicated-Document.docx")]
+    public void MD030_FixtureContainsListItemAnchors(string fixture)
+    {
+        var p = WmlToMarkdownConverter.Convert(LoadFixture(fixture), new WmlToMarkdownConverterSettings());
+        // A real-world Word document with list items; at least one anchor with kind=li
+        // should appear in the index, and at least one matching line should begin with
+        // the corresponding token + indented marker.
+        Assert.Contains(p.AnchorIndex.Values, t => t.Anchor.Kind == "li");
+        Assert.Matches(@"\{#li:body:[0-9a-f]{32}\}\s+(-|\d+\.|[a-zA-Z]\.)\s", p.Markdown);
+    }
+
+    [Fact]
+    public void MD031_BulletedListUsesDashMarkers()
+    {
+        var doc = BuildBulletedListDoc("first", "second");
+        var md = MarkdownOf(doc);
+        Assert.Matches(@"\{#li:body:[0-9a-f]{32}\}\s+-\s+first", md);
+        Assert.Matches(@"\{#li:body:[0-9a-f]{32}\}\s+-\s+second", md);
+    }
+
+    [Fact]
+    public void MD032_NumberedListUsesResolvedMarkers()
+    {
+        var doc = BuildNumberedListDoc("first", "second");
+        var md = MarkdownOf(doc);
+        Assert.Matches(@"\{#li:body:[0-9a-f]{32}\}\s+1\.\s+first", md);
+        Assert.Matches(@"\{#li:body:[0-9a-f]{32}\}\s+2\.\s+second", md);
+    }
+
+    [Fact]
+    public void MD033_ResolveNumberingFalseFallsBackToDashes()
+    {
+        var doc = BuildNumberedListDoc("first", "second");
+        var p = WmlToMarkdownConverter.Convert(doc,
+            new WmlToMarkdownConverterSettings { ResolveNumbering = false });
+        // With resolution disabled, ordered lists still emit "-" markers.
+        Assert.Matches(@"\{#li:body:[0-9a-f]{32}\}\s+-\s+first", p.Markdown);
+        Assert.DoesNotMatch(@"\{#li:body:[0-9a-f]{32}\}\s+1\.\s", p.Markdown);
+    }
+
+    private static WmlDocument BuildBulletedListDoc(params string[] items) => BuildListDoc(items, ordered: false);
+    private static WmlDocument BuildNumberedListDoc(params string[] items) => BuildListDoc(items, ordered: true);
+
+    private static WmlDocument BuildListDoc(string[] items, bool ordered)
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = wDoc.AddMainDocumentPart();
+            mainPart.Document = new Document();
+            var body = new Body();
+            mainPart.Document.Body = body;
+            mainPart.AddNewPart<StyleDefinitionsPart>().Styles = new Styles();
+            mainPart.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            // NumberingDefinitionsPart with one abstractNum/num.
+            var numPart = mainPart.AddNewPart<NumberingDefinitionsPart>();
+            var fmt = ordered ? NumberFormatValues.Decimal : NumberFormatValues.Bullet;
+            var lvlText = ordered ? "%1." : "·";
+            numPart.Numbering = new Numbering(
+                new AbstractNum(
+                    new Level(
+                        new NumberingFormat { Val = fmt },
+                        new LevelText { Val = lvlText },
+                        new StartNumberingValue { Val = 1 })
+                    { LevelIndex = 0 })
+                { AbstractNumberId = 1 },
+                new NumberingInstance(new AbstractNumId { Val = 1 }) { NumberID = 1 });
+
+            foreach (var item in items)
+            {
+                var pPr = new ParagraphProperties(
+                    new NumberingProperties(
+                        new NumberingLevelReference { Val = 0 },
+                        new NumberingId { Val = 1 }));
+                body.Append(new Paragraph(pPr, new Run(new Text(item))));
+            }
+            mainPart.Document.Save();
+        }
+        return new WmlDocument("test.docx", ms.ToArray());
+    }
+
     private static WmlDocument BuildHyperlinkDoc(string text, string url)
     {
         using var ms = new MemoryStream();

@@ -345,7 +345,10 @@ public static class WmlToMarkdownConverter
     {
         public StringBuilder Sb { get; } = new();
         required public WmlToMarkdownConverterSettings Settings { get; init; }
+        required public WordprocessingDocument Document { get; init; }
         public string Scope { get; set; } = "body";
+        public ListItemRetrieverSettings ListItemRetrieverSettings { get; } = new();
+        public bool InsideListBlock { get; set; }
     }
 
     private static string EmitMarkdown(
@@ -353,7 +356,7 @@ public static class WmlToMarkdownConverter
         WmlToMarkdownConverterSettings settings,
         List<ScopeInfo> scopes)
     {
-        var ctx = new EmitContext { Settings = settings };
+        var ctx = new EmitContext { Settings = settings, Document = document };
 
         var bodyScope = scopes.FirstOrDefault(s => s.Name == "body");
         if (bodyScope != null)
@@ -372,9 +375,26 @@ public static class WmlToMarkdownConverter
 
     private static void EmitBlocks(IEnumerable<XElement> blocks, EmitContext ctx)
     {
-        foreach (var b in blocks)
+        var blocksList = blocks.ToList();
+        for (var i = 0; i < blocksList.Count; i++)
         {
-            if (b.Name == W.p) EmitParagraph(b, ctx);
+            var b = blocksList[i];
+            if (b.Name == W.p)
+            {
+                // Track whether the next block continues a list so we don't append blank lines
+                // between adjacent list items (the spec says lists are not separated internally).
+                var nextIsListItem = i + 1 < blocksList.Count
+                    && blocksList[i + 1].Name == W.p
+                    && IsListItem(blocksList[i + 1]);
+                ctx.InsideListBlock = IsListItem(b);
+                EmitParagraph(b, ctx);
+                if (IsListItem(b) && !nextIsListItem)
+                {
+                    // End of a list block — emit the trailing blank line that the list item
+                    // emitter intentionally omits.
+                    ctx.Sb.AppendLine();
+                }
+            }
             else if (b.Name == W.tbl) EmitTable(b, ctx);
             else if (b.Name == W.sectPr) { /* phase 6: section breaks */ }
         }
@@ -623,14 +643,44 @@ public static class WmlToMarkdownConverter
 
     private static string EscapeMarkdown(string s) => MarkdownMetaPattern.Replace(s, @"\$1");
 
-    // Phase 4 placeholders — fleshed out later.
+    // ------------------------------------------------------------------
+    // Phase 4: list items. ListItemRetriever does the numbering math; we
+    // translate its result ("1.", "1.2.", "a.", "·" …) into a markdown
+    // marker and indent by 2 spaces per level.
+    // ------------------------------------------------------------------
+
     private static void EmitListItem(XElement p, EmitContext ctx)
     {
-        // Until Phase 4 lands, render list items the same as paragraphs but with a "-" prefix.
+        var ilvl = (int?)p.Element(W.pPr)?.Element(W.numPr)?.Element(W.ilvl)?.Attribute(W.val) ?? 0;
+        var indent = new string(' ', Math.Max(0, ilvl) * 2);
+        var marker = ResolveListMarker(p, ctx);
         var anchor = AnchorPrefix(p, ctx);
-        ctx.Sb.Append(anchor).Append("- ");
+
+        ctx.Sb.Append(indent).Append(anchor).Append(marker).Append(' ');
         EmitInlineRuns(p, ctx);
         ctx.Sb.AppendLine();
+        // The trailing blank line that separates list blocks from following content is
+        // emitted by EmitBlocks once the run of list items ends.
+    }
+
+    private static string ResolveListMarker(XElement p, EmitContext ctx)
+    {
+        if (!ctx.Settings.ResolveNumbering) return "-";
+        try
+        {
+            var resolved = ListItemRetriever.RetrieveListItem(ctx.Document, p, ctx.ListItemRetrieverSettings);
+            if (string.IsNullOrEmpty(resolved)) return "-";
+            // Bullet-format levels produce a literal bullet glyph (e.g. "·" / ""); render as "-".
+            if (resolved.Length == 1 && !char.IsLetterOrDigit(resolved, 0)) return "-";
+            return resolved.TrimEnd();
+        }
+        catch
+        {
+            // ListItemRetriever throws on malformed numbering setups (e.g. missing
+            // NumberingDefinitionsPart). Falling back to "-" matches the spec's promise
+            // that "lossy by design, honestly" — we degrade visibly, never silently.
+            return "-";
+        }
     }
 
     private static void EmitTable(XElement tbl, EmitContext ctx)
