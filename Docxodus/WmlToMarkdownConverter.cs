@@ -285,7 +285,7 @@ public static class WmlToMarkdownConverter
     {
         var text = string.Concat(element.Descendants(W.t).Select(t => (string)t));
         return text.Length > TextPreviewMaxLength
-            ? text.Substring(0, TextPreviewMaxLength) + "…"   // "…"
+            ? text.Substring(0, TextPreviewMaxLength) + "…"
             : text;
     }
 

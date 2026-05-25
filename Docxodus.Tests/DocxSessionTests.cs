@@ -332,6 +332,28 @@ public class DocxSessionTests
     }
 
     [Fact]
+    public void DS220b_GetAnchorInfos_DedupesAndSkipsNullIds()
+    {
+        using var session = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var projection = session.Project();
+        var realId = projection.AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h" or "li")
+            .Anchor.Id;
+
+        // Dedup: passing the same real id twice yields one entry.
+        var dupes = session.GetAnchorInfos(new[] { realId, realId, "p:body:unknown-id-xyz" });
+        Assert.Equal(2, dupes.Count);
+        Assert.True(dupes.ContainsKey(realId));
+        Assert.Null(dupes["p:body:unknown-id-xyz"]);
+
+        // Null-string skip: null strings in the input enumerable are silently skipped.
+        IEnumerable<string> withNulls = new[] { realId, null!, realId };
+        var bulkWithNulls = session.GetAnchorInfos(withNulls);
+        Assert.Single(bulkWithNulls);
+        Assert.True(bulkWithNulls.ContainsKey(realId));
+    }
+
+    [Fact]
     public void DS221_GetAnchorInfoUsesAnchorTargetTextPreview()
     {
         // Regression: after #162, GetAnchorInfo reads target.TextPreview directly

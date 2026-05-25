@@ -252,6 +252,42 @@ foreach (var p in session.FindPlaceholders(PlaceholderKinds.BlankFill)
 
 This pattern — `FindPlaceholders` + `OrderByDescending(Span.Start)` + `ReplaceMatch` — collapses the 200-line context-needle-disambiguation script the Bluth-Co smoke test had to write down to a five-line loop. Process in reverse offset order so earlier-offset spans stay valid after later edits land, the same rule that applies to `ReplaceTextRange`'s internal pass.
 
+### `FillPlaceholders` — picker-driven multi-pass fill
+
+The 5-line recipe above is now a first-class call:
+
+```csharp
+var summary = session.FillPlaceholders(p => p.Kind switch
+{
+    PlaceholderKind.Instruction when p.Hint?.Contains("price") == true => "1.50",
+    PlaceholderKind.BlankFill when p.Match.ContextBefore.TrimEnd().EndsWith("name is") => "ACME, INC.",
+    _ => null
+});
+// summary.Filled / .Skipped / .Passes / .Unfilled / .Errors
+```
+
+What `FillPlaceholders` does internally that the recipe doesn't:
+
+- **Reverse-offset ordering.** Earlier-offset matches in the same paragraph go stale once a later edit lands; `FillPlaceholders` sorts every pass by `(anchorId desc, span.Start desc)` so each block's matches are applied right-to-left.
+- **`$`-prefix preservation.** The placeholder regex `\$?\[…\]` captures `$[___]` including the leading `$`. With `FillOptions.PreserveDollarPrefix = true` (default), the picker's return value gets `$` prepended when needed so `"0.20"` lands as `$0.20`, not `0.20`.
+- **Multi-pass iteration.** `FindPlaceholders` returns innermost brackets only; stripping the inner can surface a previously-nested outer. The loop re-finds placeholders each pass and stops when a pass makes zero changes (or `MaxPasses` — default 8 — is hit).
+
+The picker is invoked once per placeholder per pass; return `null` to skip. `BulkEditResult.Unfilled` lists every placeholder the picker said `null` to (deduplicated across passes). `BulkEditResult.Passes` is the highest iteration pass that actually filled at least one placeholder (so a single-fill convergence reports `Passes = 1`, not 2).
+
+### `ReplaceInner` — strip brackets while preserving prefix/suffix
+
+```csharp
+// match.Text = "$[___]"
+session.ReplaceInner(match, "0.20");
+// paragraph now contains "$0.20" (the leading $ outside the brackets survives).
+```
+
+`ReplaceInner` parses the brackets out of `match.Text` and substitutes the new inner for everything between (and including) `[` and `]`, then dispatches to `ReplaceMatch` with the recomposed string. Returns `MalformedMarkdown` if the match text has no balanced brackets. The shared `DocxSessionOps.ReplaceInner` is reused by both the WASM bridge and the stdio NDJSON host, so the `replace_inner` op is available to Python wrappers too.
+
+### `TemplatePlaceholder.AlternativeKinds`
+
+When the primary classification is borderline, secondary classifications are exposed via the `AlternativeKinds` list. The current borderline case: a `BlankFill` whose inner text contains 4+ spaces (i.e. reads like a multi-word clause that happens to contain a `_______`). Primary `Kind` stays `BlankFill` for back-compat; `AlternativeKinds` lists `AlternativeClause` so callers can detect the ambiguity.
+
 ### Nesting
 
 Nested brackets (e.g. `[under the name [Bluth, Inc.]]`) resolve to the INNERMOST bracket only — usually what the agent cares about, since the inner is the value slot and the outer is the optional-clause wrapper. If you need both, use `Grep` directly with a balanced-bracket pattern.
