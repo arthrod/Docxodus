@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`DocxSession.FindPlaceholders` — typed enumeration of template slots** (issue #142). Built on `Grep` (#143); classifies bracketed regions into three kinds an agent treats differently:
+  - `BlankFill` — `[___]` or `$[___]` value slots
+  - `AlternativeClause` — `[entire clause text in brackets]` optional clauses to keep/strip
+  - `Instruction` — `[insert X]`, `[specify Y]`, `[*italicized hint*]` — drafter hints; the inner text is exposed as `Hint` with surrounding asterisks stripped
+  Returns `TemplatePlaceholder` records wrapping the underlying `TextMatch` so the caller has anchor, span, fragment list, and surrounding context for each match without a second pass. `PlaceholderKinds` flag enum lets callers narrow (e.g. just `BlankFill`). The complete template-fill workflow now collapses to: `foreach (var p in session.FindPlaceholders(PlaceholderKinds.BlankFill).OrderByDescending(p => p.Match.Span.Start)) session.ReplaceMatch(p.Match, value);` — the 200-line Bluth-Co fill script replaced by five lines. WASM bridge (`FindPlaceholders` JSExport) + npm wrapper (`session.findPlaceholders()`, `PlaceholderKinds` flag exports). Tests: `DS120`–`DS126`. Architecture: see `docs/architecture/docx_mutation_api.md` (FindPlaceholders section).
 - **`DocxSession.ReplaceTextRange` — surgical text replacement that preserves run formatting** (issue #139). Built on `Grep` (#143). Three public surfaces:
   - `ReplaceTextRange(anchorId, find, replace, options?)` — finds every literal occurrence of `find` in the anchor's flat text and replaces each with `replace`. Returns one `EditResult` per attempted match.
   - `ReplaceMatch(TextMatch, replace)` — convenience for `Grep` results.

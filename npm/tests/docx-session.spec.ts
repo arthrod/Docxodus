@@ -154,6 +154,34 @@ test.describe('DocxSession (WASM bridge)', () => {
     expect(result.totalAfter).toBe(result.totalBefore - 1);
   });
 
+  test('findPlaceholders enumerates and classifies template slots', async ({ page }) => {
+    const bytes = readTestFile('HC001-5DayTourPlanTemplate.docx');
+
+    const result = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const bridge = (window as any).Docxodus.DocxSessionBridge;
+      const handle = bridge.OpenSession(bin, '');
+      try {
+        // PlaceholderKinds.All = 7, body scope = 1.
+        const placeholders = JSON.parse(bridge.FindPlaceholders(handle, 7, 1));
+        const kinds = new Set(placeholders.map((p: any) => p.kind));
+        return {
+          total: placeholders.length,
+          kinds: Array.from(kinds),
+          firstKind: placeholders[0]?.kind,
+          firstMatchHasFragments: Array.isArray(placeholders[0]?.match?.fragments),
+        };
+      } finally {
+        bridge.CloseSession(handle);
+      }
+    }, Array.from(bytes));
+
+    // HC001 has bracketed placeholders in every day-section paragraph.
+    expect(result.total).toBeGreaterThan(0);
+    expect(['blank_fill', 'alternative_clause', 'instruction']).toContain(result.firstKind);
+    expect(result.firstMatchHasFragments).toBe(true);
+  });
+
   test('Grep returns matches with run-fragment breakdown', async ({ page }) => {
     // HC001 is a multilingual tour-plan template full of `[placeholder]` slots;
     // search for an opening bracket which is reliably present regardless of language.

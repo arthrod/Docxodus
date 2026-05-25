@@ -200,6 +200,38 @@ Two caveats to internalize while [#132](https://github.com/JSv4/Docxodus/issues/
 
 The agent's prompt should also be aware: it can call `AnnotationManager.GetAnnotations(doc)` once at the start of a session to enumerate available labels (e.g., "you can target: INDEMNIFICATION, TERMINATION, GOVERNING_LAW") and present those as tools rather than asking the LLM to discover them from text.
 
+## FindPlaceholders — template-slot enumeration
+
+`session.FindPlaceholders(kinds?, scope?)` is a thin classifier over `Grep` for the workflow every template-filling agent eventually writes itself. It scans for `\$?\[…\]` regions and tags each one as:
+
+| `PlaceholderKind` | Pattern | What an agent does with it |
+|---|---|---|
+| `BlankFill` | `[___]` or `$[___]` (underscores only) | Fill with a literal value (a name, a number, a date) |
+| `AlternativeClause` | `[clause text]` (anything else in brackets) | Keep, strip, or pick between alternatives |
+| `Instruction` | `[insert X]`, `[specify Y]`, `[*italicized hint*]` | Parameter description — populate based on the hint |
+
+`Instruction` placeholders expose the inner text (asterisks stripped) via the `Hint` field, so the agent can read `"insert percentage"` or `"specify name"` and decide what to put.
+
+`PlaceholderKinds` is a flag enum (`BlankFill | AlternativeClause | Instruction = All`) for narrowing.
+
+### The canonical fill recipe
+
+```csharp
+// Replace every value-blank in the document with a looked-up value.
+foreach (var p in session.FindPlaceholders(PlaceholderKinds.BlankFill)
+                          .OrderByDescending(p => p.Match.Span.Start))
+{
+    var value = LookupValueByContext(p.Match.ContextBefore, p.Match.ContextAfter);
+    session.ReplaceMatch(p.Match, value);
+}
+```
+
+This pattern — `FindPlaceholders` + `OrderByDescending(Span.Start)` + `ReplaceMatch` — collapses the 200-line context-needle-disambiguation script the Bluth-Co smoke test had to write down to a five-line loop. Process in reverse offset order so earlier-offset spans stay valid after later edits land, the same rule that applies to `ReplaceTextRange`'s internal pass.
+
+### Nesting
+
+Nested brackets (e.g. `[under the name [Bluth, Inc.]]`) resolve to the INNERMOST bracket only — usually what the agent cares about, since the inner is the value slot and the outer is the optional-clause wrapper. If you need both, use `Grep` directly with a balanced-bracket pattern.
+
 ## ReplaceTextRange — surgical text edits
 
 `session.ReplaceTextRange(anchorId, find, replace, options?)` finds every literal occurrence of `find` in one paragraph/heading/list-item's flat text and substitutes `replace` for each, returning an `EditResult` per attempted match. Built on `Grep` — same fragment walker, opposite direction.

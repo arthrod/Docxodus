@@ -671,6 +671,7 @@ export interface DocxodusWasmExports {
     Grep: (handle: number, pattern: string, optionsJson: string) => string;
     ReplaceTextRange: (handle: number, anchor: string, find: string, replace: string, optionsJson: string) => string;
     ReplaceTextAtSpan: (handle: number, anchor: string, spanStart: number, spanLength: number, replace: string) => string;
+    FindPlaceholders: (handle: number, kinds: number, scope: number) => string;
     Undo: (handle: number) => boolean;
     Redo: (handle: number) => boolean;
     Save: (handle: number) => Uint8Array;
@@ -820,6 +821,32 @@ export interface ReplaceOptions {
   ignoreCase?: boolean;
   /** Cap the number of replacements; omitted = unlimited. */
   maxReplacements?: number;
+}
+
+/**
+ * Categories of bracketed placeholders {@link DocxSession.findPlaceholders} recognizes.
+ *
+ * - `blank_fill` — `[___]` or `$[___]` value slots
+ * - `alternative_clause` — `[entire clause text]`
+ * - `instruction` — `[insert X]`, `[specify Y]`, `[*italicized hint*]`
+ */
+export type PlaceholderKind = "blank_fill" | "alternative_clause" | "instruction";
+
+/**
+ * Numeric flag layout matching the .NET `PlaceholderKinds` enum. Combine with bitwise OR.
+ */
+export const PlaceholderKinds = {
+  BlankFill: 1,
+  AlternativeClause: 2,
+  Instruction: 4,
+  All: 7,
+} as const;
+
+export interface TemplatePlaceholder {
+  kind: PlaceholderKind;
+  /** For `instruction` placeholders: the inner text with surrounding brackets/asterisks stripped. */
+  hint?: string;
+  match: TextMatch;
 }
 
 /**

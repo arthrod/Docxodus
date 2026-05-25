@@ -162,6 +162,19 @@ public static partial class DocxSessionBridge
     public static string ReplaceTextAtSpan(int h, string anchor, int spanStart, int spanLength, string replace) =>
         Serialize(Get(h).ReplaceTextAtSpan(anchor, spanStart, spanLength, replace));
 
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.FindPlaceholders"/>. <paramref name="kinds"/>
+    /// uses the numeric layout of <see cref="PlaceholderKinds"/> (BlankFill=1,
+    /// AlternativeClause=2, Instruction=4, All=7); 0 returns nothing. <paramref name="scope"/>
+    /// uses the <see cref="ProjectionScopes"/> flag layout. Returns a JSON array of placeholders.
+    /// </summary>
+    [JSExport]
+    public static string FindPlaceholders(int h, int kinds, int scope)
+    {
+        var placeholders = Get(h).FindPlaceholders((PlaceholderKinds)kinds, (ProjectionScopes)scope);
+        return SerializePlaceholders(placeholders);
+    }
+
     [JSExport]
     public static bool Undo(int h) => Get(h).Undo();
 
@@ -277,6 +290,65 @@ public static partial class DocxSessionBridge
               .Append('}');
         }
         sb.Append(']');
+    }
+
+    private static string SerializePlaceholders(System.Collections.Generic.IReadOnlyList<TemplatePlaceholder> placeholders)
+    {
+        var sb = new StringBuilder(512);
+        sb.Append('[');
+        for (int i = 0; i < placeholders.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var p = placeholders[i];
+            sb.Append("{\"kind\":\"").Append(p.Kind switch
+            {
+                PlaceholderKind.BlankFill => "blank_fill",
+                PlaceholderKind.AlternativeClause => "alternative_clause",
+                PlaceholderKind.Instruction => "instruction",
+                _ => "unknown",
+            }).Append('"');
+            if (p.Hint is not null)
+                sb.Append(",\"hint\":").Append(JsonString(p.Hint));
+            sb.Append(",\"match\":");
+            AppendMatch(sb, p.Match);
+            sb.Append('}');
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+
+    private static void AppendMatch(StringBuilder sb, TextMatch m)
+    {
+        sb.Append("{\"text\":").Append(JsonString(m.Text))
+          .Append(",\"enclosingAnchor\":{")
+          .Append("\"id\":").Append(JsonString(m.EnclosingAnchor.Anchor.Id))
+          .Append(",\"kind\":").Append(JsonString(m.EnclosingAnchor.Anchor.Kind))
+          .Append(",\"scope\":").Append(JsonString(m.EnclosingAnchor.Anchor.Scope))
+          .Append(",\"unid\":").Append(JsonString(m.EnclosingAnchor.Anchor.Unid))
+          .Append('}')
+          .Append(",\"span\":{\"start\":").Append(m.Span.Start).Append(",\"length\":").Append(m.Span.Length).Append('}')
+          .Append(",\"contextBefore\":").Append(JsonString(m.ContextBefore))
+          .Append(",\"contextAfter\":").Append(JsonString(m.ContextAfter))
+          .Append(",\"fragments\":[");
+        for (int f = 0; f < m.Fragments.Count; f++)
+        {
+            if (f > 0) sb.Append(',');
+            var fr = m.Fragments[f];
+            sb.Append("{\"unid\":").Append(JsonString(fr.Unid))
+              .Append(",\"text\":").Append(JsonString(fr.Text))
+              .Append(",\"spanInElement\":{\"start\":").Append(fr.SpanInElement.Start)
+              .Append(",\"length\":").Append(fr.SpanInElement.Length).Append('}')
+              .Append(",\"formatting\":{")
+              .Append("\"bold\":").Append(fr.Formatting.Bold ? "true" : "false")
+              .Append(",\"italic\":").Append(fr.Formatting.Italic ? "true" : "false")
+              .Append(",\"underline\":").Append(fr.Formatting.Underline ? "true" : "false")
+              .Append(",\"strike\":").Append(fr.Formatting.Strike ? "true" : "false")
+              .Append(",\"code\":").Append(fr.Formatting.Code ? "true" : "false")
+              .Append("}}");
+        }
+        sb.Append(']');
+        // Groups omitted from placeholder serialization (rarely useful for this surface).
+        sb.Append('}');
     }
 
     private static string SerializeEditResults(System.Collections.Generic.IReadOnlyList<EditResult> results)
