@@ -48,4 +48,12 @@
     <None Include="..\README.md" Pack="true" PackagePath="" />
   </ItemGroup>
 
+  <!-- Bridge transports (WASM JSExport, stdio NDJSON host) consume the shared
+       Docxodus.Internal facade for the DocxSession wire protocol. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="DocxodusWasm" />
+    <InternalsVisibleTo Include="docxodus-pyhost" />
+    <InternalsVisibleTo Include="Docxodus.Tests" />
+  </ItemGroup>
+
 </Project>

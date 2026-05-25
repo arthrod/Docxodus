@@ -1,11 +1,11 @@
-using System;
-using System.Collections.Concurrent;
-using System.Linq;
+#nullable enable
+
 using System.Runtime.InteropServices.JavaScript;
 using System.Runtime.Versioning;
-using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Docxodus;
+using Docxodus.Internal;
 
 namespace DocxodusWasm;
 
@@ -14,51 +14,44 @@ namespace DocxodusWasm;
 /// and persist across JSExport calls — keyed by an integer handle returned from
 /// <see cref="OpenSession"/>. JS-side code must call <see cref="CloseSession"/>
 /// when done; sessions are not eligible for GC otherwise.
+///
+/// All wire-format work — JSON serialization, settings/format-op parsing, the
+/// handle pool — lives in <see cref="DocxSessionOps"/> / <see cref="DocxSessionJson"/>
+/// / <see cref="SessionRegistry"/>. This file is a thin JSExport-attributed
+/// shell so the WASM and stdio NDJSON transports stay byte-for-byte identical.
 /// </summary>
 [SupportedOSPlatform("browser")]
 public static partial class DocxSessionBridge
 {
-    private static readonly ConcurrentDictionary<int, DocxSession> _sessions = new();
-    private static int _nextId;
+    [JSExport]
+    public static int OpenSession(byte[] bytes, string settingsJson) =>
+        DocxSessionOps.OpenSession(bytes, DocxSessionJson.ParseSettings(settingsJson));
 
     [JSExport]
-    public static int OpenSession(byte[] bytes, string settingsJson)
-    {
-        var settings = ParseSettings(settingsJson);
-        var session = new DocxSession(bytes, settings);
-        var id = System.Threading.Interlocked.Increment(ref _nextId);
-        _sessions[id] = session;
-        return id;
-    }
+    public static void CloseSession(int handle) => DocxSessionOps.CloseSession(handle);
 
     [JSExport]
-    public static void CloseSession(int handle)
-    {
-        if (_sessions.TryRemove(handle, out var s)) s.Dispose();
-    }
-
-    [JSExport]
-    public static string Project(int handle) => SerializeProjection(Get(handle).Project());
+    public static string Project(int handle) => DocxSessionOps.Project(handle);
 
     [JSExport]
     public static string ReplaceText(int h, string anchor, string md) =>
-        Serialize(Get(h).ReplaceText(anchor, md));
+        DocxSessionOps.ReplaceText(h, anchor, md);
 
     [JSExport]
     public static string DeleteBlock(int h, string anchor) =>
-        Serialize(Get(h).DeleteBlock(anchor));
+        DocxSessionOps.DeleteBlock(h, anchor);
 
     [JSExport]
     public static string InsertParagraph(int h, string anchor, string posStr, string md) =>
-        Serialize(Get(h).InsertParagraph(anchor, ParsePos(posStr), md));
+        DocxSessionOps.InsertParagraph(h, anchor, DocxSessionJson.ParsePos(posStr), md);
 
     [JSExport]
     public static string SplitParagraph(int h, string anchor, int offset) =>
-        Serialize(Get(h).SplitParagraph(anchor, offset));
+        DocxSessionOps.SplitParagraph(h, anchor, offset);
 
     [JSExport]
     public static string MergeParagraphs(int h, string first, string second) =>
-        Serialize(Get(h).MergeParagraphs(first, second));
+        DocxSessionOps.MergeParagraphs(h, first, second);
 
     [JSExport]
     public static string ApplyFormat(int h, string anchor, string spanJson, string opJson)
@@ -71,8 +64,7 @@ public static partial class DocxSessionBridge
                 doc.RootElement.GetProperty("start").GetInt32(),
                 doc.RootElement.GetProperty("length").GetInt32());
         }
-        var op = ParseFormatOp(opJson);
-        return Serialize(Get(h).ApplyFormat(anchor, span, op));
+        return DocxSessionOps.ApplyFormat(h, anchor, span, DocxSessionJson.ParseFormatOp(opJson));
     }
 
     /// <summary>
@@ -82,34 +74,34 @@ public static partial class DocxSessionBridge
     /// </summary>
     [JSExport]
     public static string ApplyFormatBySubstring(int h, string anchor, string substring, string opJson) =>
-        Serialize(Get(h).ApplyFormatToSubstring(anchor, substring, ParseFormatOp(opJson)));
+        DocxSessionOps.ApplyFormatBySubstring(h, anchor, substring, DocxSessionJson.ParseFormatOp(opJson));
 
     [JSExport]
     public static string SetParagraphStyle(int h, string anchor, string styleId) =>
-        Serialize(Get(h).SetParagraphStyle(anchor, styleId));
+        DocxSessionOps.SetParagraphStyle(h, anchor, styleId);
 
     [JSExport]
     public static string SetListLevel(int h, string anchor, int delta) =>
-        Serialize(Get(h).SetListLevel(anchor, delta));
+        DocxSessionOps.SetListLevel(h, anchor, delta);
 
     [JSExport]
     public static string RemoveListMembership(int h, string anchor) =>
-        Serialize(Get(h).RemoveListMembership(anchor));
+        DocxSessionOps.RemoveListMembership(h, anchor);
 
     [JSExport]
     public static string ReplaceCellContent(int h, string anchor, string md) =>
-        Serialize(Get(h).ReplaceCellContent(anchor, md));
+        DocxSessionOps.ReplaceCellContent(h, anchor, md);
 
     [JSExport]
-    public static string RawGetXml(int h, string anchor) => Get(h).Raw.GetXml(anchor);
+    public static string RawGetXml(int h, string anchor) => DocxSessionOps.RawGetXml(h, anchor);
 
     [JSExport]
     public static string RawInsertXml(int h, string anchor, string posStr, string xml) =>
-        Serialize(Get(h).Raw.InsertXml(anchor, ParsePos(posStr), xml));
+        DocxSessionOps.RawInsertXml(h, anchor, DocxSessionJson.ParsePos(posStr), xml);
 
     [JSExport]
     public static string RawReplaceXml(int h, string anchor, string xml) =>
-        Serialize(Get(h).Raw.ReplaceXml(anchor, xml));
+        DocxSessionOps.RawReplaceXml(h, anchor, xml);
 
     /// <summary>
     /// Bridge for <see cref="DocxSession.Grep"/>. <paramref name="optionsJson"/>
@@ -121,24 +113,8 @@ public static partial class DocxSessionBridge
     [JSExport]
     public static string Grep(int h, string pattern, string optionsJson)
     {
-        var regexOpts = System.Text.RegularExpressions.RegexOptions.None;
-        var scope = ProjectionScopes.Body;
-        var contextChars = 40;
-        var whitespace = WhitespaceMode.Preserve;
-        if (!string.IsNullOrEmpty(optionsJson))
-        {
-            using var doc = JsonDocument.Parse(optionsJson);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("regexOptions", out var ro) && ro.ValueKind == JsonValueKind.Number)
-                regexOpts = (System.Text.RegularExpressions.RegexOptions)ro.GetInt32();
-            if (root.TryGetProperty("scope", out var s) && s.ValueKind == JsonValueKind.Number)
-                scope = (ProjectionScopes)s.GetInt32();
-            if (root.TryGetProperty("contextChars", out var c) && c.ValueKind == JsonValueKind.Number)
-                contextChars = c.GetInt32();
-            if (root.TryGetProperty("whitespace", out var w) && w.ValueKind == JsonValueKind.Number)
-                whitespace = (WhitespaceMode)w.GetInt32();
-        }
-        return SerializeMatches(Get(h).Grep(pattern, regexOpts, scope, contextChars, whitespace));
+        ParseGrepOptions(optionsJson, out var regexOpts, out var scope, out var contextChars, out var whitespace);
+        return DocxSessionOps.Grep(h, pattern, regexOpts, scope, contextChars, whitespace);
     }
 
     /// <summary>
@@ -149,24 +125,8 @@ public static partial class DocxSessionBridge
     [JSExport]
     public static string GrepCrossBlock(int h, string pattern, string optionsJson)
     {
-        var regexOpts = System.Text.RegularExpressions.RegexOptions.None;
-        var scope = ProjectionScopes.Body;
-        var contextChars = 40;
-        var whitespace = WhitespaceMode.Preserve;
-        if (!string.IsNullOrEmpty(optionsJson))
-        {
-            using var doc = JsonDocument.Parse(optionsJson);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("regexOptions", out var ro) && ro.ValueKind == JsonValueKind.Number)
-                regexOpts = (System.Text.RegularExpressions.RegexOptions)ro.GetInt32();
-            if (root.TryGetProperty("scope", out var s) && s.ValueKind == JsonValueKind.Number)
-                scope = (ProjectionScopes)s.GetInt32();
-            if (root.TryGetProperty("contextChars", out var c) && c.ValueKind == JsonValueKind.Number)
-                contextChars = c.GetInt32();
-            if (root.TryGetProperty("whitespace", out var w) && w.ValueKind == JsonValueKind.Number)
-                whitespace = (WhitespaceMode)w.GetInt32();
-        }
-        return SerializeCrossBlockMatches(Get(h).GrepCrossBlock(pattern, regexOpts, scope, contextChars, whitespace));
+        ParseGrepOptions(optionsJson, out var regexOpts, out var scope, out var contextChars, out var whitespace);
+        return DocxSessionOps.GrepCrossBlock(h, pattern, regexOpts, scope, contextChars, whitespace);
     }
 
     /// <summary>
@@ -184,13 +144,12 @@ public static partial class DocxSessionBridge
             var root = doc.RootElement;
             opts = new ReplaceOptions
             {
-                IgnoreCase = TryGetBool(root, "ignoreCase", false),
+                IgnoreCase = DocxSessionJson.TryGetBool(root, "ignoreCase", false),
                 MaxReplacements = root.TryGetProperty("maxReplacements", out var mr) && mr.ValueKind == JsonValueKind.Number
                     ? mr.GetInt32() : (int?)null,
             };
         }
-        var results = Get(h).ReplaceTextRange(anchor, find, replace, opts);
-        return SerializeEditResults(results);
+        return DocxSessionOps.ReplaceTextRange(h, anchor, find, replace, opts);
     }
 
     /// <summary>
@@ -200,7 +159,7 @@ public static partial class DocxSessionBridge
     /// </summary>
     [JSExport]
     public static string ReplaceTextAtSpan(int h, string anchor, int spanStart, int spanLength, string replace) =>
-        Serialize(Get(h).ReplaceTextAtSpan(anchor, spanStart, spanLength, replace));
+        DocxSessionOps.ReplaceTextAtSpan(h, anchor, spanStart, spanLength, replace);
 
     /// <summary>
     /// Bridge for <see cref="DocxSession.FindPlaceholders"/>. <paramref name="kinds"/>
@@ -209,11 +168,8 @@ public static partial class DocxSessionBridge
     /// uses the <see cref="ProjectionScopes"/> flag layout. Returns a JSON array of placeholders.
     /// </summary>
     [JSExport]
-    public static string FindPlaceholders(int h, int kinds, int scope)
-    {
-        var placeholders = Get(h).FindPlaceholders((PlaceholderKinds)kinds, (ProjectionScopes)scope);
-        return SerializePlaceholders(placeholders);
-    }
+    public static string FindPlaceholders(int h, int kinds, int scope) =>
+        DocxSessionOps.FindPlaceholders(h, (PlaceholderKinds)kinds, (ProjectionScopes)scope);
 
     /// <summary>
     /// Bridge for <see cref="DocxSession.FindByAnnotation"/>. Returns a JSON array of
@@ -222,7 +178,7 @@ public static partial class DocxSessionBridge
     /// </summary>
     [JSExport]
     public static string FindByAnnotation(int h, string annotationId) =>
-        SerializeAnchorTargets(Get(h).FindByAnnotation(annotationId));
+        DocxSessionOps.FindByAnnotation(h, annotationId);
 
     /// <summary>
     /// Bridge for <see cref="DocxSession.FindByLabel"/>. Returns a JSON object keyed by
@@ -231,7 +187,7 @@ public static partial class DocxSessionBridge
     /// </summary>
     [JSExport]
     public static string FindByLabel(int h, string labelId) =>
-        SerializeAnchorTargetMap(Get(h).FindByLabel(labelId));
+        DocxSessionOps.FindByLabel(h, labelId);
 
     /// <summary>
     /// Bridge for <see cref="DocxSession.FindByBookmark"/>. Same return shape as
@@ -240,66 +196,7 @@ public static partial class DocxSessionBridge
     /// </summary>
     [JSExport]
     public static string FindByBookmark(int h, string bookmarkName) =>
-        SerializeAnchorTargets(Get(h).FindByBookmark(bookmarkName));
-
-    /// <summary>
-    /// Returns AnchorInfo as JSON for one anchor id, or "null" if the anchor
-    /// is unknown. Lets npm callers avoid re-projecting just to read a preview.
-    /// </summary>
-    [JSExport]
-    public static string GetAnchorInfo(int h, string anchorId)
-    {
-        var info = Get(h).GetAnchorInfo(anchorId);
-        if (info is null) return "null";
-        var sb = new StringBuilder(200);
-        sb.Append("{\"id\":").Append(JsonString(info.Id))
-          .Append(",\"kind\":").Append(JsonString(info.Kind))
-          .Append(",\"scope\":").Append(JsonString(info.Scope))
-          .Append(",\"textPreview\":").Append(JsonString(info.TextPreview))
-          .Append('}');
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// Bulk variant: takes a JSON array of anchor ids and returns a JSON object
-    /// keyed by id (value is the same AnchorInfo shape, or null for unknown ids).
-    /// </summary>
-    [JSExport]
-    public static string GetAnchorInfos(int h, string anchorIdsJson)
-    {
-        string[] ids;
-        try
-        {
-            ids = JsonSerializer.Deserialize<string[]>(
-                anchorIdsJson, DocxodusJsonContext.Default.StringArray) ?? Array.Empty<string>();
-        }
-        catch (JsonException)
-        {
-            return "{\"error\":\"malformed anchor id array\"}";
-        }
-
-        var map = Get(h).GetAnchorInfos(ids);
-        var sb = new StringBuilder(ids.Length * 100 + 2);
-        sb.Append('{');
-        bool first = true;
-        foreach (var kv in map)
-        {
-            if (!first) sb.Append(',');
-            first = false;
-            sb.Append(JsonString(kv.Key)).Append(':');
-            if (kv.Value is null) sb.Append("null");
-            else
-            {
-                sb.Append("{\"id\":").Append(JsonString(kv.Value.Id))
-                  .Append(",\"kind\":").Append(JsonString(kv.Value.Kind))
-                  .Append(",\"scope\":").Append(JsonString(kv.Value.Scope))
-                  .Append(",\"textPreview\":").Append(JsonString(kv.Value.TextPreview))
-                  .Append('}');
-            }
-        }
-        sb.Append('}');
-        return sb.ToString();
-    }
+        DocxSessionOps.FindByBookmark(h, bookmarkName);
 
     /// <summary>
     /// Bridge for <see cref="DocxSession.ListAnnotations"/>. Returns a JSON array of
@@ -308,432 +205,111 @@ public static partial class DocxSessionBridge
     /// to keep the wire format compact; callers needing them can use the .NET API.
     /// </summary>
     [JSExport]
-    public static string ListAnnotations(int h) =>
-        SerializeAnnotations(Get(h).ListAnnotations());
+    public static string ListAnnotations(int h) => DocxSessionOps.ListAnnotations(h);
+
+    /// <summary>Bridge for <see cref="DocxSession.Exists"/>. Returns true/false.</summary>
+    [JSExport]
+    public static bool Exists(int h, string anchorId) => DocxSessionOps.Exists(h, anchorId);
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.GetAnchorInfo"/>. Returns a JSON object
+    /// <c>{id, kind, scope, textPreview}</c> or the literal <c>null</c> if the
+    /// anchor is not found.
+    /// </summary>
+    [JSExport]
+    public static string GetAnchorInfo(int h, string anchorId) => DocxSessionOps.GetAnchorInfo(h, anchorId);
+
+    /// <summary>
+    /// Bulk variant of <see cref="GetAnchorInfo"/>. Takes a JSON array of anchor
+    /// ids and returns a JSON object keyed by id; each value is the AnchorInfo
+    /// shape or <c>null</c> for unknown ids.
+    /// </summary>
+    [JSExport]
+    public static string GetAnchorInfos(int h, string anchorIdsJson)
+    {
+        string[] ids;
+        try
+        {
+            ids = JsonSerializer.Deserialize<string[]>(
+                anchorIdsJson, DocxodusJsonContext.Default.StringArray) ?? System.Array.Empty<string>();
+        }
+        catch (JsonException)
+        {
+            return "{\"error\":\"malformed anchor id array\"}";
+        }
+        return DocxSessionOps.GetAnchorInfos(h, ids);
+    }
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.FindByText"/>. Returns a single AnchorTarget
+    /// JSON object (first match in document order) or the literal <c>null</c> if no
+    /// anchor contains the needle. <paramref name="optionsJson"/> accepts
+    /// <c>{ignoreCase?, ignoreWhitespace?, kindFilter?, scopeFilter?}</c>.
+    /// </summary>
+    [JSExport]
+    public static string FindByText(int h, string needle, string optionsJson) =>
+        DocxSessionOps.FindByText(h, needle, ParseFindOptions(optionsJson));
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.FindAllByText"/>. Same options shape as
+    /// <see cref="FindByText"/>; returns the full AnchorTarget array in document order.
+    /// </summary>
+    [JSExport]
+    public static string FindAllByText(int h, string needle, string optionsJson) =>
+        DocxSessionOps.FindAllByText(h, needle, ParseFindOptions(optionsJson));
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.FindByRegex"/>. <paramref name="regexOptions"/>
+    /// uses the numeric layout of <see cref="System.Text.RegularExpressions.RegexOptions"/>;
+    /// <paramref name="optionsJson"/> matches the <see cref="FindByText"/> shape.
+    /// </summary>
+    [JSExport]
+    public static string FindByRegex(int h, string pattern, int regexOptions, string optionsJson) =>
+        DocxSessionOps.FindByRegex(h, pattern, (RegexOptions)regexOptions, ParseFindOptions(optionsJson));
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.FindByKind"/>. <paramref name="scope"/> may be
+    /// empty/null to match all scopes. No text scan — reads the AnchorIndex directly.
+    /// </summary>
+    [JSExport]
+    public static string FindByKind(int h, string kind, string scope) =>
+        DocxSessionOps.FindByKind(h, kind, string.IsNullOrEmpty(scope) ? null : scope);
 
     [JSExport]
-    public static bool Undo(int h) => Get(h).Undo();
+    public static bool Undo(int h) => DocxSessionOps.Undo(h);
 
     [JSExport]
-    public static bool Redo(int h) => Get(h).Redo();
+    public static bool Redo(int h) => DocxSessionOps.Redo(h);
 
     [JSExport]
-    public static byte[] Save(int h) => Get(h).Save();
+    public static byte[] Save(int h) => DocxSessionOps.Save(h);
 
     // ─── Helpers ────────────────────────────────────────────────────────
 
-    private static DocxSession Get(int handle)
+    private static FindOptions? ParseFindOptions(string optionsJson)
     {
-        if (!_sessions.TryGetValue(handle, out var s))
-            throw new ArgumentException($"unknown session handle: {handle}");
-        return s;
+        if (string.IsNullOrEmpty(optionsJson)) return null;
+        using var doc = JsonDocument.Parse(optionsJson);
+        return DocxSessionJson.ParseFindOptions(doc.RootElement);
     }
 
-    private static Position ParsePos(string s) =>
-        string.Equals(s, "before", StringComparison.OrdinalIgnoreCase) ? Position.Before : Position.After;
-
-    private static DocxSessionSettings ParseSettings(string settingsJson)
+    private static void ParseGrepOptions(string optionsJson, out RegexOptions regexOpts,
+        out ProjectionScopes scope, out int contextChars, out WhitespaceMode whitespace)
     {
-        if (string.IsNullOrEmpty(settingsJson)) return new DocxSessionSettings();
-        using var doc = JsonDocument.Parse(settingsJson);
+        regexOpts = RegexOptions.None;
+        scope = ProjectionScopes.Body;
+        contextChars = 40;
+        whitespace = WhitespaceMode.Preserve;
+        if (string.IsNullOrEmpty(optionsJson)) return;
+        using var doc = JsonDocument.Parse(optionsJson);
         var root = doc.RootElement;
-        int undoDepth = TryGetInt(root, "undoDepth", 50);
-        bool validateRawOps = TryGetBool(root, "validateRawOps", false);
-        var trackedStr = TryGetString(root, "trackedChanges", "accept");
-        var tracked = trackedStr switch
-        {
-            "render_inline" => TrackedChangeMode.RenderInline,
-            "strip_deletions" => TrackedChangeMode.StripDeletions,
-            _ => TrackedChangeMode.Accept,
-        };
-        var revisionAuthor = TryGetString(root, "revisionAuthor", null);
-        bool persistAnchorIds = TryGetBool(root, "persistAnchorIds", false);
-        bool smartQuotes = TryGetBool(root, "smartQuotes", false);
-        return new DocxSessionSettings
-        {
-            UndoDepth = undoDepth,
-            ValidateRawOps = validateRawOps,
-            TrackedChanges = tracked,
-            RevisionAuthor = revisionAuthor,
-            PersistAnchorIds = persistAnchorIds,
-            SmartQuotes = smartQuotes,
-        };
-    }
-
-    private static FormatOp ParseFormatOp(string json)
-    {
-        if (string.IsNullOrEmpty(json)) return new FormatOp();
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        return new FormatOp
-        {
-            Bold = TryGetBoolNullable(root, "bold"),
-            Italic = TryGetBoolNullable(root, "italic"),
-            Underline = TryGetBoolNullable(root, "underline"),
-            Strike = TryGetBoolNullable(root, "strike"),
-            Code = TryGetBoolNullable(root, "code"),
-            Color = TryGetString(root, "color", null),
-            RunStyle = TryGetString(root, "runStyle", null),
-        };
-    }
-
-    private static int TryGetInt(JsonElement root, string name, int fallback) =>
-        root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : fallback;
-    private static bool TryGetBool(JsonElement root, string name, bool fallback) =>
-        root.TryGetProperty(name, out var v) && (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False) ? v.GetBoolean() : fallback;
-    private static bool? TryGetBoolNullable(JsonElement root, string name) =>
-        root.TryGetProperty(name, out var v) && (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False) ? v.GetBoolean() : (bool?)null;
-    private static string? TryGetString(JsonElement root, string name, string? fallback) =>
-        root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : fallback;
-
-    private static string Serialize(EditResult r)
-    {
-        var sb = new StringBuilder(256);
-        sb.Append("{\"success\":").Append(r.Success ? "true" : "false");
-        if (r.Error is not null)
-        {
-            sb.Append(",\"error\":{")
-              .Append("\"code\":\"").Append(EnumToSnake(r.Error.Code)).Append('"')
-              .Append(",\"message\":").Append(JsonString(r.Error.Message));
-            if (r.Error.AnchorId is not null)
-                sb.Append(",\"anchorId\":").Append(JsonString(r.Error.AnchorId));
-            sb.Append('}');
-        }
-        sb.Append(",\"created\":"); AppendAnchorArray(sb, r.Created);
-        sb.Append(",\"removed\":"); AppendAnchorArray(sb, r.Removed);
-        sb.Append(",\"modified\":"); AppendAnchorArray(sb, r.Modified);
-        if (r.Patch is not null)
-        {
-            sb.Append(",\"patch\":{")
-              .Append("\"scopeAnchorId\":").Append(JsonString(r.Patch.ScopeAnchorId))
-              .Append(",\"markdown\":").Append(JsonString(r.Patch.Markdown))
-              .Append('}');
-        }
-        sb.Append('}');
-        return sb.ToString();
-    }
-
-    private static void AppendAnchorArray(StringBuilder sb, System.Collections.Generic.IReadOnlyList<Anchor> anchors)
-    {
-        sb.Append('[');
-        for (int i = 0; i < anchors.Count; i++)
-        {
-            if (i > 0) sb.Append(',');
-            var a = anchors[i];
-            sb.Append('{')
-              .Append("\"id\":").Append(JsonString(a.Id))
-              .Append(",\"kind\":").Append(JsonString(a.Kind))
-              .Append(",\"scope\":").Append(JsonString(a.Scope))
-              .Append(",\"unid\":").Append(JsonString(a.Unid))
-              .Append('}');
-        }
-        sb.Append(']');
-    }
-
-    private static string SerializePlaceholders(System.Collections.Generic.IReadOnlyList<TemplatePlaceholder> placeholders)
-    {
-        var sb = new StringBuilder(512);
-        sb.Append('[');
-        for (int i = 0; i < placeholders.Count; i++)
-        {
-            if (i > 0) sb.Append(',');
-            var p = placeholders[i];
-            sb.Append("{\"kind\":\"").Append(p.Kind switch
-            {
-                PlaceholderKind.BlankFill => "blank_fill",
-                PlaceholderKind.AlternativeClause => "alternative_clause",
-                PlaceholderKind.Instruction => "instruction",
-                _ => "unknown",
-            }).Append('"');
-            if (p.Hint is not null)
-                sb.Append(",\"hint\":").Append(JsonString(p.Hint));
-            sb.Append(",\"match\":");
-            AppendMatch(sb, p.Match);
-            sb.Append('}');
-        }
-        sb.Append(']');
-        return sb.ToString();
-    }
-
-    private static void AppendMatch(StringBuilder sb, TextMatch m)
-    {
-        sb.Append("{\"text\":").Append(JsonString(m.Text))
-          .Append(",\"enclosingAnchor\":{")
-          .Append("\"id\":").Append(JsonString(m.EnclosingAnchor.Anchor.Id))
-          .Append(",\"kind\":").Append(JsonString(m.EnclosingAnchor.Anchor.Kind))
-          .Append(",\"scope\":").Append(JsonString(m.EnclosingAnchor.Anchor.Scope))
-          .Append(",\"unid\":").Append(JsonString(m.EnclosingAnchor.Anchor.Unid))
-          .Append('}')
-          .Append(",\"span\":{\"start\":").Append(m.Span.Start).Append(",\"length\":").Append(m.Span.Length).Append('}')
-          .Append(",\"contextBefore\":").Append(JsonString(m.ContextBefore))
-          .Append(",\"contextAfter\":").Append(JsonString(m.ContextAfter))
-          .Append(",\"fragments\":[");
-        for (int f = 0; f < m.Fragments.Count; f++)
-        {
-            if (f > 0) sb.Append(',');
-            var fr = m.Fragments[f];
-            sb.Append("{\"unid\":").Append(JsonString(fr.Unid))
-              .Append(",\"text\":").Append(JsonString(fr.Text))
-              .Append(",\"spanInElement\":{\"start\":").Append(fr.SpanInElement.Start)
-              .Append(",\"length\":").Append(fr.SpanInElement.Length).Append('}')
-              .Append(",\"formatting\":{")
-              .Append("\"bold\":").Append(fr.Formatting.Bold ? "true" : "false")
-              .Append(",\"italic\":").Append(fr.Formatting.Italic ? "true" : "false")
-              .Append(",\"underline\":").Append(fr.Formatting.Underline ? "true" : "false")
-              .Append(",\"strike\":").Append(fr.Formatting.Strike ? "true" : "false")
-              .Append(",\"code\":").Append(fr.Formatting.Code ? "true" : "false")
-              .Append("}}");
-        }
-        sb.Append(']');
-        // Groups omitted from placeholder serialization (rarely useful for this surface).
-        sb.Append('}');
-    }
-
-    private static string SerializeEditResults(System.Collections.Generic.IReadOnlyList<EditResult> results)
-    {
-        var sb = new StringBuilder(256);
-        sb.Append('[');
-        for (int i = 0; i < results.Count; i++)
-        {
-            if (i > 0) sb.Append(',');
-            sb.Append(Serialize(results[i]));
-        }
-        sb.Append(']');
-        return sb.ToString();
-    }
-
-    private static string SerializeMatches(System.Collections.Generic.IReadOnlyList<TextMatch> matches)
-    {
-        var sb = new StringBuilder(512);
-        sb.Append('[');
-        for (int i = 0; i < matches.Count; i++)
-        {
-            if (i > 0) sb.Append(',');
-            var m = matches[i];
-            sb.Append("{\"text\":").Append(JsonString(m.Text))
-              .Append(",\"enclosingAnchor\":");
-            AppendAnchor(sb, m.EnclosingAnchor);
-            sb.Append(",\"span\":{\"start\":").Append(m.Span.Start).Append(",\"length\":").Append(m.Span.Length).Append('}')
-              .Append(",\"contextBefore\":").Append(JsonString(m.ContextBefore))
-              .Append(",\"contextAfter\":").Append(JsonString(m.ContextAfter))
-              .Append(",\"groups\":");
-            AppendStringArray(sb, m.Groups);
-            sb.Append(",\"fragments\":");
-            AppendFragments(sb, m.Fragments);
-            sb.Append('}');
-        }
-        sb.Append(']');
-        return sb.ToString();
-    }
-
-    private static string SerializeCrossBlockMatches(System.Collections.Generic.IReadOnlyList<CrossBlockMatch> matches)
-    {
-        var sb = new StringBuilder(512);
-        sb.Append('[');
-        for (int i = 0; i < matches.Count; i++)
-        {
-            if (i > 0) sb.Append(',');
-            var m = matches[i];
-            sb.Append("{\"text\":").Append(JsonString(m.Text))
-              .Append(",\"enclosingAnchors\":[");
-            for (int a = 0; a < m.EnclosingAnchors.Count; a++)
-            {
-                if (a > 0) sb.Append(',');
-                AppendAnchor(sb, m.EnclosingAnchors[a]);
-            }
-            sb.Append(']')
-              .Append(",\"slices\":[");
-            for (int sIdx = 0; sIdx < m.Slices.Count; sIdx++)
-            {
-                if (sIdx > 0) sb.Append(',');
-                var slice = m.Slices[sIdx];
-                sb.Append("{\"anchor\":");
-                AppendAnchor(sb, slice.Anchor);
-                sb.Append(",\"spanInBlock\":{\"start\":").Append(slice.SpanInBlock.Start)
-                  .Append(",\"length\":").Append(slice.SpanInBlock.Length).Append('}')
-                  .Append(",\"fragments\":");
-                AppendFragments(sb, slice.Fragments);
-                sb.Append('}');
-            }
-            sb.Append(']')
-              .Append(",\"contextBefore\":").Append(JsonString(m.ContextBefore))
-              .Append(",\"contextAfter\":").Append(JsonString(m.ContextAfter))
-              .Append(",\"groups\":");
-            AppendStringArray(sb, m.Groups);
-            sb.Append('}');
-        }
-        sb.Append(']');
-        return sb.ToString();
-    }
-
-    private static void AppendAnchor(StringBuilder sb, AnchorTarget t) =>
-        sb.Append("{\"id\":").Append(JsonString(t.Anchor.Id))
-          .Append(",\"kind\":").Append(JsonString(t.Anchor.Kind))
-          .Append(",\"scope\":").Append(JsonString(t.Anchor.Scope))
-          .Append(",\"unid\":").Append(JsonString(t.Anchor.Unid))
-          .Append('}');
-
-    private static void AppendStringArray(StringBuilder sb, System.Collections.Generic.IReadOnlyList<string> items)
-    {
-        sb.Append('[');
-        for (int i = 0; i < items.Count; i++)
-        {
-            if (i > 0) sb.Append(',');
-            sb.Append(JsonString(items[i]));
-        }
-        sb.Append(']');
-    }
-
-    private static void AppendFragments(StringBuilder sb, System.Collections.Generic.IReadOnlyList<RunFragment> fragments)
-    {
-        sb.Append('[');
-        for (int f = 0; f < fragments.Count; f++)
-        {
-            if (f > 0) sb.Append(',');
-            var fr = fragments[f];
-            sb.Append("{\"unid\":").Append(JsonString(fr.Unid))
-              .Append(",\"text\":").Append(JsonString(fr.Text))
-              .Append(",\"spanInElement\":{\"start\":").Append(fr.SpanInElement.Start)
-              .Append(",\"length\":").Append(fr.SpanInElement.Length).Append('}')
-              .Append(",\"formatting\":{")
-              .Append("\"bold\":").Append(fr.Formatting.Bold ? "true" : "false")
-              .Append(",\"italic\":").Append(fr.Formatting.Italic ? "true" : "false")
-              .Append(",\"underline\":").Append(fr.Formatting.Underline ? "true" : "false")
-              .Append(",\"strike\":").Append(fr.Formatting.Strike ? "true" : "false")
-              .Append(",\"code\":").Append(fr.Formatting.Code ? "true" : "false");
-            if (fr.Formatting.Color is not null)
-                sb.Append(",\"color\":").Append(JsonString(fr.Formatting.Color));
-            if (fr.Formatting.HyperlinkUrl is not null)
-                sb.Append(",\"hyperlinkUrl\":").Append(JsonString(fr.Formatting.HyperlinkUrl));
-            if (fr.Formatting.RunStyle is not null)
-                sb.Append(",\"runStyle\":").Append(JsonString(fr.Formatting.RunStyle));
-            sb.Append("}}");
-        }
-        sb.Append(']');
-    }
-
-    private static string SerializeProjection(MarkdownProjection p)
-    {
-        var sb = new StringBuilder(p.Markdown.Length + 200);
-        sb.Append("{\"markdown\":").Append(JsonString(p.Markdown));
-        sb.Append(",\"anchorIndex\":{");
-        bool first = true;
-        foreach (var kv in p.AnchorIndex)
-        {
-            if (!first) sb.Append(',');
-            first = false;
-            sb.Append(JsonString(kv.Key)).Append(":{")
-              .Append("\"partUri\":").Append(JsonString(kv.Value.PartUri))
-              .Append(",\"unid\":").Append(JsonString(kv.Value.Unid))
-              .Append(",\"kind\":").Append(JsonString(kv.Value.Anchor.Kind))
-              .Append(",\"scope\":").Append(JsonString(kv.Value.Anchor.Scope))
-              .Append(",\"textPreview\":").Append(JsonString(kv.Value.TextPreview))
-              .Append('}');
-        }
-        sb.Append("}}");
-        return sb.ToString();
-    }
-
-    private static string JsonString(string s)
-    {
-        var sb = new StringBuilder(s.Length + 2);
-        sb.Append('"');
-        foreach (var c in s)
-        {
-            switch (c)
-            {
-                case '"': sb.Append("\\\""); break;
-                case '\\': sb.Append("\\\\"); break;
-                case '\n': sb.Append("\\n"); break;
-                case '\r': sb.Append("\\r"); break;
-                case '\t': sb.Append("\\t"); break;
-                case '\b': sb.Append("\\b"); break;
-                case '\f': sb.Append("\\f"); break;
-                default:
-                    if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("X4"));
-                    else sb.Append(c);
-                    break;
-            }
-        }
-        sb.Append('"');
-        return sb.ToString();
-    }
-
-    private static string EnumToSnake(EditErrorCode code)
-    {
-        var s = code.ToString();
-        var sb = new StringBuilder(s.Length + 4);
-        for (int i = 0; i < s.Length; i++)
-        {
-            if (i > 0 && char.IsUpper(s[i])) sb.Append('_');
-            sb.Append(char.ToLowerInvariant(s[i]));
-        }
-        return sb.ToString();
-    }
-
-    private static string SerializeAnchorTargets(System.Collections.Generic.IReadOnlyList<AnchorTarget> targets)
-    {
-        var sb = new StringBuilder(targets.Count * 128 + 2);
-        sb.Append('[');
-        for (int i = 0; i < targets.Count; i++)
-        {
-            if (i > 0) sb.Append(',');
-            AppendAnchorTarget(sb, targets[i]);
-        }
-        sb.Append(']');
-        return sb.ToString();
-    }
-
-    private static string SerializeAnchorTargetMap(
-        System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.IReadOnlyList<AnchorTarget>> map)
-    {
-        var sb = new StringBuilder(256);
-        sb.Append('{');
-        bool first = true;
-        foreach (var kv in map)
-        {
-            if (!first) sb.Append(',');
-            first = false;
-            sb.Append(JsonString(kv.Key)).Append(':');
-            sb.Append(SerializeAnchorTargets(kv.Value));
-        }
-        sb.Append('}');
-        return sb.ToString();
-    }
-
-    private static void AppendAnchorTarget(StringBuilder sb, AnchorTarget t)
-    {
-        sb.Append("{\"id\":").Append(JsonString(t.Anchor.Id))
-          .Append(",\"kind\":").Append(JsonString(t.Anchor.Kind))
-          .Append(",\"scope\":").Append(JsonString(t.Anchor.Scope))
-          .Append(",\"unid\":").Append(JsonString(t.Unid))
-          .Append(",\"partUri\":").Append(JsonString(t.PartUri))
-          .Append(",\"textPreview\":").Append(JsonString(t.TextPreview))
-          .Append('}');
-    }
-
-    private static string SerializeAnnotations(System.Collections.Generic.IReadOnlyList<DocumentAnnotation> anns)
-    {
-        var sb = new StringBuilder(anns.Count * 200 + 2);
-        sb.Append('[');
-        for (int i = 0; i < anns.Count; i++)
-        {
-            if (i > 0) sb.Append(',');
-            var a = anns[i];
-            sb.Append("{\"id\":").Append(JsonString(a.Id ?? string.Empty))
-              .Append(",\"labelId\":").Append(JsonString(a.LabelId ?? string.Empty))
-              .Append(",\"label\":").Append(JsonString(a.Label ?? string.Empty))
-              .Append(",\"color\":").Append(JsonString(a.Color ?? string.Empty))
-              .Append(",\"bookmarkName\":").Append(JsonString(a.BookmarkName ?? string.Empty));
-            if (a.Author is not null)
-                sb.Append(",\"author\":").Append(JsonString(a.Author));
-            if (a.Created.HasValue)
-                sb.Append(",\"created\":").Append(JsonString(a.Created.Value.ToString("o")));
-            if (a.AnnotatedText is not null)
-                sb.Append(",\"annotatedText\":").Append(JsonString(a.AnnotatedText));
-            sb.Append('}');
-        }
-        sb.Append(']');
-        return sb.ToString();
+        if (root.TryGetProperty("regexOptions", out var ro) && ro.ValueKind == JsonValueKind.Number)
+            regexOpts = (RegexOptions)ro.GetInt32();
+        if (root.TryGetProperty("scope", out var s) && s.ValueKind == JsonValueKind.Number)
+            scope = (ProjectionScopes)s.GetInt32();
+        if (root.TryGetProperty("contextChars", out var c) && c.ValueKind == JsonValueKind.Number)
+            contextChars = c.GetInt32();
+        if (root.TryGetProperty("whitespace", out var w) && w.ValueKind == JsonValueKind.Number)
+            whitespace = (WhitespaceMode)w.GetInt32();
     }
 }

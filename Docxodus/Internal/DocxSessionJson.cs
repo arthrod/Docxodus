@@ -1,0 +1,480 @@
+#nullable enable
+
+using System.Collections.Generic;
+using System.Text;
+using System.Text.Json;
+
+namespace Docxodus.Internal;
+
+/// <summary>
+/// Shared JSON serialization + parsing for the DocxSession bridge wire format.
+/// Both the WASM JSExport bridge and the stdio NDJSON host emit and consume the
+/// shapes defined here, so the TypeScript and Python clients see identical JSON.
+/// All output is camelCase; clients that prefer snake_case (e.g. Python dataclasses)
+/// convert during deserialization.
+/// </summary>
+internal static class DocxSessionJson
+{
+    // ─── Parsers ────────────────────────────────────────────────────────
+
+    public static Position ParsePos(string s) =>
+        string.Equals(s, "before", System.StringComparison.OrdinalIgnoreCase) ? Position.Before : Position.After;
+
+    public static DocxSessionSettings ParseSettings(string settingsJson)
+    {
+        if (string.IsNullOrEmpty(settingsJson)) return new DocxSessionSettings();
+        using var doc = JsonDocument.Parse(settingsJson);
+        var root = doc.RootElement;
+        int undoDepth = TryGetInt(root, "undoDepth", 50);
+        bool validateRawOps = TryGetBool(root, "validateRawOps", false);
+        var trackedStr = TryGetString(root, "trackedChanges", "accept");
+        var tracked = trackedStr switch
+        {
+            "render_inline" => TrackedChangeMode.RenderInline,
+            "strip_deletions" => TrackedChangeMode.StripDeletions,
+            _ => TrackedChangeMode.Accept,
+        };
+        var revisionAuthor = TryGetString(root, "revisionAuthor", null);
+        bool persistAnchorIds = TryGetBool(root, "persistAnchorIds", false);
+        bool smartQuotes = TryGetBool(root, "smartQuotes", false);
+        return new DocxSessionSettings
+        {
+            UndoDepth = undoDepth,
+            ValidateRawOps = validateRawOps,
+            TrackedChanges = tracked,
+            RevisionAuthor = revisionAuthor,
+            PersistAnchorIds = persistAnchorIds,
+            SmartQuotes = smartQuotes,
+        };
+    }
+
+    public static FormatOp ParseFormatOp(string json)
+    {
+        if (string.IsNullOrEmpty(json)) return new FormatOp();
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        return new FormatOp
+        {
+            Bold = TryGetBoolNullable(root, "bold"),
+            Italic = TryGetBoolNullable(root, "italic"),
+            Underline = TryGetBoolNullable(root, "underline"),
+            Strike = TryGetBoolNullable(root, "strike"),
+            Code = TryGetBoolNullable(root, "code"),
+            Color = TryGetString(root, "color", null),
+            RunStyle = TryGetString(root, "runStyle", null),
+        };
+    }
+
+    public static FindOptions? ParseFindOptions(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        return new FindOptions
+        {
+            IgnoreCase = TryGetBool(root, "ignoreCase", false),
+            IgnoreWhitespace = TryGetBool(root, "ignoreWhitespace", false),
+            KindFilter = TryGetString(root, "kindFilter", null),
+            ScopeFilter = TryGetString(root, "scopeFilter", null),
+        };
+    }
+
+    public static int TryGetInt(JsonElement root, string name, int fallback) =>
+        root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : fallback;
+
+    public static bool TryGetBool(JsonElement root, string name, bool fallback) =>
+        root.TryGetProperty(name, out var v) && (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False) ? v.GetBoolean() : fallback;
+
+    public static bool? TryGetBoolNullable(JsonElement root, string name) =>
+        root.TryGetProperty(name, out var v) && (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False) ? v.GetBoolean() : (bool?)null;
+
+    public static string? TryGetString(JsonElement root, string name, string? fallback) =>
+        root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : fallback;
+
+    // ─── Serializers ────────────────────────────────────────────────────
+
+    public static string Serialize(EditResult r)
+    {
+        var sb = new StringBuilder(256);
+        sb.Append("{\"success\":").Append(r.Success ? "true" : "false");
+        if (r.Error is not null)
+        {
+            sb.Append(",\"error\":{")
+              .Append("\"code\":\"").Append(EnumToSnake(r.Error.Code)).Append('"')
+              .Append(",\"message\":").Append(JsonString(r.Error.Message));
+            if (r.Error.AnchorId is not null)
+                sb.Append(",\"anchorId\":").Append(JsonString(r.Error.AnchorId));
+            sb.Append('}');
+        }
+        sb.Append(",\"created\":"); AppendAnchorArray(sb, r.Created);
+        sb.Append(",\"removed\":"); AppendAnchorArray(sb, r.Removed);
+        sb.Append(",\"modified\":"); AppendAnchorArray(sb, r.Modified);
+        if (r.Patch is not null)
+        {
+            sb.Append(",\"patch\":{")
+              .Append("\"scopeAnchorId\":").Append(JsonString(r.Patch.ScopeAnchorId))
+              .Append(",\"markdown\":").Append(JsonString(r.Patch.Markdown))
+              .Append('}');
+        }
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    public static string SerializeEditResults(IReadOnlyList<EditResult> results)
+    {
+        var sb = new StringBuilder(256);
+        sb.Append('[');
+        for (int i = 0; i < results.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append(Serialize(results[i]));
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+
+    public static void AppendAnchorArray(StringBuilder sb, IReadOnlyList<Anchor> anchors)
+    {
+        sb.Append('[');
+        for (int i = 0; i < anchors.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var a = anchors[i];
+            sb.Append('{')
+              .Append("\"id\":").Append(JsonString(a.Id))
+              .Append(",\"kind\":").Append(JsonString(a.Kind))
+              .Append(",\"scope\":").Append(JsonString(a.Scope))
+              .Append(",\"unid\":").Append(JsonString(a.Unid))
+              .Append('}');
+        }
+        sb.Append(']');
+    }
+
+    public static string SerializePlaceholders(IReadOnlyList<TemplatePlaceholder> placeholders)
+    {
+        var sb = new StringBuilder(512);
+        sb.Append('[');
+        for (int i = 0; i < placeholders.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var p = placeholders[i];
+            sb.Append("{\"kind\":\"").Append(p.Kind switch
+            {
+                PlaceholderKind.BlankFill => "blank_fill",
+                PlaceholderKind.AlternativeClause => "alternative_clause",
+                PlaceholderKind.Instruction => "instruction",
+                _ => "unknown",
+            }).Append('"');
+            if (p.Hint is not null)
+                sb.Append(",\"hint\":").Append(JsonString(p.Hint));
+            sb.Append(",\"match\":");
+            AppendMatch(sb, p.Match);
+            sb.Append('}');
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+
+    public static void AppendMatch(StringBuilder sb, TextMatch m)
+    {
+        sb.Append("{\"text\":").Append(JsonString(m.Text))
+          .Append(",\"enclosingAnchor\":{")
+          .Append("\"id\":").Append(JsonString(m.EnclosingAnchor.Anchor.Id))
+          .Append(",\"kind\":").Append(JsonString(m.EnclosingAnchor.Anchor.Kind))
+          .Append(",\"scope\":").Append(JsonString(m.EnclosingAnchor.Anchor.Scope))
+          .Append(",\"unid\":").Append(JsonString(m.EnclosingAnchor.Anchor.Unid))
+          .Append('}')
+          .Append(",\"span\":{\"start\":").Append(m.Span.Start).Append(",\"length\":").Append(m.Span.Length).Append('}')
+          .Append(",\"contextBefore\":").Append(JsonString(m.ContextBefore))
+          .Append(",\"contextAfter\":").Append(JsonString(m.ContextAfter))
+          .Append(",\"fragments\":[");
+        for (int f = 0; f < m.Fragments.Count; f++)
+        {
+            if (f > 0) sb.Append(',');
+            var fr = m.Fragments[f];
+            sb.Append("{\"unid\":").Append(JsonString(fr.Unid))
+              .Append(",\"text\":").Append(JsonString(fr.Text))
+              .Append(",\"spanInElement\":{\"start\":").Append(fr.SpanInElement.Start)
+              .Append(",\"length\":").Append(fr.SpanInElement.Length).Append('}')
+              .Append(",\"formatting\":{")
+              .Append("\"bold\":").Append(fr.Formatting.Bold ? "true" : "false")
+              .Append(",\"italic\":").Append(fr.Formatting.Italic ? "true" : "false")
+              .Append(",\"underline\":").Append(fr.Formatting.Underline ? "true" : "false")
+              .Append(",\"strike\":").Append(fr.Formatting.Strike ? "true" : "false")
+              .Append(",\"code\":").Append(fr.Formatting.Code ? "true" : "false")
+              .Append("}}");
+        }
+        sb.Append(']');
+        // Groups omitted from placeholder serialization (rarely useful for this surface).
+        sb.Append('}');
+    }
+
+    public static string SerializeMatches(IReadOnlyList<TextMatch> matches)
+    {
+        var sb = new StringBuilder(512);
+        sb.Append('[');
+        for (int i = 0; i < matches.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var m = matches[i];
+            sb.Append("{\"text\":").Append(JsonString(m.Text))
+              .Append(",\"enclosingAnchor\":");
+            AppendAnchor(sb, m.EnclosingAnchor);
+            sb.Append(",\"span\":{\"start\":").Append(m.Span.Start).Append(",\"length\":").Append(m.Span.Length).Append('}')
+              .Append(",\"contextBefore\":").Append(JsonString(m.ContextBefore))
+              .Append(",\"contextAfter\":").Append(JsonString(m.ContextAfter))
+              .Append(",\"groups\":");
+            AppendStringArray(sb, m.Groups);
+            sb.Append(",\"fragments\":");
+            AppendFragments(sb, m.Fragments);
+            sb.Append('}');
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+
+    public static string SerializeCrossBlockMatches(IReadOnlyList<CrossBlockMatch> matches)
+    {
+        var sb = new StringBuilder(512);
+        sb.Append('[');
+        for (int i = 0; i < matches.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var m = matches[i];
+            sb.Append("{\"text\":").Append(JsonString(m.Text))
+              .Append(",\"enclosingAnchors\":[");
+            for (int a = 0; a < m.EnclosingAnchors.Count; a++)
+            {
+                if (a > 0) sb.Append(',');
+                AppendAnchor(sb, m.EnclosingAnchors[a]);
+            }
+            sb.Append(']')
+              .Append(",\"slices\":[");
+            for (int sIdx = 0; sIdx < m.Slices.Count; sIdx++)
+            {
+                if (sIdx > 0) sb.Append(',');
+                var slice = m.Slices[sIdx];
+                sb.Append("{\"anchor\":");
+                AppendAnchor(sb, slice.Anchor);
+                sb.Append(",\"spanInBlock\":{\"start\":").Append(slice.SpanInBlock.Start)
+                  .Append(",\"length\":").Append(slice.SpanInBlock.Length).Append('}')
+                  .Append(",\"fragments\":");
+                AppendFragments(sb, slice.Fragments);
+                sb.Append('}');
+            }
+            sb.Append(']')
+              .Append(",\"contextBefore\":").Append(JsonString(m.ContextBefore))
+              .Append(",\"contextAfter\":").Append(JsonString(m.ContextAfter))
+              .Append(",\"groups\":");
+            AppendStringArray(sb, m.Groups);
+            sb.Append('}');
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+
+    public static void AppendAnchor(StringBuilder sb, AnchorTarget t) =>
+        sb.Append("{\"id\":").Append(JsonString(t.Anchor.Id))
+          .Append(",\"kind\":").Append(JsonString(t.Anchor.Kind))
+          .Append(",\"scope\":").Append(JsonString(t.Anchor.Scope))
+          .Append(",\"unid\":").Append(JsonString(t.Anchor.Unid))
+          .Append('}');
+
+    public static void AppendStringArray(StringBuilder sb, IReadOnlyList<string> items)
+    {
+        sb.Append('[');
+        for (int i = 0; i < items.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append(JsonString(items[i]));
+        }
+        sb.Append(']');
+    }
+
+    public static void AppendFragments(StringBuilder sb, IReadOnlyList<RunFragment> fragments)
+    {
+        sb.Append('[');
+        for (int f = 0; f < fragments.Count; f++)
+        {
+            if (f > 0) sb.Append(',');
+            var fr = fragments[f];
+            sb.Append("{\"unid\":").Append(JsonString(fr.Unid))
+              .Append(",\"text\":").Append(JsonString(fr.Text))
+              .Append(",\"spanInElement\":{\"start\":").Append(fr.SpanInElement.Start)
+              .Append(",\"length\":").Append(fr.SpanInElement.Length).Append('}')
+              .Append(",\"formatting\":{")
+              .Append("\"bold\":").Append(fr.Formatting.Bold ? "true" : "false")
+              .Append(",\"italic\":").Append(fr.Formatting.Italic ? "true" : "false")
+              .Append(",\"underline\":").Append(fr.Formatting.Underline ? "true" : "false")
+              .Append(",\"strike\":").Append(fr.Formatting.Strike ? "true" : "false")
+              .Append(",\"code\":").Append(fr.Formatting.Code ? "true" : "false");
+            if (fr.Formatting.Color is not null)
+                sb.Append(",\"color\":").Append(JsonString(fr.Formatting.Color));
+            if (fr.Formatting.HyperlinkUrl is not null)
+                sb.Append(",\"hyperlinkUrl\":").Append(JsonString(fr.Formatting.HyperlinkUrl));
+            if (fr.Formatting.RunStyle is not null)
+                sb.Append(",\"runStyle\":").Append(JsonString(fr.Formatting.RunStyle));
+            sb.Append("}}");
+        }
+        sb.Append(']');
+    }
+
+    public static string SerializeProjection(MarkdownProjection p)
+    {
+        var sb = new StringBuilder(p.Markdown.Length + 200);
+        sb.Append("{\"markdown\":").Append(JsonString(p.Markdown));
+        sb.Append(",\"anchorIndex\":{");
+        bool first = true;
+        foreach (var kv in p.AnchorIndex)
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append(JsonString(kv.Key)).Append(":{")
+              .Append("\"partUri\":").Append(JsonString(kv.Value.PartUri))
+              .Append(",\"unid\":").Append(JsonString(kv.Value.Unid))
+              .Append(",\"kind\":").Append(JsonString(kv.Value.Anchor.Kind))
+              .Append(",\"scope\":").Append(JsonString(kv.Value.Anchor.Scope))
+              .Append(",\"textPreview\":").Append(JsonString(kv.Value.TextPreview))
+              .Append('}');
+        }
+        sb.Append("}}");
+        return sb.ToString();
+    }
+
+    public static string JsonString(string s)
+    {
+        var sb = new StringBuilder(s.Length + 2);
+        sb.Append('"');
+        foreach (var c in s)
+        {
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                case '\b': sb.Append("\\b"); break;
+                case '\f': sb.Append("\\f"); break;
+                default:
+                    if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("X4"));
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
+
+    public static string EnumToSnake(EditErrorCode code)
+    {
+        var s = code.ToString();
+        var sb = new StringBuilder(s.Length + 4);
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (i > 0 && char.IsUpper(s[i])) sb.Append('_');
+            sb.Append(char.ToLowerInvariant(s[i]));
+        }
+        return sb.ToString();
+    }
+
+    public static string SerializeAnchorTargets(IReadOnlyList<AnchorTarget> targets)
+    {
+        var sb = new StringBuilder(targets.Count * 128 + 2);
+        sb.Append('[');
+        for (int i = 0; i < targets.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            AppendAnchorTarget(sb, targets[i]);
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+
+    public static string SerializeAnchorTargetMap(
+        IReadOnlyDictionary<string, IReadOnlyList<AnchorTarget>> map)
+    {
+        var sb = new StringBuilder(256);
+        sb.Append('{');
+        bool first = true;
+        foreach (var kv in map)
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append(JsonString(kv.Key)).Append(':');
+            sb.Append(SerializeAnchorTargets(kv.Value));
+        }
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    public static void AppendAnchorTarget(StringBuilder sb, AnchorTarget t)
+    {
+        sb.Append("{\"id\":").Append(JsonString(t.Anchor.Id))
+          .Append(",\"kind\":").Append(JsonString(t.Anchor.Kind))
+          .Append(",\"scope\":").Append(JsonString(t.Anchor.Scope))
+          .Append(",\"unid\":").Append(JsonString(t.Unid))
+          .Append(",\"partUri\":").Append(JsonString(t.PartUri))
+          .Append(",\"textPreview\":").Append(JsonString(t.TextPreview))
+          .Append('}');
+    }
+
+    public static string SerializeAnchorTargetOrNull(AnchorTarget? target)
+    {
+        if (target is null) return "null";
+        var sb = new StringBuilder(128);
+        AppendAnchorTarget(sb, target);
+        return sb.ToString();
+    }
+
+    public static string SerializeAnchorInfoMap(IReadOnlyDictionary<string, AnchorInfo?> map)
+    {
+        var sb = new StringBuilder(map.Count * 100 + 2);
+        sb.Append('{');
+        bool first = true;
+        foreach (var kv in map)
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append(JsonString(kv.Key)).Append(':');
+            sb.Append(SerializeAnchorInfoOrNull(kv.Value));
+        }
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    public static string SerializeAnchorInfoOrNull(AnchorInfo? info)
+    {
+        if (info is null) return "null";
+        var sb = new StringBuilder(128);
+        sb.Append("{\"id\":").Append(JsonString(info.Id))
+          .Append(",\"kind\":").Append(JsonString(info.Kind))
+          .Append(",\"scope\":").Append(JsonString(info.Scope))
+          .Append(",\"textPreview\":").Append(JsonString(info.TextPreview))
+          .Append('}');
+        return sb.ToString();
+    }
+
+    public static string SerializeAnnotations(IReadOnlyList<DocumentAnnotation> anns)
+    {
+        var sb = new StringBuilder(anns.Count * 200 + 2);
+        sb.Append('[');
+        for (int i = 0; i < anns.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var a = anns[i];
+            sb.Append("{\"id\":").Append(JsonString(a.Id ?? string.Empty))
+              .Append(",\"labelId\":").Append(JsonString(a.LabelId ?? string.Empty))
+              .Append(",\"label\":").Append(JsonString(a.Label ?? string.Empty))
+              .Append(",\"color\":").Append(JsonString(a.Color ?? string.Empty))
+              .Append(",\"bookmarkName\":").Append(JsonString(a.BookmarkName ?? string.Empty));
+            if (a.Author is not null)
+                sb.Append(",\"author\":").Append(JsonString(a.Author));
+            if (a.Created.HasValue)
+                sb.Append(",\"created\":").Append(JsonString(a.Created.Value.ToString("o")));
+            if (a.AnnotatedText is not null)
+                sb.Append(",\"annotatedText\":").Append(JsonString(a.AnnotatedText));
+            sb.Append('}');
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+}
