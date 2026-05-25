@@ -415,6 +415,89 @@ public class DocxSessionTests
         Assert.Empty(simpleBlankFill.AlternativeKinds);
     }
 
+    [Fact]
+    public void DS240_FillPlaceholders_BlankFillPickerReplacesValue()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var result = session.FillPlaceholders(p =>
+            p.Kind == PlaceholderKind.BlankFill && p.Match.Text == "[_____]"
+                ? "ACME, INC."
+                : null);
+        Assert.True(result.Filled >= 1);
+        Assert.Empty(result.Errors);
+
+        // Verify the first paragraph now contains "ACME, INC."
+        var projection = session.Project();
+        var firstPara = projection.AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h");
+        Assert.Contains("ACME, INC.", firstPara.TextPreview);
+    }
+
+    [Fact]
+    public void DS241_FillPlaceholders_PickerReturningNullSkips()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var result = session.FillPlaceholders(p => null);   // skip everything
+        Assert.Equal(0, result.Filled);
+        Assert.True(result.Skipped > 0);
+        Assert.NotEmpty(result.Unfilled);
+    }
+
+    [Fact]
+    public void DS242_FillPlaceholders_PreservesDollarPrefix()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var result = session.FillPlaceholders(p =>
+            p.Match.Text.Contains("$[___]") ? "0.20" : null);
+        Assert.Equal(1, result.Filled);
+
+        // The dollar-prefixed paragraph should now read "$0.20", not "0.20" or "$$0.20".
+        var projection = session.Project();
+        var allMd = projection.Markdown;
+        Assert.Contains("$0.20", allMd);
+        Assert.DoesNotContain("$$0.20", allMd);
+    }
+
+    [Fact]
+    public void DS243_FillPlaceholders_DollarPrefixDisabled()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var options = new FillOptions { PreserveDollarPrefix = false };
+        var result = session.FillPlaceholders(
+            p => p.Match.Text.Contains("$[___]") ? "0.20" : null,
+            options);
+        Assert.Equal(1, result.Filled);
+
+        // With PreserveDollarPrefix=false, the "$" is overwritten by the replacement.
+        var projection = session.Project();
+        Assert.Contains("share is 0.20.", projection.Markdown);
+        Assert.DoesNotContain("$0.20", projection.Markdown);
+    }
+
+    [Fact]
+    public void DS244_FillPlaceholders_AlternativeClauseMultiPassStripsNestedBrackets()
+    {
+        // The "[outer [inner] clause]" placeholder is nested; FindPlaceholders returns
+        // INNERMOST first, so stripping has to iterate. FillPlaceholders should converge
+        // after multiple passes when picker strips brackets uniformly.
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var options = new FillOptions { Kinds = PlaceholderKinds.AlternativeClause };
+        var result = session.FillPlaceholders(p =>
+        {
+            // Strip [ and ] from the match's bracketed portion, preserve any prefix/suffix.
+            var t = p.Match.Text;
+            int lb = t.IndexOf('['), rb = t.LastIndexOf(']');
+            if (lb < 0 || rb <= lb) return null;
+            return t[..lb] + t[(lb + 1)..rb] + t[(rb + 1)..];
+        }, options);
+
+        Assert.True(result.Passes >= 2);
+
+        // After convergence, no AlternativeClause matches remain.
+        var leftover = session.FindPlaceholders(PlaceholderKinds.AlternativeClause);
+        Assert.Empty(leftover);
+    }
+
     // ─── Phase 3: text CRUD + undo/redo ──────────────────────────────────
 
     [Fact]

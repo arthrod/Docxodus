@@ -187,6 +187,58 @@ public sealed record ReplaceOptions
 }
 
 /// <summary>
+/// Options for <see cref="DocxSession.FillPlaceholders"/>.
+/// </summary>
+public sealed record FillOptions
+{
+    /// <summary>Which placeholder kinds to fill. Defaults to <c>BlankFill | Instruction</c>
+    /// — the kinds with a single replacement value. Add <c>AlternativeClause</c> to
+    /// run the picker on bracketed clauses too (e.g. for bracket-stripping).</summary>
+    public PlaceholderKinds Kinds { get; init; } = PlaceholderKinds.BlankFill | PlaceholderKinds.Instruction;
+
+    /// <summary>Which package parts to scan. Defaults to body.</summary>
+    public ProjectionScopes Scope { get; init; } = ProjectionScopes.Body;
+
+    /// <summary>Maximum iteration passes. <see cref="DocxSession.FindPlaceholders"/> returns
+    /// innermost brackets only; stripping one layer can surface a previously-nested
+    /// outer layer, so multi-pass iteration is sometimes needed. The default of 8
+    /// is a safety cap against infinite loops on adversarial input. Set higher if
+    /// you have deeply-nested templates.</summary>
+    public int MaxPasses { get; init; } = 8;
+
+    /// <summary>When <c>true</c> (default), if the placeholder match text starts
+    /// with <c>"$"</c> (the regex <c>\$?\[…\]</c> captured a leading dollar sign)
+    /// and the picker's return value does not start with <c>"$"</c>, the dollar
+    /// is preserved by prepending it to the replacement. Set to <c>false</c> if
+    /// you want full control over the replacement and to overwrite the <c>$</c>.</summary>
+    public bool PreserveDollarPrefix { get; init; } = true;
+}
+
+/// <summary>
+/// Aggregate result envelope returned by <see cref="DocxSession.FillPlaceholders"/>.
+/// </summary>
+public sealed record BulkEditResult
+{
+    /// <summary>Number of placeholders filled by the picker.</summary>
+    public int Filled { get; init; }
+
+    /// <summary>Number of placeholders for which the picker returned <c>null</c>
+    /// (counted once per placeholder, in the first pass that saw it).</summary>
+    public int Skipped { get; init; }
+
+    /// <summary>How many iteration passes ran. <c>1</c> means a single pass
+    /// converged; higher values mean multi-pass nested-bracket stripping.</summary>
+    public int Passes { get; init; }
+
+    /// <summary>Placeholders the picker returned <c>null</c> for.</summary>
+    public IReadOnlyList<TemplatePlaceholder> Unfilled { get; init; } = Array.Empty<TemplatePlaceholder>();
+
+    /// <summary>Per-replacement failures. Populated when <see cref="DocxSession.ReplaceMatch"/>
+    /// returned <c>Success = false</c> for an attempted fill.</summary>
+    public IReadOnlyList<EditError> Errors { get; init; } = Array.Empty<EditError>();
+}
+
+/// <summary>
 /// Categories of bracketed placeholders that <see cref="DocxSession.FindPlaceholders"/>
 /// recognizes. Templates routinely mix these — a real-world COI has dozens of value
 /// blanks, dozens of optional clauses, and dozens of drafter hints, all inside
@@ -1201,6 +1253,81 @@ public sealed class DocxSession : IDisposable
             PlaceholderKind.AlternativeClause => PlaceholderKinds.AlternativeClause,
             PlaceholderKind.Instruction => PlaceholderKinds.Instruction,
             _ => 0,
+        };
+    }
+
+    /// <summary>
+    /// Picker-driven template fill. For every placeholder matching
+    /// <see cref="FillOptions.Kinds"/>, calls <paramref name="picker"/>; if the picker
+    /// returns a non-null string, the placeholder is replaced (with optional
+    /// <c>$</c>-prefix preservation per <see cref="FillOptions.PreserveDollarPrefix"/>).
+    /// Iterates until no more placeholders match (or until <see cref="FillOptions.MaxPasses"/>
+    /// is reached, or a pass makes zero state changes) — important when
+    /// <see cref="FillOptions.Kinds"/> includes <see cref="PlaceholderKinds.AlternativeClause"/>
+    /// and the doc has nested brackets that surface only after the inner ones are stripped.
+    /// Replacements within a paragraph are applied in reverse-offset order automatically.
+    /// </summary>
+    public BulkEditResult FillPlaceholders(
+        Func<TemplatePlaceholder, string?> picker,
+        FillOptions? options = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(picker);
+        var opts = options ?? new FillOptions();
+
+        int filled = 0;
+        int passes = 0;
+        var errors = new List<EditError>();
+        var unfilled = new List<TemplatePlaceholder>();
+        var seenSkipKeys = new HashSet<(string AnchorId, int Start, int Length)>();
+
+        for (passes = 1; passes <= opts.MaxPasses; passes++)
+        {
+            var placeholders = FindPlaceholders(opts.Kinds, opts.Scope)
+                .OrderByDescending(p => p.Match.EnclosingAnchor.Anchor.Id, StringComparer.Ordinal)
+                .ThenByDescending(p => p.Match.Span.Start)
+                .ToList();
+            if (placeholders.Count == 0) break;
+
+            int passChanges = 0;
+            foreach (var p in placeholders)
+            {
+                var pick = picker(p);
+                if (pick is null)
+                {
+                    // Count each skip exactly once per placeholder lifetime.
+                    var key = (p.Match.EnclosingAnchor.Anchor.Id, p.Match.Span.Start, p.Match.Span.Length);
+                    if (seenSkipKeys.Add(key))
+                        unfilled.Add(p);
+                    continue;
+                }
+
+                if (opts.PreserveDollarPrefix && p.Match.Text.StartsWith("$") && !pick.StartsWith("$"))
+                    pick = "$" + pick;
+
+                var r = ReplaceMatch(p.Match, pick);
+                if (r.Success)
+                {
+                    filled++;
+                    passChanges++;
+                }
+                else if (r.Error is { } err)
+                {
+                    errors.Add(err);
+                }
+            }
+
+            // If this pass made no changes, the picker is steady-state — stop iterating.
+            if (passChanges == 0) break;
+        }
+
+        return new BulkEditResult
+        {
+            Filled = filled,
+            Skipped = unfilled.Count,
+            Passes = passes > opts.MaxPasses ? opts.MaxPasses : passes,
+            Unfilled = unfilled,
+            Errors = errors,
         };
     }
 
