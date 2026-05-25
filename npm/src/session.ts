@@ -1,0 +1,137 @@
+// Copyright (c) Microsoft. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
+import type {
+  AnchorRef,
+  CharSpan,
+  DocxodusWasmExports,
+  DocxSessionProjection,
+  DocxSessionSettings,
+  EditResult,
+  FormatOp,
+} from "./types.js";
+
+/**
+ * Stateful in-memory DOCX editing session keyed by markdown-projection anchor ids.
+ * Mirror of the .NET `DocxSession` surface. See
+ * `docs/architecture/docx_mutation_api.md` for the surface contract,
+ * anchor lifecycle, error catalog, and supported markdown subset.
+ *
+ * Sessions are not eligible for JS-side garbage collection — call {@link close}
+ * (or use a `using` block under TypeScript 5.2+) when done.
+ */
+export class DocxSession {
+  private readonly handle: number;
+  private readonly wasm: DocxodusWasmExports["DocxSessionBridge"];
+
+  /** @internal */
+  constructor(handle: number, wasm: DocxodusWasmExports["DocxSessionBridge"]) {
+    this.handle = handle;
+    this.wasm = wasm;
+  }
+
+  // ─── View ────────────────────────────────────────────────────────────
+
+  project(): DocxSessionProjection {
+    return JSON.parse(this.wasm.Project(this.handle)) as DocxSessionProjection;
+  }
+
+  // ─── Tier A: text CRUD ───────────────────────────────────────────────
+
+  replaceText(anchorId: string, markdown: string): EditResult {
+    return JSON.parse(this.wasm.ReplaceText(this.handle, anchorId, markdown)) as EditResult;
+  }
+
+  deleteBlock(anchorId: string): EditResult {
+    return JSON.parse(this.wasm.DeleteBlock(this.handle, anchorId)) as EditResult;
+  }
+
+  // ─── Tier B: structural ──────────────────────────────────────────────
+
+  insertParagraph(anchorId: string, position: "before" | "after", markdown: string): EditResult {
+    return JSON.parse(this.wasm.InsertParagraph(this.handle, anchorId, position, markdown)) as EditResult;
+  }
+
+  splitParagraph(anchorId: string, characterOffset: number): EditResult {
+    return JSON.parse(this.wasm.SplitParagraph(this.handle, anchorId, characterOffset)) as EditResult;
+  }
+
+  mergeParagraphs(firstAnchorId: string, secondAnchorId: string): EditResult {
+    return JSON.parse(this.wasm.MergeParagraphs(this.handle, firstAnchorId, secondAnchorId)) as EditResult;
+  }
+
+  // ─── Tier C: formatting ──────────────────────────────────────────────
+
+  applyFormat(anchorId: string, span: CharSpan | null, op: FormatOp): EditResult {
+    const spanJson = span ? JSON.stringify(span) : "";
+    return JSON.parse(this.wasm.ApplyFormat(this.handle, anchorId, spanJson, JSON.stringify(op))) as EditResult;
+  }
+
+  setParagraphStyle(anchorId: string, styleId: string): EditResult {
+    return JSON.parse(this.wasm.SetParagraphStyle(this.handle, anchorId, styleId)) as EditResult;
+  }
+
+  setListLevel(anchorId: string, levelDelta: number): EditResult {
+    return JSON.parse(this.wasm.SetListLevel(this.handle, anchorId, levelDelta)) as EditResult;
+  }
+
+  removeListMembership(anchorId: string): EditResult {
+    return JSON.parse(this.wasm.RemoveListMembership(this.handle, anchorId)) as EditResult;
+  }
+
+  // ─── Tier D: cell content ────────────────────────────────────────────
+
+  replaceCellContent(cellAnchorId: string, markdown: string): EditResult {
+    return JSON.parse(this.wasm.ReplaceCellContent(this.handle, cellAnchorId, markdown)) as EditResult;
+  }
+
+  // ─── Raw escape hatch ────────────────────────────────────────────────
+
+  readonly raw = {
+    getXml: (anchorId: string): string => this.wasm.RawGetXml(this.handle, anchorId),
+    insertXml: (anchorId: string, position: "before" | "after", xml: string): EditResult =>
+      JSON.parse(this.wasm.RawInsertXml(this.handle, anchorId, position, xml)) as EditResult,
+    replaceXml: (anchorId: string, xml: string): EditResult =>
+      JSON.parse(this.wasm.RawReplaceXml(this.handle, anchorId, xml)) as EditResult,
+  };
+
+  // ─── Lifecycle ───────────────────────────────────────────────────────
+
+  undo(): boolean {
+    return this.wasm.Undo(this.handle);
+  }
+
+  redo(): boolean {
+    return this.wasm.Redo(this.handle);
+  }
+
+  save(): Uint8Array {
+    return this.wasm.Save(this.handle);
+  }
+
+  close(): void {
+    this.wasm.CloseSession(this.handle);
+  }
+
+  // TypeScript 5.2+ disposable protocol
+  [Symbol.dispose]?(): void {
+    this.close();
+  }
+}
+
+/**
+ * Opens a new {@link DocxSession} over the supplied DOCX bytes.
+ * The returned session holds its document in WASM memory until you call
+ * {@link DocxSession.close} (or it is disposed).
+ */
+export function openDocxSession(
+  bytes: Uint8Array,
+  wasmExports: DocxodusWasmExports,
+  settings?: DocxSessionSettings,
+): DocxSession {
+  const bridge = wasmExports.DocxSessionBridge;
+  const handle = bridge.OpenSession(bytes, settings ? JSON.stringify(settings) : "");
+  return new DocxSession(handle, bridge);
+}
+
+export type { AnchorRef, CharSpan, DocxSessionProjection, DocxSessionSettings, EditError, EditErrorCode, EditResult, FormatOp, MarkdownPatch } from "./types.js";

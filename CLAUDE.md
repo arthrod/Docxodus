@@ -154,6 +154,8 @@ The core library compiles in two modes controlled by the `WASM_BUILD` MSBuild pr
 
 When touching image/font/color code, check whether your change compiles under `WASM_BUILD` before shipping — the npm build will fail loudly if it doesn't.
 
+**Switching back from a WASM build to the default build:** after `scripts/build-wasm.sh` runs, the cached `Docxodus.dll` in `Docxodus/bin/Debug/net8.0/` is the WASM-mode assembly (no `SkiaSharp`, no `ImageInfo.SaveImage`). The next `dotnet build Docxodus.sln` won't recompile it because nothing changed in `Docxodus/`, but `Docxodus.Tests` links against the stale binary and fails with `error CS1061: 'ImageInfo' does not contain a definition for 'SaveImage'`. Fix: run `dotnet clean Docxodus.sln` once before going back to the non-WASM workflow.
+
 ### Document Wrapper Classes
 
 The library uses in-memory byte array wrappers for documents:
@@ -240,10 +242,22 @@ See `docs/architecture/comment_rendering.md` for detailed comment rendering docu
 - Structural annotations (sections, paragraphs, tables) with relationships
 - See `docs/architecture/opencontracts_export.md` for detailed documentation
 
-**WmlToMarkdownConverter.cs** - Anchor-addressed markdown projection of a Word document. **Scaffold only** — public surface is fixed, projection logic ships in phases. A stable text view of a DOCX with stable IDs, suitable for LLM editing pipelines, structured search indexers, and diff/review UIs:
+**WmlToMarkdownConverter.cs** - Anchor-addressed markdown projection of a Word document. A stable text view of a DOCX with stable IDs, suitable for LLM editing pipelines, structured search indexers, and diff/review UIs:
 - `Convert(WmlDocument, WmlToMarkdownConverterSettings)` / `Convert(WordprocessingDocument, ...)` - returns `MarkdownProjection` (markdown text + anchor index)
 - Anchors have the form `{#kind:scope:unid}` (e.g. `{#p:body:a1b2c3d4}`), derived from Docxodus' existing Unid system
-- See `docs/architecture/markdown_projection.md` for the projection spec and implementation phases
+- See `docs/architecture/markdown_projection.md` for the projection spec
+
+**DocxSession.cs** - Stateful in-memory DOCX editing API keyed by markdown-projection anchor ids. The write-side counterpart to `WmlToMarkdownConverter` for agentic editing pipelines:
+- `new DocxSession(byte[] bytes, DocxSessionSettings? settings = null)` - open a session over in-memory DOCX bytes
+- Tier A (text CRUD): `ReplaceText(anchor, markdown)`, `DeleteBlock(anchor)`
+- Tier B (structural): `InsertParagraph(anchor, Position, markdown)`, `SplitParagraph(anchor, offset)`, `MergeParagraphs(first, second)`
+- Tier C (formatting): `ApplyFormat(anchor, CharSpan?, FormatOp)`, `SetParagraphStyle(anchor, styleId)`, `SetListLevel(anchor, delta)`, `RemoveListMembership(anchor)`
+- Tier D (advanced): `ReplaceCellContent(cellAnchor, markdown)`; `Settings.TrackedChanges = RenderInline` makes all mutations land as `w:ins`/`w:del`
+- Raw OOXML escape hatch: `session.Raw.GetXml(anchor)`, `Raw.InsertXml(anchor, Position, xml)`, `Raw.ReplaceXml(anchor, xml)` for content the markdown subset can't express
+- Bounded snapshot `Undo()`/`Redo()` (configurable depth via `Settings.UndoDepth`)
+- Every mutation returns a typed `EditResult` envelope: `Success`, `EditError(EditErrorCode, message, anchorId)`, `Created`/`Removed`/`Modified` anchor lists, and a `MarkdownPatch` for the affected scope
+- Available in .NET, WASM (`DocxSessionBridge`), and npm TypeScript (`openDocxSession`, `DocxSession`)
+- See `docs/architecture/docx_mutation_api.md` for the full surface contract, anchor lifecycle table, error catalog, and supported markdown subset
 
 **ExternalAnnotationProjector.cs** - Incremental annotation overlay API (Issue #106). Decouples annotation projection from DOCX conversion for dramatically better performance when annotations change:
 - `ProjectAnnotationsOntoHtml(html, set, settings)` - Project a full annotation set onto pre-converted HTML (~56ms vs ~892ms for full re-conversion, 15.9x faster)
@@ -263,7 +277,7 @@ Tests target: `net8.0`
 
 ### Dependencies
 
-- **DocumentFormat.OpenXml**: 3.2.0 (Open XML SDK)
+- **DocumentFormat.OpenXml**: 3.4.1 (Open XML SDK)
 - **SkiaSharp**: 2.88.9 (cross-platform graphics, replaces System.Drawing)
 
 ### Test Data
@@ -296,7 +310,8 @@ Detailed design docs for the major subsystems live in `docs/architecture/`. Read
 - `comparison_engine.md`, `wml_comparer_gaps.md`, `native_move_markup.md`, `move_detection_implementation_plan.md`, `format_change_detection.md`, `tracked_changes.md` — WmlComparer internals
 - `docx_converter.md`, `comment_rendering.md`, `paginated_headers_footers.md`, `custom_annotations.md`, `unsupported_content_placeholders.md`, `wml_to_html_converter_gaps.md` — WmlToHtmlConverter internals
 - `opencontracts_export.md` — OpenContractExporter format
-- `markdown_projection.md` — WmlToMarkdownConverter design (scaffold; spec for the in-progress implementation)
+- `markdown_projection.md` — WmlToMarkdownConverter design
+- `docx_mutation_api.md` — DocxSession surface, anchor lifecycle, error catalog, supported markdown subset
 - `skiasharp-removal-plan.md`, `wasm-optimization-plan.md`, `ui_responsiveness.md`, `profiling-results.md` — WASM/browser work
 
 ## OOXML Corner Cases

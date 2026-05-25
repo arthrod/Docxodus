@@ -45,7 +45,39 @@ import type {
   MarkdownProjectionSettings,
   MarkdownAnchorTarget,
   MarkdownProjection,
+  // DocxSession mutation API
+  DocxSessionSettings,
 } from "./types.js";
+
+import { DocxSession, openDocxSession as openDocxSessionImpl } from "./session.js";
+
+export { DocxSession } from "./session.js";
+export type {
+  AnchorRef,
+  CharSpan,
+  DocxSessionProjection,
+  DocxSessionSettings,
+  EditError,
+  EditErrorCode,
+  EditResult,
+  FormatOp,
+  MarkdownPatch,
+} from "./types.js";
+
+/**
+ * Open a {@link DocxSession} for surgical mutation of a DOCX. Requires
+ * {@link initialize} to have been called and awaited.
+ *
+ * The returned session keeps the document in WASM memory; call
+ * {@link DocxSession.close} when done.
+ */
+export function openDocxSession(
+  bytes: Uint8Array,
+  settings?: DocxSessionSettings,
+): DocxSession {
+  const wasm = ensureInitialized();
+  return openDocxSessionImpl(bytes, wasm, settings);
+}
 
 import {
   CommentRenderMode,
@@ -294,6 +326,7 @@ async function tryLoadFromPath(basePath: string): Promise<boolean> {
     wasmExports = {
       DocumentConverter: exports.DocxodusWasm.DocumentConverter,
       DocumentComparer: exports.DocxodusWasm.DocumentComparer,
+      DocxSessionBridge: exports.DocxodusWasm.DocxSessionBridge,
     };
     return true;
   } catch {

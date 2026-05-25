@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`DocxSession` — stateful in-memory DOCX mutation API** — The write-side counterpart to `WmlToMarkdownConverter` for agentic editing pipelines. Spec at `docs/architecture/docx_mutation_api.md`. Mutations are keyed by markdown-projection anchor ids; every method returns a typed `EditResult` envelope (no exceptions across the API boundary). Surface:
+  - Lifecycle: `new DocxSession(bytes, settings?)`, `Project()`, `Save()`, `Exists()`, `GetAnchorInfo()`, `Undo()`/`Redo()`, `Dispose()`
+  - Tier A (text CRUD): `ReplaceText`, `DeleteBlock`
+  - Tier B (structural): `InsertParagraph`, `SplitParagraph`, `MergeParagraphs`
+  - Tier C (formatting): `ApplyFormat` (whole-paragraph or `CharSpan`), `SetParagraphStyle`, `SetListLevel`, `RemoveListMembership`
+  - Tier D (advanced): `ReplaceCellContent`; `Settings.TrackedChanges = RenderInline` makes mutations land as `w:ins`/`w:del`
+  - Raw OOXML escape hatch: `session.Raw.GetXml/InsertXml/ReplaceXml` for content the markdown subset can't express (complex tables, math, content controls); optional `Settings.ValidateRawOps` runs `OpenXmlValidator` post-apply with rollback on failure
+  - Bounded snapshot undo/redo (default depth 50) over per-part XML clones
+  - Markdown payload parser (`Internal/MarkdownPayloadParser`) accepts the projector-symmetric subset (paragraphs, headings, lists, blockquotes, fenced code; bold/italic/code/strike/hyperlinks, escapes) and rejects out-of-subset syntax with typed `EditErrorCode`s (e.g. `TableInsertNotSupported`, `FootnoteRefNotSupported`)
+  - WASM `[JSExport]` bridge at `wasm/DocxodusWasm/DocxSessionBridge.cs` with explicit session handles (no JS-side GC observability)
+  - npm wrapper at `npm/src/session.ts` exposing `openDocxSession()` and the `DocxSession` class with `Symbol.dispose` support; full type surface in `npm/src/types.ts` (snake_case `EditErrorCode` union, `EditResult`, `AnchorRef`, `CharSpan`, `FormatOp`, `DocxSessionSettings`)
 - **Full `WmlToMarkdownConverter` implementation** — Replaces the v5.5.4 scaffold with the complete anchor-addressed Markdown projection described in `docs/architecture/markdown_projection.md`. Covers:
   - Paragraphs and headings (Heading 1–6 + Title/Subtitle, with `HeadingLevelOffset`)
   - Inline runs: bold, italic, code (rStyle/monospace heuristic), strikethrough, hyperlinks (internal + external), Markdown metacharacter escaping
@@ -16,7 +27,17 @@ All notable changes to this project will be documented in this file.
   - WASM `[JSExport] ConvertWmlToMarkdown` and npm `convertWmlToMarkdown` wrapper with TypeScript enums for `ProjectionScopes`, `AnchorRenderMode`, `TableRenderMode`, `TrackedChangeMode`
 
 ### Changed
-- **`UnidHelper`** — Extracted the `PtOpenXml.Unid` assignment logic out of `WmlComparer` into an internal shared helper so the same code paths are used by both `WmlComparer` and `WmlToMarkdownConverter`. No behavior change.
+- **`UnidHelper`** — Extracted the `PtOpenXml.Unid` assignment logic out of `WmlComparer` into an internal shared helper so the same code paths are used by both `WmlComparer` and `WmlToMarkdownConverter`. Added `AssignToSelfAndDescendants(XElement)` overload that assigns a Unid to the root unconditionally — used by `DocxSession` when inserting freshly-built block elements that need to be addressable on the next projection.
+- **`DocxSession.MergeParagraphs` now inserts a single-space separator** at the seam when both sides end/start with non-whitespace, so merged sentences no longer jam together (`"First." + "Second."` → `"First. Second."` instead of `"First.Second."`). Behavior change for callers that relied on raw concatenation. Regression test: `DS085_MergeParagraphs_InsertsSeparator_WhenBothEndsAreNonWhitespace`.
+
+### Fixed
+- **`DocxSession` Tier B/C ops now walk `<w:hyperlink>` / `<w:sdt>` / `<w:fldSimple>` / `<w:smartTag>` containers when computing offsets and iterating runs.** The prior implementation iterated only `Elements(W.r)` (direct paragraph children), which caused four interlocking bugs uncovered by smoke-testing the NVCA Model COI:
+  - `SplitParagraph` left hyperlinks stuck to the first half regardless of the split offset (so a split at offset 5 of `"Mix of bold ... [link]."` produced `"Mix olink"` + `"f bold ... ."`). Containers crossing the boundary are now split into two siblings sharing the same `r:id`/attributes.
+  - `MergeParagraphs` silently discarded hyperlinks / bookmarks / sdts in the second paragraph (only direct `<w:r>` children were moved before `secondEl.Remove()`). All non-`pPr` children are now moved.
+  - `ApplyFormat` skipped runs inside hyperlinks and used `ParagraphText` (direct-runs-only) for span validation, while `GetAnchorInfo.TextPreview` summed descendant text — so an agent computing offsets from the markdown projection got `OffsetOutOfRange` on valid spans. Both now share the descendant-walking `InlineRuns` helper, and hyperlink-internal runs are formatted.
+  - `ReplaceText` discarded bookmarkStart/End, comment range markers, perm markers, and proofErr because `RemoveNodes()` cleared everything but `pPr`. These markers are now preserved across the replace (pre-content markers wrap before the new runs, post-content markers after). Regression tests: `DS080`-`DS088`.
+- **`DocxSession.PromoteHyperlinkRelationships` dedupes by URL.** Each `ReplaceText`/`InsertParagraph` previously called `AddHyperlinkRelationship` unconditionally, so repeated edits with the same link accumulated orphan rIds in `document.xml.rels`. Same-URL ops now reuse the existing relationship. Regression test: `DS089`.
+- **`DocxSession.InsertParagraph` reports a `Created[i].Kind` consistent with the next projection.** A bullet payload (`- item`) previously returned `Kind = "li"` even when no `<w:numPr>` was injected, so the returned anchor id (`li:body:…`) never appeared in the projection (`p:body:…` did). Bullet/ordered-item payloads now inherit `<w:numPr>` from a nearest-sibling list item when one exists; the reported kind is computed via the same predicate the projector uses. Regression test: `DS090`.
 - **`WmlToMarkdownConverter` projection fidelity** — Surfaced and fixed during smoketesting against the NVCA Model Certificate of Incorporation (a heading-heavy legal document):
   - **Numbered headings keep their auto-number.** A `Heading{1..9}` paragraph that also carries `w:numPr` (the standard legal-doc convention for `FIRST: …` / `1.1 …` clause numbering) now prepends the resolved number to the heading text. Previously the auto-number was silently dropped, leaving headings like `## : The name of this corporation is …`.
   - **`w:sectPr` emits `---` thematic break with anchor.** Section breaks inside a paragraph's `pPr` now produce a `{#sec:scope:UNID}\n---` pair so callers can navigate sections; the trailing top-level `sectPr` (metadata only) is still suppressed in output but registered in `AnchorIndex` for editing.
