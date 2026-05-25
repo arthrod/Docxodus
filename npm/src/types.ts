@@ -686,6 +686,10 @@ export interface DocxodusWasmExports {
     ReplaceTextRange: (handle: number, anchor: string, find: string, replace: string, optionsJson: string) => string;
     ReplaceTextAtSpan: (handle: number, anchor: string, spanStart: number, spanLength: number, replace: string) => string;
     FindPlaceholders: (handle: number, kinds: number, scope: number) => string;
+    FindByAnnotation: (handle: number, annotationId: string) => string;
+    FindByLabel: (handle: number, labelId: string) => string;
+    FindByBookmark: (handle: number, bookmarkName: string) => string;
+    ListAnnotations: (handle: number) => string;
     Undo: (handle: number) => boolean;
     Redo: (handle: number) => boolean;
     Save: (handle: number) => Uint8Array;
@@ -892,6 +896,44 @@ export interface GrepOptions {
    *   - 1 = Normalize (fold NBSP / narrow-NBSP / thin-space to ASCII space before matching)
    */
   whitespace?: number;
+}
+
+/**
+ * Resolved location of an anchor — what {@link DocxSession.findByAnnotation} and
+ * the other discovery helpers return. The shape is {@link AnchorRef} plus the
+ * `partUri` of the package part the element lives in (useful for callers that
+ * walk the underlying OOXML directly).
+ */
+export interface AnchorTargetRef extends AnchorRef {
+  partUri: string;
+}
+
+/**
+ * A custom annotation persisted in the document via Docxodus' annotation system.
+ * Returned by {@link DocxSession.listAnnotations}; mirrors the wire-relevant
+ * fields of the .NET `DocumentAnnotation` type. Stale page caches and arbitrary
+ * metadata are omitted to keep the JSON payload compact — callers that need them
+ * can use the .NET API directly.
+ *
+ * See `docs/architecture/custom_annotations.md` for the persistence design.
+ */
+export interface DocumentAnnotation {
+  /** Unique annotation identifier (caller-supplied at add time). */
+  id: string;
+  /** Label category/type (e.g. `"INDEMNIFICATION"`, `"CLAUSE_TYPE_A"`). */
+  labelId: string;
+  /** Human-readable label text displayed in the UI. */
+  label: string;
+  /** Highlight color in hex (e.g. `"#FFEB3B"`). */
+  color: string;
+  /** Internal bookmark name in the DOCX (`_Docxodus_Ann_{id}` for managed annotations). */
+  bookmarkName: string;
+  /** Author who created the annotation, if recorded. */
+  author?: string;
+  /** Creation timestamp in ISO-8601 (round-trip) format, if recorded. */
+  created?: string;
+  /** The text content covered by the annotation's bookmark, populated when reading. */
+  annotatedText?: string;
 }
 
 /**

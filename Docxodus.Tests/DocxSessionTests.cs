@@ -1637,4 +1637,170 @@ public class DocxSessionTests
         Assert.Contains("[There shall be no cumulative voting.]", flat);
         Assert.Contains("[insert percentage]", flat);
     }
+
+    // ─── Annotation-based anchor discovery (#132) ────────────────────────
+
+    /// <summary>
+    /// Builds <c>BuildDS001_SimpleTwoParagraphs</c> and adds annotations declared in
+    /// <paramref name="specs"/>. Each spec is <c>(id, labelId, label, searchText)</c>
+    /// — the search runs against the existing fixture text, so the supplied <c>searchText</c>
+    /// must appear once. Returns bytes ready to feed to <see cref="DocxSession"/>.
+    /// </summary>
+    private static byte[] BuildDS180_TwoParaWithAnnotations(
+        params (string Id, string LabelId, string Label, string SearchText)[] specs)
+    {
+        var wml = new WmlDocument("DS180.docx", BuildDS001_SimpleTwoParagraphs());
+        foreach (var (id, labelId, label, searchText) in specs)
+        {
+            wml = AnnotationManager.AddAnnotation(
+                wml,
+                new DocumentAnnotation(id, labelId, label, "#FFEB3B"),
+                AnnotationRange.FromSearch(searchText));
+        }
+        return wml.DocumentByteArray;
+    }
+
+    [Fact]
+    public void DS180_FindByAnnotation_ResolvesBookmarkInsideSingleParagraph()
+    {
+        // Annotation covers "First paragraph." inside the first paragraph. The bookmark
+        // sits between two markers within that paragraph; ResolveBookmarkAnchors should
+        // return exactly that one paragraph anchor (no table/cell wrappers in this doc).
+        using var s = new DocxSession(
+            BuildDS180_TwoParaWithAnnotations(("a1", "FIRST", "First clause", "First paragraph")));
+
+        var anchors = s.FindByAnnotation("a1");
+        Assert.Single(anchors);
+        Assert.Equal("p", anchors[0].Anchor.Kind);
+        Assert.Equal("body", anchors[0].Anchor.Scope);
+
+        // The returned anchor is usable for a follow-up edit — the canonical agentic
+        // recipe: find by annotation, ReplaceText. Verify the round-trip works.
+        var r = s.ReplaceText(anchors[0].Anchor.Id, "Replaced first.");
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains("Replaced first.", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS181_FindByAnnotation_MissingIdReturnsEmpty()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        Assert.Empty(s.FindByAnnotation("does-not-exist"));
+        Assert.Empty(s.FindByAnnotation(""));
+    }
+
+    [Fact]
+    public void DS182_FindByLabel_GroupsSameLabelAcrossMultipleAnnotations()
+    {
+        // Two annotations both tagged "WARRANTY", one per paragraph. FindByLabel must
+        // keep them disambiguated by annotation id — same label, distinct regions.
+        using var s = new DocxSession(BuildDS180_TwoParaWithAnnotations(
+            ("w1", "WARRANTY", "Warranty A", "First paragraph"),
+            ("w2", "WARRANTY", "Warranty B", "Second paragraph")));
+
+        var grouped = s.FindByLabel("WARRANTY");
+        Assert.Equal(2, grouped.Count);
+        Assert.True(grouped.ContainsKey("w1"));
+        Assert.True(grouped.ContainsKey("w2"));
+        // Each annotation resolves to exactly one paragraph anchor, and they are distinct.
+        var w1Anchor = Assert.Single(grouped["w1"]);
+        var w2Anchor = Assert.Single(grouped["w2"]);
+        Assert.NotEqual(w1Anchor.Anchor.Id, w2Anchor.Anchor.Id);
+    }
+
+    [Fact]
+    public void DS183_FindByLabel_UnknownLabel_ReturnsEmptyDict()
+    {
+        using var s = new DocxSession(
+            BuildDS180_TwoParaWithAnnotations(("a1", "ONLY_LABEL", "Only", "First paragraph")));
+        Assert.Empty(s.FindByLabel("MISSING"));
+        Assert.Empty(s.FindByLabel(""));
+    }
+
+    [Fact]
+    public void DS184_FindByBookmark_ResolvesArbitraryBookmarkName()
+    {
+        // FindByBookmark accepts any bookmark name, not just the Docxodus-managed
+        // _Docxodus_Ann_* ones — this is the lower-level escape hatch the issue calls out.
+        using var s = new DocxSession(
+            BuildDS180_TwoParaWithAnnotations(("a1", "L", "L", "First paragraph")));
+
+        var byManagedName = s.FindByBookmark(AnnotationManager.BookmarkPrefix + "a1");
+        Assert.Single(byManagedName);
+        Assert.Equal("p", byManagedName[0].Anchor.Kind);
+
+        Assert.Empty(s.FindByBookmark("no_such_bookmark"));
+        Assert.Empty(s.FindByBookmark(""));
+    }
+
+    [Fact]
+    public void DS185_ListAnnotations_ReturnsEveryPersistedAnnotation()
+    {
+        using var s = new DocxSession(BuildDS180_TwoParaWithAnnotations(
+            ("a1", "L1", "Label 1", "First paragraph"),
+            ("a2", "L2", "Label 2", "Second paragraph")));
+
+        var all = s.ListAnnotations();
+        Assert.Equal(2, all.Count);
+        Assert.Contains(all, a => a.Id == "a1" && a.LabelId == "L1");
+        Assert.Contains(all, a => a.Id == "a2" && a.LabelId == "L2");
+        // AnnotatedText is populated from the bookmark — sanity check it's the right slice.
+        Assert.Equal("First paragraph", all.First(a => a.Id == "a1").AnnotatedText);
+    }
+
+    [Fact]
+    public void DS185b_ListAnnotations_EmptyDocument_ReturnsEmpty()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        Assert.Empty(s.ListAnnotations());
+    }
+
+    [Fact]
+    public void DS186_FindByAnnotation_MultiParagraph_ReturnsAnchorsInDocOrder()
+    {
+        // An index-based annotation that spans paragraph 0 → paragraph 1 — exercises the
+        // "bookmark covers multiple block elements" branch where the returned anchor list
+        // must include both, document-order.
+        var wml = new WmlDocument("DS186.docx", BuildDS001_SimpleTwoParagraphs());
+        wml = AnnotationManager.AddAnnotation(
+            wml,
+            new DocumentAnnotation("span", "SECTION", "Section", "#FFEB3B"),
+            AnnotationRange.FromParagraphs(0, 1));
+
+        using var s = new DocxSession(wml.DocumentByteArray);
+        var anchors = s.FindByAnnotation("span");
+        Assert.Equal(2, anchors.Count);
+        Assert.All(anchors, a => Assert.Equal("p", a.Anchor.Kind));
+
+        // Doc order check: the first anchor's preview matches the first paragraph text.
+        var firstInfo = s.GetAnchorInfo(anchors[0].Anchor.Id);
+        var secondInfo = s.GetAnchorInfo(anchors[1].Anchor.Id);
+        Assert.NotNull(firstInfo);
+        Assert.NotNull(secondInfo);
+        Assert.Contains("First paragraph", firstInfo!.TextPreview);
+        Assert.Contains("Second paragraph", secondInfo!.TextPreview);
+    }
+
+    [Fact]
+    public void DS187_FindByAnnotation_BookmarkInsideCell_IncludesEnclosingBlocks()
+    {
+        // Annotation lands inside a table cell paragraph — the returned anchor list
+        // should include the cell paragraph plus the enclosing tbl/tr/tc anchors so an
+        // agent can see "this annotation lives in a table" without re-walking the tree.
+        var wml = new WmlDocument("DS187.docx", BuildDS003_TableWithCells());
+        wml = AnnotationManager.AddAnnotation(
+            wml,
+            new DocumentAnnotation("cellAnn", "CELL", "Cell", "#FFEB3B"),
+            AnnotationRange.FromSearch("R0C0"));
+
+        using var s = new DocxSession(wml.DocumentByteArray);
+        var anchors = s.FindByAnnotation("cellAnn");
+
+        Assert.NotEmpty(anchors);
+        // The paragraph inside the cell holds the bookmark; check it's present.
+        Assert.Contains(anchors, a => a.Anchor.Kind == "p");
+        // Table-level anchors are emitted for the enclosing structure.
+        Assert.Contains(anchors, a => a.Anchor.Kind == "tc");
+        Assert.Contains(anchors, a => a.Anchor.Kind == "tbl");
+    }
 }

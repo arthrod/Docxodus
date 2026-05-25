@@ -3,7 +3,9 @@
 
 import type {
   AnchorRef,
+  AnchorTargetRef,
   CharSpan,
+  DocumentAnnotation,
   DocxodusWasmExports,
   DocxSessionProjection,
   DocxSessionSettings,
@@ -185,6 +187,56 @@ export class DocxSession {
     return JSON.parse(this.wasm.FindPlaceholders(this.handle, kinds, scope)) as TemplatePlaceholder[];
   }
 
+  // ─── Annotation-based anchor discovery (#132) ────────────────────────
+
+  /**
+   * Resolves an annotation's range to the block-level markdown anchors covering
+   * it, in document order. The bridge between Docxodus' read-side annotation API
+   * and the write-side session: an agent that wants to edit "the indemnification
+   * clause" looks the annotation up by id and gets the anchors it can hand to
+   * {@link replaceText} / {@link deleteBlock} / {@link raw}. Returns an empty
+   * list when the id is unknown or its bookmark is missing.
+   *
+   * v1 returns the enclosing block anchors — every paragraph/heading/list-item/
+   * cell/row/table whose subtree overlaps the bookmark range. Filter by
+   * `kind === "p" | "h" | "li"` when you want only text-bearing blocks.
+   *
+   * @see docs/architecture/docx_mutation_api.md#findbyannotation
+   */
+  findByAnnotation(annotationId: string): AnchorTargetRef[] {
+    return JSON.parse(this.wasm.FindByAnnotation(this.handle, annotationId)) as AnchorTargetRef[];
+  }
+
+  /**
+   * Finds every annotation whose `labelId` matches and resolves each of their
+   * ranges. The result is keyed by annotation id so callers can disambiguate
+   * when the same label is applied to multiple regions (three "WARRANTY"
+   * annotations on different paragraphs become three entries). Annotations
+   * whose bookmark resolves to no anchors are omitted from the result.
+   */
+  findByLabel(labelId: string): Record<string, AnchorTargetRef[]> {
+    return JSON.parse(this.wasm.FindByLabel(this.handle, labelId)) as Record<string, AnchorTargetRef[]>;
+  }
+
+  /**
+   * Resolves any bookmark in the main document part (Docxodus-managed or
+   * user-authored) to the block-level anchors covering its range, in document
+   * order. Empty when the bookmark name is unknown. Use this for raw bookmark
+   * names that didn't come from the annotation system.
+   */
+  findByBookmark(bookmarkName: string): AnchorTargetRef[] {
+    return JSON.parse(this.wasm.FindByBookmark(this.handle, bookmarkName)) as AnchorTargetRef[];
+  }
+
+  /**
+   * Enumerates every annotation persisted in the document. Lets an agent prime
+   * itself with "here are the labeled regions you can target" before committing
+   * to a specific id.
+   */
+  listAnnotations(): DocumentAnnotation[] {
+    return JSON.parse(this.wasm.ListAnnotations(this.handle)) as DocumentAnnotation[];
+  }
+
   // ─── Lifecycle ───────────────────────────────────────────────────────
 
   undo(): boolean {
@@ -224,5 +276,5 @@ export function openDocxSession(
   return new DocxSession(handle, bridge);
 }
 
-export type { AnchorRef, CharSpan, DocxSessionProjection, DocxSessionSettings, EditError, EditErrorCode, EditResult, FormatOp, GrepOptions, MarkdownPatch, PlaceholderKind, ReplaceOptions, RunFormatting, RunFragment, TemplatePlaceholder, TextMatch } from "./types.js";
+export type { AnchorRef, AnchorTargetRef, CharSpan, DocumentAnnotation, DocxSessionProjection, DocxSessionSettings, EditError, EditErrorCode, EditResult, FormatOp, GrepOptions, MarkdownPatch, PlaceholderKind, ReplaceOptions, RunFormatting, RunFragment, TemplatePlaceholder, TextMatch } from "./types.js";
 export { PlaceholderKinds } from "./types.js";

@@ -521,6 +521,153 @@ public sealed class DocxSession : IDisposable
         return result;
     }
 
+    // ─── Annotation-based anchor discovery (#132) ────────────────────────
+
+    /// <summary>
+    /// Resolves an annotation's range to the block-level markdown anchors covering it,
+    /// in document order. The bridge between the read-side annotation API
+    /// (<see cref="AnnotationManager"/>) and the write-side session: an agent that wants
+    /// to edit "the indemnification clause" looks the annotation up by id and gets the
+    /// anchors it can hand to <see cref="ReplaceText"/> / <see cref="DeleteBlock"/> /
+    /// <see cref="Raw"/>. Returns an empty list when the id is unknown or the annotation's
+    /// bookmark is missing/malformed.
+    /// </summary>
+    /// <remarks>
+    /// v1 returns the enclosing block anchors — every paragraph/heading/list-item/cell/
+    /// row/table whose subtree overlaps the bookmark range. Bookmarks that sit inside a
+    /// single paragraph yield that paragraph's anchor; bookmarks spanning multiple blocks
+    /// yield each in document order. A finer-grained <see cref="CharSpan"/>-aware return
+    /// is left to a follow-up (see the issue's "Out of scope for v1").
+    /// </remarks>
+    public IReadOnlyList<AnchorTarget> FindByAnnotation(string annotationId)
+    {
+        ThrowIfDisposed();
+        if (string.IsNullOrEmpty(annotationId)) return Array.Empty<AnchorTarget>();
+        var ann = AnnotationManager.GetAnnotations(_doc!)
+            .FirstOrDefault(a => string.Equals(a.Id, annotationId, StringComparison.Ordinal));
+        if (ann is null || string.IsNullOrEmpty(ann.BookmarkName))
+            return Array.Empty<AnchorTarget>();
+        return ResolveBookmarkAnchors(ann.BookmarkName);
+    }
+
+    /// <summary>
+    /// Finds every annotation whose <see cref="DocumentAnnotation.LabelId"/> equals
+    /// <paramref name="labelId"/> and resolves each of their ranges. The result is keyed
+    /// by annotation id so callers can disambiguate when the same label was applied to
+    /// multiple regions (e.g. three separate "WARRANTY" annotations). Annotations whose
+    /// bookmark is missing or resolves to no anchors are omitted from the result.
+    /// </summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<AnchorTarget>> FindByLabel(string labelId)
+    {
+        ThrowIfDisposed();
+        var map = new Dictionary<string, IReadOnlyList<AnchorTarget>>(StringComparer.Ordinal);
+        if (string.IsNullOrEmpty(labelId)) return map;
+        foreach (var ann in AnnotationManager.GetAnnotations(_doc!))
+        {
+            if (!string.Equals(ann.LabelId, labelId, StringComparison.Ordinal)) continue;
+            if (string.IsNullOrEmpty(ann.BookmarkName)) continue;
+            var anchors = ResolveBookmarkAnchors(ann.BookmarkName);
+            if (anchors.Count > 0) map[ann.Id] = anchors;
+        }
+        return map;
+    }
+
+    /// <summary>
+    /// Resolves any bookmark in the main document part (Docxodus-managed or user-authored)
+    /// to the block-level anchors covering its range, in document order. Empty when the
+    /// bookmark name is unknown or its end marker is missing. Use this for raw bookmark
+    /// names that didn't come from <see cref="AnnotationManager"/>.
+    /// </summary>
+    public IReadOnlyList<AnchorTarget> FindByBookmark(string bookmarkName)
+    {
+        ThrowIfDisposed();
+        if (string.IsNullOrEmpty(bookmarkName)) return Array.Empty<AnchorTarget>();
+        return ResolveBookmarkAnchors(bookmarkName);
+    }
+
+    /// <summary>
+    /// Enumerates every annotation persisted in the document — id, label id/text, color,
+    /// author, and (when the bookmark resolves) the annotated text it covers. Lets an
+    /// agent prime itself with "here are the labeled regions you can target" before
+    /// committing to a specific id.
+    /// </summary>
+    public IReadOnlyList<DocumentAnnotation> ListAnnotations()
+    {
+        ThrowIfDisposed();
+        return AnnotationManager.GetAnnotations(_doc!);
+    }
+
+    /// <summary>
+    /// Walks the main document part once: locates the bookmark by name, then collects
+    /// every block-level anchor whose subtree overlaps the bookmark range, deduplicated
+    /// and sorted in document order. Pre-order positions are recomputed per call rather
+    /// than cached — callers in agentic loops should resolve once and reuse the result.
+    /// </summary>
+    private IReadOnlyList<AnchorTarget> ResolveBookmarkAnchors(string bookmarkName)
+    {
+        var main = _doc!.MainDocumentPart;
+        if (main is null) return Array.Empty<AnchorTarget>();
+        var root = main.GetXDocument().Root;
+        if (root is null) return Array.Empty<AnchorTarget>();
+
+        var start = root.Descendants(W.bookmarkStart)
+            .FirstOrDefault(b => (string?)b.Attribute(W.name) == bookmarkName);
+        if (start is null) return Array.Empty<AnchorTarget>();
+        var bookmarkId = (string?)start.Attribute(W.id);
+        if (bookmarkId is null) return Array.Empty<AnchorTarget>();
+        var end = root.Descendants(W.bookmarkEnd)
+            .FirstOrDefault(b => (string?)b.Attribute(W.id) == bookmarkId);
+        if (end is null) return Array.Empty<AnchorTarget>();
+
+        // Force Project() so Unids are assigned on every block and the AnchorIndex is
+        // populated. Building a Unid → AnchorTarget reverse map lets us look up each
+        // candidate block without re-running the converter's KindFor classifier here.
+        var index = Project().AnchorIndex;
+        var byUnid = new Dictionary<string, AnchorTarget>(StringComparer.Ordinal);
+        foreach (var t in index.Values) byUnid[t.Unid] = t;
+
+        // Pre-order positions support two operations: (a) deciding whether a block's
+        // subtree overlaps the bookmark range, (b) sorting the collected hits back into
+        // document order. O(N) per call — fine for in-session use where Project() is
+        // already O(N).
+        var pos = new Dictionary<XElement, int>(ReferenceEqualityComparer.Instance);
+        int counter = 0;
+        foreach (var el in root.DescendantsAndSelf()) pos[el] = counter++;
+
+        if (!pos.TryGetValue(start, out var startPos) || !pos.TryGetValue(end, out var endPos))
+            return Array.Empty<AnchorTarget>();
+        if (endPos <= startPos) return Array.Empty<AnchorTarget>();
+
+        var hits = new List<(int Pos, AnchorTarget Target)>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var el in root.Descendants())
+        {
+            var unid = (string?)el.Attribute(PtOpenXml.Unid);
+            if (unid is null) continue;
+            if (!byUnid.TryGetValue(unid, out var target)) continue;
+            // The bookmark we found lives in the body part, so only body-scope anchors
+            // can possibly intersect it. The guard cheaply rejects same-Unid collisions
+            // with header/footer/footnote anchors (rare, but possible if the projector's
+            // index ever surfaces them).
+            if (!string.Equals(target.Anchor.Scope, "body", StringComparison.Ordinal)) continue;
+
+            var elStart = pos[el];
+            var lastDesc = el.DescendantsAndSelf().Last();
+            var elEnd = pos[lastDesc];
+            // Strict overlap on the marker positions themselves: a bookmark sitting
+            // exactly between two paragraphs shouldn't pick up either of them.
+            if (elEnd <= startPos) continue;
+            if (elStart >= endPos) continue;
+            if (!seen.Add(target.Anchor.Id)) continue;
+            hits.Add((elStart, target));
+        }
+
+        hits.Sort((a, b) => a.Pos.CompareTo(b.Pos));
+        var result = new AnchorTarget[hits.Count];
+        for (int i = 0; i < hits.Count; i++) result[i] = hits[i].Target;
+        return result;
+    }
+
     /// <summary>
     /// Surgical text replacement within a single paragraph/heading/list-item: finds every
     /// literal occurrence of <paramref name="find"/> in the anchor's flat text and replaces

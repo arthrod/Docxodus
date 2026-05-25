@@ -163,43 +163,35 @@ The session addresses content by anchor id, but real workflows don't start with 
 
 Docxodus's `AnnotationManager` already persists annotations into the docx itself: each annotation creates a `w:bookmark` named `_Docxodus_Ann_<id>` covering the range, and a custom XML part stores the metadata (`LabelId`, `Label`, `Color`, `Metadata` key/value bag). See [`custom_annotations.md`](custom_annotations.md) for the full mechanism and lifecycle. Annotations survive save/reopen and travel with the document.
 
-A first-class `DocxSession.FindByAnnotation(id)` / `FindByLabel(labelId)` API is planned (tracked in [#132](https://github.com/JSv4/Docxodus/issues/132)). Until that lands, the bridge is straightforward enough to do in two steps with the existing surface:
+`DocxSession` exposes four discovery helpers that read directly off the long-lived `WordprocessingDocument` (no save/reopen round-trip per call):
 
 ```csharp
-// Step 1 — read annotations from the DOCX (round-trip through bytes).
-//   AnnotationManager takes WmlDocument, so save the session first.
-var saved = session.Save();
-var wmlDoc = new WmlDocument("session.docx", saved);
-var annotations = AnnotationManager.GetAnnotations(wmlDoc);
-var target = annotations.First(a => a.LabelId == "INDEMNIFICATION");
-
-// Step 2 — walk the bookmark to find the OOXML elements it covers,
-//   then map their Unids back to AnchorTargets in the live projection.
-using var probe = new DocxSession(saved);  // matches the saved state
-var bookmarkName = target.BookmarkName;     // "_Docxodus_Ann_<id>"
-var index = probe.Project().AnchorIndex;
-
-// Find the bookmarkStart / bookmarkEnd in the body. (Pseudocode — the
-// AnchorTarget.Resolve walk is private; copy the W.bookmarkStart match
-// logic from AnnotationManager.GetAnnotationsInternal until the helper
-// API lands.)
-var anchors = index.Values
-    .Where(t => /* element ancestry contains a w:bookmarkStart
-                   with the matching name and a preceding w:bookmarkEnd
-                   sibling within the body */)
-    .ToList();
-
-// Step 3 — hand anchors to the mutation surface.
-foreach (var a in anchors)
-    session.ReplaceText(a.Anchor.Id, "Revised indemnification language…");
+session.ListAnnotations();                          // every annotation in the doc — id, labelId, label, color, author, annotatedText
+session.FindByAnnotation("ann-id");                 // IReadOnlyList<AnchorTarget> — the blocks the bookmark covers
+session.FindByLabel("INDEMNIFICATION");             // IReadOnlyDictionary<annotationId, IReadOnlyList<AnchorTarget>>
+session.FindByBookmark("_Docxodus_Ann_ann-id");     // lower-level: resolve any bookmark name (managed or user-authored)
 ```
 
-Two caveats to internalize while [#132](https://github.com/JSv4/Docxodus/issues/132) is open:
+The canonical agentic recipe collapses to:
 
-- **`AnnotationManager` operates on `WmlDocument`, not the long-lived session.** The round-trip costs a save + reopen. Acceptable for low-frequency lookups; not acceptable to do per-mutation.
-- **Bookmarks can span partial paragraphs.** A bookmark that starts mid-run will still return the enclosing block's anchor. That's usually what an agent wants ("edit this paragraph"), but for surgical character-range edits you'll need to combine `FindByAnnotation` with `ApplyFormat(anchor, CharSpan, op)` after computing the offset by walking the bookmark range yourself.
+```csharp
+foreach (var (id, anchors) in session.FindByLabel("INDEMNIFICATION"))
+    foreach (var a in anchors.Where(a => a.Anchor.Kind is "p" or "h" or "li"))
+        session.ReplaceText(a.Anchor.Id, "Revised indemnification language…");
+```
 
-The agent's prompt should also be aware: it can call `AnnotationManager.GetAnnotations(doc)` once at the start of a session to enumerate available labels (e.g., "you can target: INDEMNIFICATION, TERMINATION, GOVERNING_LAW") and present those as tools rather than asking the LLM to discover them from text.
+What `FindByAnnotation` / `FindByLabel` / `FindByBookmark` return in v1:
+
+- **All block-level anchors whose subtree overlaps the bookmark range, in document order, deduplicated.** That includes the immediate paragraph plus any enclosing table / row / cell, so an agent sees "this annotation lives in a table" without re-walking the tree. Filter by `Anchor.Kind in {"p","h","li"}` when you want only the text-bearing blocks suitable for `ReplaceText`.
+- **Empty list when the id/label/bookmark is unknown** or the bookmark's end marker is missing. No exceptions for not-found.
+- **Body scope only.** Bookmarks in headers/footers/footnotes aren't part of the v1 surface — `AnnotationManager` only writes to the main document part today. If header/footer annotation support lands, the helpers will return those anchors too.
+
+Two caveats that are explicitly out of scope for v1 (tracked in [#132](https://github.com/JSv4/Docxodus/issues/132)):
+
+- **Bookmarks that span partial paragraphs return the enclosing block's anchor**, not a character span. A character-range surgical edit needs `ApplyFormat(anchor, CharSpan, op)` after computing the offset within the bookmark range yourself.
+- **Mutations don't auto-update bookmarks.** A `ReplaceText` / `SplitParagraph` / `MergeParagraphs` call can invalidate the bookmark covering the affected region. Bookmark preservation across mutations is a separate follow-up.
+
+The agent's prompt should also be aware: it can call `session.ListAnnotations()` once at session start to enumerate available labels (e.g., "you can target: INDEMNIFICATION, TERMINATION, GOVERNING_LAW") and present those as tools rather than asking the LLM to discover them from text.
 
 ## Find* helpers — anchor-level convenience over Grep
 

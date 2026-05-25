@@ -187,6 +187,43 @@ public static partial class DocxSessionBridge
         return SerializePlaceholders(placeholders);
     }
 
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.FindByAnnotation"/>. Returns a JSON array of
+    /// <see cref="AnchorTarget"/> records (each <c>{id, kind, scope, unid, partUri}</c>);
+    /// empty array when the id is unknown.
+    /// </summary>
+    [JSExport]
+    public static string FindByAnnotation(int h, string annotationId) =>
+        SerializeAnchorTargets(Get(h).FindByAnnotation(annotationId));
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.FindByLabel"/>. Returns a JSON object keyed by
+    /// annotation id; each value is the same AnchorTarget array shape as
+    /// <see cref="FindByAnnotation"/>.
+    /// </summary>
+    [JSExport]
+    public static string FindByLabel(int h, string labelId) =>
+        SerializeAnchorTargetMap(Get(h).FindByLabel(labelId));
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.FindByBookmark"/>. Same return shape as
+    /// <see cref="FindByAnnotation"/>; accepts any bookmark name (Docxodus-managed or
+    /// user-authored).
+    /// </summary>
+    [JSExport]
+    public static string FindByBookmark(int h, string bookmarkName) =>
+        SerializeAnchorTargets(Get(h).FindByBookmark(bookmarkName));
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.ListAnnotations"/>. Returns a JSON array of
+    /// annotation records — id/labelId/label/color/author/created/bookmarkName/
+    /// annotatedText. Metadata, page info, and the unused-by-agents fields are omitted
+    /// to keep the wire format compact; callers needing them can use the .NET API.
+    /// </summary>
+    [JSExport]
+    public static string ListAnnotations(int h) =>
+        SerializeAnnotations(Get(h).ListAnnotations());
+
     [JSExport]
     public static bool Undo(int h) => Get(h).Undo();
 
@@ -487,6 +524,71 @@ public static partial class DocxSessionBridge
             if (i > 0 && char.IsUpper(s[i])) sb.Append('_');
             sb.Append(char.ToLowerInvariant(s[i]));
         }
+        return sb.ToString();
+    }
+
+    private static string SerializeAnchorTargets(System.Collections.Generic.IReadOnlyList<AnchorTarget> targets)
+    {
+        var sb = new StringBuilder(targets.Count * 128 + 2);
+        sb.Append('[');
+        for (int i = 0; i < targets.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            AppendAnchorTarget(sb, targets[i]);
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+
+    private static string SerializeAnchorTargetMap(
+        System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.IReadOnlyList<AnchorTarget>> map)
+    {
+        var sb = new StringBuilder(256);
+        sb.Append('{');
+        bool first = true;
+        foreach (var kv in map)
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append(JsonString(kv.Key)).Append(':');
+            sb.Append(SerializeAnchorTargets(kv.Value));
+        }
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    private static void AppendAnchorTarget(StringBuilder sb, AnchorTarget t)
+    {
+        sb.Append("{\"id\":").Append(JsonString(t.Anchor.Id))
+          .Append(",\"kind\":").Append(JsonString(t.Anchor.Kind))
+          .Append(",\"scope\":").Append(JsonString(t.Anchor.Scope))
+          .Append(",\"unid\":").Append(JsonString(t.Unid))
+          .Append(",\"partUri\":").Append(JsonString(t.PartUri))
+          .Append('}');
+    }
+
+    private static string SerializeAnnotations(System.Collections.Generic.IReadOnlyList<DocumentAnnotation> anns)
+    {
+        var sb = new StringBuilder(anns.Count * 200 + 2);
+        sb.Append('[');
+        for (int i = 0; i < anns.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var a = anns[i];
+            sb.Append("{\"id\":").Append(JsonString(a.Id ?? string.Empty))
+              .Append(",\"labelId\":").Append(JsonString(a.LabelId ?? string.Empty))
+              .Append(",\"label\":").Append(JsonString(a.Label ?? string.Empty))
+              .Append(",\"color\":").Append(JsonString(a.Color ?? string.Empty))
+              .Append(",\"bookmarkName\":").Append(JsonString(a.BookmarkName ?? string.Empty));
+            if (a.Author is not null)
+                sb.Append(",\"author\":").Append(JsonString(a.Author));
+            if (a.Created.HasValue)
+                sb.Append(",\"created\":").Append(JsonString(a.Created.Value.ToString("o")));
+            if (a.AnnotatedText is not null)
+                sb.Append(",\"annotatedText\":").Append(JsonString(a.AnnotatedText));
+            sb.Append('}');
+        }
+        sb.Append(']');
         return sb.ToString();
     }
 }

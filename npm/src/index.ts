@@ -54,7 +54,9 @@ import { DocxSession, openDocxSession as openDocxSessionImpl } from "./session.j
 export { DocxSession } from "./session.js";
 export type {
   AnchorRef,
+  AnchorTargetRef,
   CharSpan,
+  DocumentAnnotation,
   DocxSessionProjection,
   DocxSessionSettings,
   EditError,

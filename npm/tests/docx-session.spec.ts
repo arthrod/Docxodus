@@ -245,4 +245,87 @@ test.describe('DocxSession (WASM bridge)', () => {
     expect(result.firstContextBeforeIsString).toBe(true);
     expect(['p', 'h', 'li']).toContain(result.firstEnclosingAnchorKind);
   });
+
+  test('FindByAnnotation / FindByLabel / ListAnnotations bridge end-to-end (#132)', async ({ page }) => {
+    // Add two annotations sharing a labelId by discovering needles dynamically: the
+    // CreateBookmarkFromSearch path requires the exact text to be present, so a
+    // hard-coded needle would couple the test to fixture content drift. Probe the
+    // projection for two distinct paragraph text fragments that both repeat at
+    // least once in the document.
+    const bytes = readTestFile('HC006-Test-01.docx');
+
+    const result = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const docConv = (window as any).Docxodus.DocumentConverter;
+      const bridge = (window as any).Docxodus.DocxSessionBridge;
+
+      // Step 0: find a needle that appears at least twice in actual document text.
+      // We use Grep (which searches block run text, not the projection's anchor
+      // wrappers) so the chosen needle is guaranteed to round-trip through
+      // AnnotationManager.CreateBookmarkFromSearch.
+      const probeHandle = bridge.OpenSession(bin, '');
+      let needle = '';
+      let diag: any = {};
+      try {
+        const matches = JSON.parse(bridge.Grep(probeHandle, '[A-Za-z]{3,}', JSON.stringify({ scope: 1, contextChars: 0 })));
+        const counts = new Map<string, number>();
+        for (const m of matches) counts.set(m.text, (counts.get(m.text) ?? 0) + 1);
+        diag = { totalMatches: matches.length, distinctWords: counts.size, sample: matches.slice(0, 5).map((m: any) => m.text) };
+        for (const [word, n] of counts) {
+          if (n >= 2) { needle = word; break; }
+        }
+      } finally {
+        bridge.CloseSession(probeHandle);
+      }
+      if (!needle) throw new Error('Could not find a repeated word in fixture for annotation needle: ' + JSON.stringify(diag));
+
+      // Step 1: add two annotations via the public AddAnnotation API. Each call
+      // produces a fresh document with one more annotation persisted.
+      const annotate = (input: Uint8Array, id: string, labelId: string, label: string, search: string, occurrence: number) => {
+        const req = JSON.stringify({ Id: id, LabelId: labelId, Label: label, Color: '#FFEB3B', SearchText: search, Occurrence: occurrence });
+        const respStr = docConv.AddAnnotation(input, req);
+        const resp = JSON.parse(respStr);
+        const b64 = resp.DocumentBytes || resp.documentBytes;
+        if (!b64) throw new Error('AddAnnotation returned no DocumentBytes; raw=' + respStr.substring(0, 200));
+        const raw = atob(b64);
+        const buf = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+        return buf;
+      };
+
+      let annotated = annotate(bin, 'ann1', 'TOUR_REGION', 'First mention', needle, 1);
+      annotated = annotate(annotated, 'ann2', 'TOUR_REGION', 'Second mention', needle, 2);
+
+      // Step 2: open session over the annotated bytes and exercise the new bridges.
+      const handle = bridge.OpenSession(annotated, '');
+      try {
+        const all = JSON.parse(bridge.ListAnnotations(handle));
+        const byAnn1 = JSON.parse(bridge.FindByAnnotation(handle, 'ann1'));
+        const byLabel = JSON.parse(bridge.FindByLabel(handle, 'TOUR_REGION'));
+        const byBookmark = JSON.parse(bridge.FindByBookmark(handle, '_Docxodus_Ann_ann1'));
+        const missing = JSON.parse(bridge.FindByAnnotation(handle, 'nope'));
+        return {
+          allCount: all.length,
+          allHaveLabelId: all.every((a: any) => a.labelId === 'TOUR_REGION'),
+          ann1AnchorCount: byAnn1.length,
+          ann1FirstKind: byAnn1[0]?.kind,
+          ann1FirstHasPartUri: typeof byAnn1[0]?.partUri === 'string' && byAnn1[0].partUri.length > 0,
+          labelKeys: Object.keys(byLabel).sort(),
+          bookmarkAnchorCount: byBookmark.length,
+          missingIsEmpty: Array.isArray(missing) && missing.length === 0,
+        };
+      } finally {
+        bridge.CloseSession(handle);
+      }
+    }, Array.from(bytes));
+
+    expect(result.allCount).toBe(2);
+    expect(result.allHaveLabelId).toBe(true);
+    expect(result.ann1AnchorCount).toBeGreaterThan(0);
+    expect(['p', 'h', 'li', 'tc', 'tbl', 'tr']).toContain(result.ann1FirstKind);
+    expect(result.ann1FirstHasPartUri).toBe(true);
+    expect(result.labelKeys).toEqual(['ann1', 'ann2']);
+    expect(result.bookmarkAnchorCount).toBe(result.ann1AnchorCount);
+    expect(result.missingIsEmpty).toBe(true);
+  });
 });

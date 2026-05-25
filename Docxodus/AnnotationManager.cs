@@ -265,6 +265,17 @@ namespace Docxodus
         }
 
         /// <summary>
+        /// Get all annotations from an open <see cref="WordprocessingDocument"/> without
+        /// round-tripping through bytes. Used by long-lived consumers like
+        /// <see cref="DocxSession"/> where the session already holds the open package.
+        /// </summary>
+        public static List<DocumentAnnotation> GetAnnotations(WordprocessingDocument wordDoc)
+        {
+            if (wordDoc == null) throw new ArgumentNullException(nameof(wordDoc));
+            return GetAnnotationsInternal(wordDoc);
+        }
+
+        /// <summary>
         /// Get a specific annotation by ID.
         /// </summary>
         /// <param name="doc">The document to read.</param>
