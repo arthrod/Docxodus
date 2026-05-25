@@ -260,6 +260,59 @@ public class DocxSessionTests
         Assert.Same(p1, p2);
     }
 
+    [Fact]
+    public void DS220_GetAnchorInfosBulkLookup()
+    {
+        using var session = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var projection = session.Project();
+
+        // Collect every body paragraph anchor id.
+        var ids = projection.AnchorIndex.Values
+            .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h" or "li")
+            .Select(t => t.Anchor.Id)
+            .ToList();
+        Assert.NotEmpty(ids);
+
+        // Bulk lookup returns the same data as N individual GetAnchorInfo calls,
+        // and an unknown anchor id maps to null in the result.
+        var idsWithBogus = ids.Concat(new[] { "p:body:0000000000000000ffffffffffffffff" }).ToList();
+        var bulk = session.GetAnchorInfos(idsWithBogus);
+
+        Assert.Equal(idsWithBogus.Count, bulk.Count);
+        foreach (var id in ids)
+        {
+            Assert.True(bulk.ContainsKey(id));
+            var info = bulk[id];
+            Assert.NotNull(info);
+            Assert.Equal(id, info!.Id);
+
+            // Verify it agrees with the existing per-anchor API.
+            var singleton = session.GetAnchorInfo(id);
+            Assert.NotNull(singleton);
+            Assert.Equal(singleton!.TextPreview, info.TextPreview);
+            Assert.Equal(singleton.Kind, info.Kind);
+            Assert.Equal(singleton.Scope, info.Scope);
+        }
+        Assert.Null(bulk["p:body:0000000000000000ffffffffffffffff"]);
+    }
+
+    [Fact]
+    public void DS221_GetAnchorInfoUsesAnchorTargetTextPreview()
+    {
+        // Regression: after #162, GetAnchorInfo reads target.TextPreview directly
+        // instead of re-walking the element. Confirm the value matches what the
+        // projection put on AnchorTarget.
+        using var session = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var projection = session.Project();
+        foreach (var t in projection.AnchorIndex.Values
+                      .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h" or "li"))
+        {
+            var info = session.GetAnchorInfo(t.Anchor.Id);
+            Assert.NotNull(info);
+            Assert.Equal(t.TextPreview, info!.TextPreview);
+        }
+    }
+
     // ─── Phase 3: text CRUD + undo/redo ──────────────────────────────────
 
     [Fact]
