@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [6.0.0] - 2026-05-25
+
 ### Fixed
 - **`WmlComparer` — defensive null/empty guards on three sibling consumer sites flagged by issue #128.** Follow-up to PR #124, which guarded `FindIndexOfNextParaMark`. The same `cul`-can-contain-`ComparisonUnitGroup` (and empty-descendant) hazard existed in three more places that would have crashed with `NullReferenceException` or `InvalidOperationException` (`.Last()` on empty) had the inputs reached them: `FindCommonAtBeginningAndEnd` (boundary atom dereference), `SplitAtParagraphMark` (paragraph-mark search), and `DoLcsAlgorithm` (last-atom lookup). The producer (`CreateComparisonUnitAtomListRecurse` + `ElementsToThrowAway`) already correctly filters body-level `w:bookmarkStart`/`w:bookmarkEnd`/`w:permStart`/`w:permEnd`/`w:proofErr`, so these guards are belt-and-braces. Adds `WmlComparerBodyLevelElementsTests` with five small programmatic fixtures (bookmarks, perm markers, proof-error markers at body level) that assert `Compare` succeeds — replacing the original 4 MB binary pair's weaker "no NRE" assertion for the body-level case.
 
