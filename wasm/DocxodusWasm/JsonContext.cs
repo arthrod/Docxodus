@@ -1247,6 +1247,7 @@ public class MarkdownAnchorTargetDto
     public string Scope { get; set; } = string.Empty;
     public string Unid { get; set; } = string.Empty;
     public string PartUri { get; set; } = string.Empty;
+    public string TextPreview { get; set; } = string.Empty;
 }
 
 #endregion

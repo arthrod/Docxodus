@@ -171,6 +171,39 @@ public class DocxSessionTests
         return styles;
     }
 
+    /// <summary>
+    /// Document with a FootnotesPart containing the two Word-reserved boilerplate
+    /// footnotes (type="separator" and type="continuationSeparator") plus one
+    /// user-authored footnote. Used to verify the AnchorIndex filters out the
+    /// boilerplate notes.
+    /// </summary>
+    internal static byte[] BuildDocWithFootnotes()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new DocumentFormat.OpenXml.Wordprocessing.Document(
+                new DocumentFormat.OpenXml.Wordprocessing.Body(
+                    new DocumentFormat.OpenXml.Wordprocessing.Paragraph(
+                        new DocumentFormat.OpenXml.Wordprocessing.Run(
+                            new DocumentFormat.OpenXml.Wordprocessing.Text("Body text with a footnote reference."),
+                            new DocumentFormat.OpenXml.Wordprocessing.FootnoteReference { Id = 1 }))));
+
+            var fnPart = main.AddNewPart<DocumentFormat.OpenXml.Packaging.FootnotesPart>();
+            var fnXml = """
+                <w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>
+                  <w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>
+                  <w:footnote w:id="1"><w:p><w:r><w:t>User-authored footnote text.</w:t></w:r></w:p></w:footnote>
+                </w:footnotes>
+                """;
+            using (var s = fnPart.GetStream(FileMode.Create))
+            using (var w = new StreamWriter(s)) w.Write(fnXml);
+        }
+        return ms.ToArray();
+    }
+
     // ─── Phase 1: Skeleton tests ─────────────────────────────────────────
 
     [Fact]
@@ -225,6 +258,59 @@ public class DocxSessionTests
         var p1 = session.Project();
         var p2 = session.Project();
         Assert.Same(p1, p2);
+    }
+
+    [Fact]
+    public void DS220_GetAnchorInfosBulkLookup()
+    {
+        using var session = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var projection = session.Project();
+
+        // Collect every body paragraph anchor id.
+        var ids = projection.AnchorIndex.Values
+            .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h" or "li")
+            .Select(t => t.Anchor.Id)
+            .ToList();
+        Assert.NotEmpty(ids);
+
+        // Bulk lookup returns the same data as N individual GetAnchorInfo calls,
+        // and an unknown anchor id maps to null in the result.
+        var idsWithBogus = ids.Concat(new[] { "p:body:0000000000000000ffffffffffffffff" }).ToList();
+        var bulk = session.GetAnchorInfos(idsWithBogus);
+
+        Assert.Equal(idsWithBogus.Count, bulk.Count);
+        foreach (var id in ids)
+        {
+            Assert.True(bulk.ContainsKey(id));
+            var info = bulk[id];
+            Assert.NotNull(info);
+            Assert.Equal(id, info!.Id);
+
+            // Verify it agrees with the existing per-anchor API.
+            var singleton = session.GetAnchorInfo(id);
+            Assert.NotNull(singleton);
+            Assert.Equal(singleton!.TextPreview, info.TextPreview);
+            Assert.Equal(singleton.Kind, info.Kind);
+            Assert.Equal(singleton.Scope, info.Scope);
+        }
+        Assert.Null(bulk["p:body:0000000000000000ffffffffffffffff"]);
+    }
+
+    [Fact]
+    public void DS221_GetAnchorInfoUsesAnchorTargetTextPreview()
+    {
+        // Regression: after #162, GetAnchorInfo reads target.TextPreview directly
+        // instead of re-walking the element. Confirm the value matches what the
+        // projection put on AnchorTarget.
+        using var session = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var projection = session.Project();
+        foreach (var t in projection.AnchorIndex.Values
+                      .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h" or "li"))
+        {
+            var info = session.GetAnchorInfo(t.Anchor.Id);
+            Assert.NotNull(info);
+            Assert.Equal(t.TextPreview, info!.TextPreview);
+        }
     }
 
     // ─── Phase 3: text CRUD + undo/redo ──────────────────────────────────
@@ -1346,16 +1432,29 @@ public class DocxSessionTests
     public void DS140b_DeleteBlock_Footnote_RefusesSeparator()
     {
         // Word's id=-1 (separator) and id=0 (continuationSeparator) footnotes are
-        // page-rendering scaffolding — deleting them corrupts the document. The op
-        // must refuse with AnchorWrongKind.
+        // page-rendering scaffolding — deleting them corrupts the document.
+        //
+        // As of issue #162, these notes are filtered out of the AnchorIndex
+        // entirely, so callers can no longer discover them via projection. The
+        // new contract is stronger than the previous AnchorWrongKind refusal:
+        // they're invisible to projection-driven editors. Verify (a) no fn-kind
+        // anchor in the index resolves to a separator/continuationSeparator
+        // footnote, and (b) any hand-synthesized anchor id pointing at one is
+        // refused by DeleteBlock (the universal AnchorNotFound safety net).
         using var s = new DocxSession(BuildDS140_FootnoteFixture());
-        var separator = s.Project().AnchorIndex.Values
-            .First(t => t.Anchor.Kind == "fn"
-                     && AnchorXmlContains(s, t.Anchor.Id, "w:type=\"separator\""));
 
-        var r = s.DeleteBlock(separator.Anchor.Id);
+        var fnAnchors = s.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Kind == "fn")
+            .ToList();
+        Assert.DoesNotContain(fnAnchors,
+            t => AnchorXmlContains(s, t.Anchor.Id, "w:type=\"separator\"")
+              || AnchorXmlContains(s, t.Anchor.Id, "w:type=\"continuationSeparator\""));
+
+        // A synthetic anchor id targeting the boilerplate (whose Unid the caller
+        // has no legitimate way to obtain) is rejected as not found.
+        var r = s.DeleteBlock("fn:fn:00000000000000000000000000000000");
         Assert.False(r.Success);
-        Assert.Equal(EditErrorCode.AnchorWrongKind, r.Error!.Code);
+        Assert.Equal(EditErrorCode.AnchorNotFound, r.Error!.Code);
     }
 
     [Fact]

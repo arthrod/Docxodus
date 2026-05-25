@@ -243,6 +243,65 @@ public static partial class DocxSessionBridge
         SerializeAnchorTargets(Get(h).FindByBookmark(bookmarkName));
 
     /// <summary>
+    /// Returns AnchorInfo as JSON for one anchor id, or "null" if the anchor
+    /// is unknown. Lets npm callers avoid re-projecting just to read a preview.
+    /// </summary>
+    [JSExport]
+    public static string GetAnchorInfo(int h, string anchorId)
+    {
+        var info = Get(h).GetAnchorInfo(anchorId);
+        if (info is null) return "null";
+        var sb = new StringBuilder(200);
+        sb.Append("{\"id\":").Append(JsonString(info.Id))
+          .Append(",\"kind\":").Append(JsonString(info.Kind))
+          .Append(",\"scope\":").Append(JsonString(info.Scope))
+          .Append(",\"textPreview\":").Append(JsonString(info.TextPreview))
+          .Append('}');
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Bulk variant: takes a JSON array of anchor ids and returns a JSON object
+    /// keyed by id (value is the same AnchorInfo shape, or null for unknown ids).
+    /// </summary>
+    [JSExport]
+    public static string GetAnchorInfos(int h, string anchorIdsJson)
+    {
+        string[] ids;
+        try
+        {
+            ids = JsonSerializer.Deserialize<string[]>(
+                anchorIdsJson, DocxodusJsonContext.Default.StringArray) ?? Array.Empty<string>();
+        }
+        catch (JsonException)
+        {
+            return "{\"error\":\"malformed anchor id array\"}";
+        }
+
+        var map = Get(h).GetAnchorInfos(ids);
+        var sb = new StringBuilder(ids.Length * 100 + 2);
+        sb.Append('{');
+        bool first = true;
+        foreach (var kv in map)
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append(JsonString(kv.Key)).Append(':');
+            if (kv.Value is null) sb.Append("null");
+            else
+            {
+                sb.Append("{\"id\":").Append(JsonString(kv.Value.Id))
+                  .Append(",\"kind\":").Append(JsonString(kv.Value.Kind))
+                  .Append(",\"scope\":").Append(JsonString(kv.Value.Scope))
+                  .Append(",\"textPreview\":").Append(JsonString(kv.Value.TextPreview))
+                  .Append('}');
+            }
+        }
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Bridge for <see cref="DocxSession.ListAnnotations"/>. Returns a JSON array of
     /// annotation records — id/labelId/label/color/author/created/bookmarkName/
     /// annotatedText. Metadata, page info, and the unused-by-agents fields are omitted
@@ -568,6 +627,7 @@ public static partial class DocxSessionBridge
               .Append(",\"unid\":").Append(JsonString(kv.Value.Unid))
               .Append(",\"kind\":").Append(JsonString(kv.Value.Anchor.Kind))
               .Append(",\"scope\":").Append(JsonString(kv.Value.Anchor.Scope))
+              .Append(",\"textPreview\":").Append(JsonString(kv.Value.TextPreview))
               .Append('}');
         }
         sb.Append("}}");
@@ -648,6 +708,7 @@ public static partial class DocxSessionBridge
           .Append(",\"scope\":").Append(JsonString(t.Anchor.Scope))
           .Append(",\"unid\":").Append(JsonString(t.Unid))
           .Append(",\"partUri\":").Append(JsonString(t.PartUri))
+          .Append(",\"textPreview\":").Append(JsonString(t.TextPreview))
           .Append('}');
     }
 
