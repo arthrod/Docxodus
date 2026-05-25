@@ -58,6 +58,9 @@ internal static class DocxSessionOps
     public static string GetAnchorInfo(int handle, string anchorId) =>
         DocxSessionJson.SerializeAnchorInfoOrNull(SessionRegistry.Get(handle).GetAnchorInfo(anchorId));
 
+    public static string GetAnchorInfos(int handle, System.Collections.Generic.IEnumerable<string> anchorIds) =>
+        DocxSessionJson.SerializeAnchorInfoMap(SessionRegistry.Get(handle).GetAnchorInfos(anchorIds));
+
     public static string FindByText(int handle, string needle, FindOptions? options) =>
         DocxSessionJson.SerializeAnchorTargetOrNull(SessionRegistry.Get(handle).FindByText(needle, options));
 

@@ -332,6 +332,7 @@ internal static class DocxSessionJson
               .Append(",\"unid\":").Append(JsonString(kv.Value.Unid))
               .Append(",\"kind\":").Append(JsonString(kv.Value.Anchor.Kind))
               .Append(",\"scope\":").Append(JsonString(kv.Value.Anchor.Scope))
+              .Append(",\"textPreview\":").Append(JsonString(kv.Value.TextPreview))
               .Append('}');
         }
         sb.Append("}}");
@@ -412,6 +413,7 @@ internal static class DocxSessionJson
           .Append(",\"scope\":").Append(JsonString(t.Anchor.Scope))
           .Append(",\"unid\":").Append(JsonString(t.Unid))
           .Append(",\"partUri\":").Append(JsonString(t.PartUri))
+          .Append(",\"textPreview\":").Append(JsonString(t.TextPreview))
           .Append('}');
     }
 
@@ -420,6 +422,22 @@ internal static class DocxSessionJson
         if (target is null) return "null";
         var sb = new StringBuilder(128);
         AppendAnchorTarget(sb, target);
+        return sb.ToString();
+    }
+
+    public static string SerializeAnchorInfoMap(IReadOnlyDictionary<string, AnchorInfo?> map)
+    {
+        var sb = new StringBuilder(map.Count * 100 + 2);
+        sb.Append('{');
+        bool first = true;
+        foreach (var kv in map)
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append(JsonString(kv.Key)).Append(':');
+            sb.Append(SerializeAnchorInfoOrNull(kv.Value));
+        }
+        sb.Append('}');
         return sb.ToString();
     }
 

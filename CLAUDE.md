@@ -314,6 +314,7 @@ Detailed design docs for the major subsystems live in `docs/architecture/`. Read
 - `opencontracts_export.md` — OpenContractExporter format
 - `markdown_projection.md` — WmlToMarkdownConverter design
 - `docx_mutation_api.md` — DocxSession surface, anchor lifecycle, error catalog, supported markdown subset
+- `python_docxodus.md` — planned Python wrapper for DocxSession; wire protocol, type mapping, distribution
 - `skiasharp-removal-plan.md`, `wasm-optimization-plan.md`, `ui_responsiveness.md`, `profiling-results.md` — WASM/browser work
 
 ## OOXML Corner Cases

@@ -220,6 +220,27 @@ public static partial class DocxSessionBridge
     public static string GetAnchorInfo(int h, string anchorId) => DocxSessionOps.GetAnchorInfo(h, anchorId);
 
     /// <summary>
+    /// Bulk variant of <see cref="GetAnchorInfo"/>. Takes a JSON array of anchor
+    /// ids and returns a JSON object keyed by id; each value is the AnchorInfo
+    /// shape or <c>null</c> for unknown ids.
+    /// </summary>
+    [JSExport]
+    public static string GetAnchorInfos(int h, string anchorIdsJson)
+    {
+        string[] ids;
+        try
+        {
+            ids = JsonSerializer.Deserialize<string[]>(
+                anchorIdsJson, DocxodusJsonContext.Default.StringArray) ?? System.Array.Empty<string>();
+        }
+        catch (JsonException)
+        {
+            return "{\"error\":\"malformed anchor id array\"}";
+        }
+        return DocxSessionOps.GetAnchorInfos(h, ids);
+    }
+
+    /// <summary>
     /// Bridge for <see cref="DocxSession.FindByText"/>. Returns a single AnchorTarget
     /// JSON object (first match in document order) or the literal <c>null</c> if no
     /// anchor contains the needle. <paramref name="optionsJson"/> accepts

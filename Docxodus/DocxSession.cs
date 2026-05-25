@@ -380,10 +380,31 @@ public sealed class DocxSession : IDisposable
         ThrowIfDisposed();
         var target = FindAnchor(anchorId);
         if (target is null) return null;
+        return new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, target.TextPreview);
+    }
 
-        var element = target.Resolve(_doc!);
-        var preview = element is null ? "" : ElementTextPreview(element);
-        return new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, preview);
+    /// <summary>
+    /// Bulk variant of <see cref="GetAnchorInfo"/>. Resolves every requested anchor
+    /// from the projection's cached <c>AnchorIndex</c> in a single pass. Unknown
+    /// anchor ids map to <c>null</c> in the returned dictionary so callers can
+    /// distinguish "anchor doesn't exist" from "anchor exists with empty preview."
+    /// </summary>
+    public IReadOnlyDictionary<string, AnchorInfo?> GetAnchorInfos(IEnumerable<string> anchorIds)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(anchorIds);
+
+        var result = new Dictionary<string, AnchorInfo?>(StringComparer.Ordinal);
+        foreach (var id in anchorIds)
+        {
+            if (id is null) continue;
+            if (result.ContainsKey(id)) continue;
+            var target = FindAnchor(id);
+            result[id] = target is null
+                ? null
+                : new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, target.TextPreview);
+        }
+        return result;
     }
 
     /// <summary>
@@ -2252,12 +2273,6 @@ public sealed class DocxSession : IDisposable
     private void ThrowIfDisposed()
     {
         if (_disposed) throw new ObjectDisposedException(nameof(DocxSession));
-    }
-
-    private static string ElementTextPreview(XElement element)
-    {
-        var text = string.Concat(element.Descendants(W.t).Select(t => (string)t));
-        return text.Length > 80 ? text.Substring(0, 80) + "…" : text;
     }
 
     // ─── Mutation helpers (shared across tiers) ───────────────────────────

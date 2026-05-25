@@ -902,6 +902,7 @@ public partial class DocumentConverter
                     Scope = target.Anchor.Scope,
                     Unid = target.Anchor.Unid,
                     PartUri = target.PartUri,
+                    TextPreview = target.TextPreview,
                 };
             }
 

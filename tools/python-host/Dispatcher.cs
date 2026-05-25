@@ -78,6 +78,7 @@ internal static class Dispatcher
 
         "exists" => DocxSessionOps.Exists(Handle(args), Str(args, "anchorId")) ? "true" : "false",
         "get_anchor_info" => DocxSessionOps.GetAnchorInfo(Handle(args), Str(args, "anchorId")),
+        "get_anchor_infos" => DocxSessionOps.GetAnchorInfos(Handle(args), ParseAnchorIdArray(args)),
         "find_by_text" => DocxSessionOps.FindByText(Handle(args), Str(args, "needle"), ParseFindOptions(args)),
         "find_all_by_text" => DocxSessionOps.FindAllByText(Handle(args), Str(args, "needle"), ParseFindOptions(args)),
         "find_by_regex" => DocxSessionOps.FindByRegex(
@@ -192,6 +193,21 @@ internal static class Dispatcher
         if (args.ValueKind != JsonValueKind.Object || !args.TryGetProperty(name, out var op) || op.ValueKind != JsonValueKind.Object)
             return new FormatOp();
         return DocxSessionJson.ParseFormatOp(op.GetRawText());
+    }
+
+    private static string[] ParseAnchorIdArray(JsonElement args)
+    {
+        if (args.ValueKind != JsonValueKind.Object || !args.TryGetProperty("anchorIds", out var arr) || arr.ValueKind != JsonValueKind.Array)
+            throw new FormatException("args missing array \"anchorIds\"");
+        var result = new string[arr.GetArrayLength()];
+        int i = 0;
+        foreach (var el in arr.EnumerateArray())
+        {
+            if (el.ValueKind != JsonValueKind.String)
+                throw new FormatException("\"anchorIds\" entries must be strings");
+            result[i++] = el.GetString()!;
+        }
+        return result;
     }
 
     private static FindOptions? ParseFindOptions(JsonElement args)
