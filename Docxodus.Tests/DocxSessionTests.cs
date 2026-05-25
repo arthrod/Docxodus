@@ -239,6 +239,22 @@ public class DocxSessionTests
         return ms.ToArray();
     }
 
+    internal static byte[] BuildDocWithAdjacentPlaceholders()
+    {
+        // One paragraph, three blanks back-to-back like the NVCA address line —
+        // the canonical case where 40-char context windows pull in the next blank's
+        // text and confuse keyword-based picker logic.
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Document(new Body(
+                new Paragraph(new Run(new Text(
+                    "The address is [STREET], in the City of [CITY], County of [COUNTY], in the State of Delaware.")))));
+        }
+        return ms.ToArray();
+    }
+
     // ─── Phase 1: Skeleton tests ─────────────────────────────────────────
 
     [Fact]
@@ -541,6 +557,50 @@ public class DocxSessionTests
             p.Match.Text == "[_____]" ? "FILLED" : null);
         Assert.True(result.Filled >= 1);
         Assert.Equal(1, result.Passes);
+    }
+
+    // ─── Issue #164: boundary-aware Grep context windows ─────────────────
+
+    [Fact]
+    public void DS250_Grep_DefaultContextCharsIsEighty()
+    {
+        using var session = new DocxSession(BuildDocWithAdjacentPlaceholders());
+        var matches = session.Grep(@"\[STREET\]");
+        var m = Assert.Single(matches);
+
+        // "in the City of [CITY], County of [COUNTY], in the State of Delaware."
+        // is 68 chars. Pre-#164 was capped at 40. Post-#164 default 80 → all 68 visible.
+        Assert.True(m.ContextAfter.Length > 40,
+            $"ContextAfter should exceed 40 chars under widened default; got {m.ContextAfter.Length}: '{m.ContextAfter}'");
+    }
+
+    [Fact]
+    public void DS251_Grep_BoundaryCharMatchesPreviousBehavior()
+    {
+        using var session = new DocxSession(BuildDocWithAdjacentPlaceholders());
+        var matches = session.Grep(@"\[CITY\]",
+            scope: ProjectionScopes.Body, contextChars: 40, boundary: ContextBoundary.Char);
+        var m = Assert.Single(matches);
+
+        Assert.True(m.ContextBefore.Length <= 40);
+        Assert.True(m.ContextAfter.Length <= 40);
+    }
+
+    [Fact]
+    public void DS252_Grep_BoundaryBracketStopsAtNearestBracket()
+    {
+        using var session = new DocxSession(BuildDocWithAdjacentPlaceholders());
+        var matches = session.Grep(@"\[CITY\]",
+            scope: ProjectionScopes.Body, contextChars: 80, boundary: ContextBoundary.Bracket);
+        var m = Assert.Single(matches);
+
+        Assert.DoesNotContain('[', m.ContextBefore);
+        Assert.DoesNotContain(']', m.ContextBefore);
+        Assert.DoesNotContain('[', m.ContextAfter);
+        Assert.DoesNotContain(']', m.ContextAfter);
+
+        Assert.Equal(", in the City of ", m.ContextBefore);
+        Assert.Equal(", County of ", m.ContextAfter);
     }
 
     // ─── Phase 3: text CRUD + undo/redo ──────────────────────────────────
