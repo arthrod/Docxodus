@@ -112,6 +112,22 @@ public sealed record TextMatch
     public IReadOnlyList<string> Groups { get; init; } = Array.Empty<string>();
 }
 
+/// <summary>Options that tune the <c>FindBy*</c> helpers on <see cref="DocxSession"/>.</summary>
+public sealed record FindOptions
+{
+    /// <summary>Case-insensitive matching.</summary>
+    public bool IgnoreCase { get; init; }
+
+    /// <summary>Fold NBSP / narrow-NBSP / thin-space to ASCII space before matching (see <see cref="WhitespaceMode.Normalize"/>).</summary>
+    public bool IgnoreWhitespace { get; init; }
+
+    /// <summary>If set, only return anchors of this kind (e.g. <c>"h"</c> for headings).</summary>
+    public string? KindFilter { get; init; }
+
+    /// <summary>If set, only return anchors in this scope (e.g. <c>"body"</c>, <c>"hdr1"</c>).</summary>
+    public string? ScopeFilter { get; init; }
+}
+
 /// <summary>Options that tune <see cref="DocxSession.ReplaceTextRange"/>.</summary>
 public sealed record ReplaceOptions
 {
@@ -416,6 +432,81 @@ public sealed class DocxSession : IDisposable
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Finds the first anchor whose flat text contains <paramref name="needle"/>, or null.
+    /// Thin wrapper over <see cref="Grep"/> — every consumer was reimplementing the same
+    /// scan with its own quirks (case sensitivity, NBSP, scope filter). See issue #137.
+    /// </summary>
+    public AnchorTarget? FindByText(string needle, FindOptions? options = null) =>
+        FindAllByText(needle, options).FirstOrDefault();
+
+    /// <summary>
+    /// All anchors whose flat text contains <paramref name="needle"/>, in document order.
+    /// Duplicates removed (one entry per enclosing anchor regardless of how many times
+    /// the needle appears inside it).
+    /// </summary>
+    public IReadOnlyList<AnchorTarget> FindAllByText(string needle, FindOptions? options = null)
+    {
+        if (string.IsNullOrEmpty(needle)) return Array.Empty<AnchorTarget>();
+        var opts = options ?? new FindOptions();
+        var regexOpts = opts.IgnoreCase
+            ? System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            : System.Text.RegularExpressions.RegexOptions.None;
+        return FindMatchesFiltered(System.Text.RegularExpressions.Regex.Escape(needle), regexOpts, opts);
+    }
+
+    /// <summary>
+    /// All anchors with at least one match for <paramref name="pattern"/>, in document order.
+    /// </summary>
+    public IReadOnlyList<AnchorTarget> FindByRegex(
+        string pattern,
+        System.Text.RegularExpressions.RegexOptions regexOptions = System.Text.RegularExpressions.RegexOptions.None,
+        FindOptions? options = null) =>
+        FindMatchesFiltered(pattern, regexOptions, options ?? new FindOptions());
+
+    /// <summary>
+    /// All anchors of a given kind (and optionally scope), in document order. Direct read
+    /// over the projection's <c>AnchorIndex</c>; no text scan, so no <see cref="FindOptions"/>.
+    /// </summary>
+    public IReadOnlyList<AnchorTarget> FindByKind(string kind, string? scope = null)
+    {
+        ThrowIfDisposed();
+        var result = new List<AnchorTarget>();
+        foreach (var target in Project().AnchorIndex.Values)
+        {
+            if (target.Anchor.Kind != kind) continue;
+            if (scope is not null && target.Anchor.Scope != scope) continue;
+            result.Add(target);
+        }
+        return result;
+    }
+
+    private IReadOnlyList<AnchorTarget> FindMatchesFiltered(
+        string pattern,
+        System.Text.RegularExpressions.RegexOptions regexOptions,
+        FindOptions options)
+    {
+        ThrowIfDisposed();
+        var matches = Grep(
+            pattern,
+            regexOptions,
+            ProjectionScopes.All, // pre-filter so caller-level filters (KindFilter, ScopeFilter) apply uniformly below
+            contextChars: 0,
+            whitespace: options.IgnoreWhitespace ? WhitespaceMode.Normalize : WhitespaceMode.Preserve);
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<AnchorTarget>();
+        foreach (var m in matches)
+        {
+            var anchor = m.EnclosingAnchor;
+            if (options.KindFilter is not null && anchor.Anchor.Kind != options.KindFilter) continue;
+            if (options.ScopeFilter is not null && anchor.Anchor.Scope != options.ScopeFilter) continue;
+            if (!seen.Add(anchor.Anchor.Id)) continue;
+            result.Add(anchor);
+        }
+        return result;
     }
 
     /// <summary>

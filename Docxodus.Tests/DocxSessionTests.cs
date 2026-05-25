@@ -1460,6 +1460,68 @@ public class DocxSessionTests
     }
 
     [Fact]
+    public void DS160_FindByText_FirstMatch()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var t = s.FindByText("BOLD");
+        Assert.NotNull(t);
+        Assert.Equal("p", t!.Anchor.Kind);
+    }
+
+    [Fact]
+    public void DS161_FindByText_IgnoreCase()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        Assert.Null(s.FindByText("bold"));  // case-sensitive default misses uppercase BOLD
+        Assert.NotNull(s.FindByText("bold", new FindOptions { IgnoreCase = true }));
+    }
+
+    [Fact]
+    public void DS162_FindByText_IgnoreWhitespace_HandlesNbsp()
+    {
+        using var s = new DocxSession(BuildDS150_NbspFixture());
+        Assert.Null(s.FindByText("First :"));  // NBSP in source, regular space in needle
+        Assert.NotNull(s.FindByText("First :", new FindOptions { IgnoreWhitespace = true }));
+    }
+
+    [Fact]
+    public void DS163_FindAllByText_ReturnsDeduplicatedAnchorsInDocumentOrder()
+    {
+        // The Grep fixture has 3 paragraphs that all contain lowercase "n" ("Once"/"in"/
+        // "Plain"/"again"/"Anthropic"); FindAllByText must collapse the many in-paragraph
+        // hits into one entry per paragraph.
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var all = s.FindAllByText("n");
+        Assert.Equal(3, all.Count);
+        Assert.Equal(all.Count, all.Select(a => a.Anchor.Id).Distinct().Count());
+    }
+
+    [Fact]
+    public void DS164_FindByRegex_ReturnsAllMatchingAnchors()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var anchors = s.FindByRegex(@"\b\w*BOLD\w*\b");
+        Assert.NotEmpty(anchors);
+    }
+
+    [Fact]
+    public void DS165_FindByKind_FiltersByKindAndScope()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        Assert.Equal(2, s.FindByKind("p", "body").Count);
+        Assert.Empty(s.FindByKind("p", "hdr1"));
+        Assert.True(s.FindByKind("p").Count >= 2);
+    }
+
+    [Fact]
+    public void DS166_FindOptions_KindFilter_Narrows()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var headingsOnly = s.FindAllByText("n", new FindOptions { KindFilter = "h" });
+        Assert.All(headingsOnly, a => Assert.Equal("h", a.Anchor.Kind));
+    }
+
+    [Fact]
     public void DS143_DeleteBlock_Footnote_UndoRestores()
     {
         // The single-snapshot undo must roll back both the definition AND every
