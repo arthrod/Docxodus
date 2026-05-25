@@ -240,6 +240,16 @@ public sealed record FillOptions
     /// is preserved by prepending it to the replacement. Set to <c>false</c> if
     /// you want full control over the replacement and to overwrite the <c>$</c>.</summary>
     public bool PreserveDollarPrefix { get; init; } = true;
+
+    /// <summary>Threaded through to <see cref="DocxSession.FindPlaceholders"/> calls
+    /// inside the multi-pass loop. Default 80 (matches the new Grep default).</summary>
+    public int ContextChars { get; init; } = 80;
+
+    /// <summary>Boundary mode for the per-match context windows the picker sees.
+    /// Default <see cref="ContextBoundary.Char"/> (legacy truncate-at-contextChars).
+    /// Pickers that rely on bracket-bounded context can opt into
+    /// <see cref="ContextBoundary.Bracket"/> for unambiguous per-placeholder context.</summary>
+    public ContextBoundary Boundary { get; init; } = ContextBoundary.Char;
 }
 
 /// <summary>
@@ -1199,7 +1209,9 @@ public sealed class DocxSession : IDisposable
     /// </remarks>
     public IReadOnlyList<TemplatePlaceholder> FindPlaceholders(
         PlaceholderKinds kinds = PlaceholderKinds.All,
-        ProjectionScopes scope = ProjectionScopes.Body)
+        ProjectionScopes scope = ProjectionScopes.Body,
+        int contextChars = 80,
+        ContextBoundary boundary = ContextBoundary.Char)
     {
         ThrowIfDisposed();
         if (kinds == 0) return Array.Empty<TemplatePlaceholder>();
@@ -1207,7 +1219,9 @@ public sealed class DocxSession : IDisposable
         // Single bracket-or-dollar-bracket scan; classify by content after the match.
         // Non-greedy inner content + negated character class keeps the regex from
         // crossing into a sibling bracket pair on the same line.
-        var matches = Grep(@"\$?\[[^\[\]]+\]", System.Text.RegularExpressions.RegexOptions.None, scope);
+        var matches = Grep(@"\$?\[[^\[\]]+\]",
+            System.Text.RegularExpressions.RegexOptions.None, scope,
+            contextChars, WhitespaceMode.Preserve, boundary);
         var results = new List<TemplatePlaceholder>(matches.Count);
         foreach (var m in matches)
         {
@@ -1317,7 +1331,7 @@ public sealed class DocxSession : IDisposable
 
         for (int pass = 1; pass <= opts.MaxPasses; pass++)
         {
-            var placeholders = FindPlaceholders(opts.Kinds, opts.Scope)
+            var placeholders = FindPlaceholders(opts.Kinds, opts.Scope, opts.ContextChars, opts.Boundary)
                 .OrderByDescending(p => p.Match.EnclosingAnchor.Anchor.Id, StringComparer.Ordinal)
                 .ThenByDescending(p => p.Match.Span.Start)
                 .ToList();

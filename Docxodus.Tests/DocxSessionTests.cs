@@ -658,6 +658,32 @@ public class DocxSessionTests
         Assert.DoesNotContain(',', m.ContextAfter);
     }
 
+    [Fact]
+    public void DS255_FindPlaceholders_AcceptsBoundaryAndContextChars()
+    {
+        using var session = new DocxSession(BuildDocWithAdjacentPlaceholders());
+
+        // FindPlaceholders should plumb the boundary parameter through to the
+        // internal Grep call so picker code can rely on bracket-bounded context
+        // without dropping down to Grep manually.
+        var placeholders = session.FindPlaceholders(
+            PlaceholderKinds.All,
+            ProjectionScopes.Body,
+            contextChars: 80,
+            boundary: ContextBoundary.Bracket);
+
+        // We have three placeholders ([STREET], [CITY], [COUNTY]); none of their
+        // contexts should contain bracket characters from sibling placeholders.
+        Assert.Equal(3, placeholders.Count);
+        foreach (var p in placeholders)
+        {
+            Assert.DoesNotContain('[', p.Match.ContextBefore);
+            Assert.DoesNotContain(']', p.Match.ContextBefore);
+            Assert.DoesNotContain('[', p.Match.ContextAfter);
+            Assert.DoesNotContain(']', p.Match.ContextAfter);
+        }
+    }
+
     // ─── Phase 3: text CRUD + undo/redo ──────────────────────────────────
 
     [Fact]
