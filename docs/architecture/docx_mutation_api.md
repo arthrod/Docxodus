@@ -200,6 +200,47 @@ Two caveats to internalize while [#132](https://github.com/JSv4/Docxodus/issues/
 
 The agent's prompt should also be aware: it can call `AnnotationManager.GetAnnotations(doc)` once at the start of a session to enumerate available labels (e.g., "you can target: INDEMNIFICATION, TERMINATION, GOVERNING_LAW") and present those as tools rather than asking the LLM to discover them from text.
 
+## ReplaceTextRange — surgical text edits
+
+`session.ReplaceTextRange(anchorId, find, replace, options?)` finds every literal occurrence of `find` in one paragraph/heading/list-item's flat text and substitutes `replace` for each, returning an `EditResult` per attempted match. Built on `Grep` — same fragment walker, opposite direction.
+
+Three entry points covering the natural workflows:
+
+```
+session.ReplaceTextRange(anchor, find, replace, opts?)         // most common: replace every match in one block
+session.ReplaceMatch(textMatch, replace)                       // convenience for a Grep result
+session.ReplaceTextAtSpan(anchor, spanStart, spanLength, repl) // exact-span variant when several identical needles share a block
+```
+
+`ReplaceOptions`: `IgnoreCase` (case-insensitive find) and `MaxReplacements` (cap on how many to apply).
+
+### Formatting-preservation contract
+
+The replacement text inherits the formatting of the FIRST run the match spanned. Middle and trailing runs keep their `w:rPr` but lose the slice of text the match consumed — so a bold phrase that got partially overwritten still has bold formatting for any surviving text. This is the practical sweet spot: it solves the template-fill case where you want `[___]` → `Bluth Co.` to take on the surrounding text's formatting, and it's predictable for cross-formatting matches.
+
+If you need different per-fragment behavior (e.g., the replacement should be bold even when the first fragment was plain), use `Grep` + bespoke `Raw.GetXml` mutation today, or wait for a future inline-markdown-aware overload.
+
+### Ordering and atomicity
+
+Multiple matches in the same paragraph are applied in **reverse document order** so each earlier-offset match's span stays valid after later edits land — the same trick the projector uses for tracked-change accept passes. The whole call records **one** snapshot; `Undo()` rolls every replacement back together.
+
+### When to reach for the span-addressed variant
+
+If the agent has computed five `[___]` placeholder matches in the same paragraph from `Grep` and wants to fill each with a different value, `ReplaceTextRange` would only see "five identical `[___]` needles" and replace each with the first value (or all with the same value). `ReplaceTextAtSpan` (or `ReplaceMatch`) addresses each match by its exact coordinates so the disambiguation is unambiguous. Apply spans in **reverse offset order** in this case for the same reason — earlier spans stay valid after later edits.
+
+### Recipe: enumerate-and-fill via Grep + ReplaceMatch
+
+```csharp
+foreach (var match in session.Grep(@"\[_+\]")
+                             .OrderByDescending(m => m.Span.Start))
+{
+    var value = LookupValueByContext(match.ContextBefore, match.ContextAfter);
+    session.ReplaceMatch(match, value);
+}
+```
+
+This pattern collapses the 200-line context-needle-disambiguation script the Bluth-Co smoke test had to write down to a five-line loop.
+
 ## Grep — cross-run text search
 
 `session.Grep(pattern, options?, scope?, contextChars?)` searches the flat text of every paragraph/heading/list-item in scope, returning matches in document order. Each `TextMatch` carries:

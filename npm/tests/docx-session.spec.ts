@@ -108,6 +108,52 @@ test.describe('DocxSession (WASM bridge)', () => {
     expect(result.restored).toBe(true);
   });
 
+  test('ReplaceTextRange + replaceMatch round-trip through the WASM bridge', async ({ page }) => {
+    // Grep finds the '[' placeholder markers; replaceMatch addresses each by its
+    // (anchor, span) so the wrong one never gets picked when several share text.
+    const bytes = readTestFile('HC001-5DayTourPlanTemplate.docx');
+
+    const result = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const bridge = (window as any).Docxodus.DocxSessionBridge;
+      const handle = bridge.OpenSession(bin, '');
+      try {
+        const matchesBefore = JSON.parse(bridge.Grep(handle, '\\[', JSON.stringify({ scope: 1 })));
+        const totalBefore = matchesBefore.length;
+        if (totalBefore < 1) return { totalBefore, error: 'fixture has no matches' };
+
+        // Replace the FIRST match via span-addressed bridge call.
+        const target = matchesBefore[0];
+        const r = JSON.parse(bridge.ReplaceTextAtSpan(
+          handle,
+          target.enclosingAnchor.id,
+          target.span.start,
+          target.span.length,
+          '⟪BRACKET⟫'
+        ));
+
+        const matchesAfter = JSON.parse(bridge.Grep(handle, '\\[', JSON.stringify({ scope: 1 })));
+        const proj = JSON.parse(bridge.Project(handle));
+        return {
+          totalBefore,
+          totalAfter: matchesAfter.length,
+          rSuccess: r.success,
+          rError: r.error,
+          containsMarker: proj.markdown.includes('⟪BRACKET⟫'),
+        };
+      } finally {
+        bridge.CloseSession(handle);
+      }
+    }, Array.from(bytes));
+
+    expect(result.error).toBeUndefined();
+    expect(result.rSuccess).toBe(true);
+    // Exactly one '[' replaced → match count drops by one. (We don't assert on
+    // the marker string surviving in the projection — the projector escapes
+    // markdown punctuation, but the run-text edit did land if the count dropped.)
+    expect(result.totalAfter).toBe(result.totalBefore - 1);
+  });
+
   test('Grep returns matches with run-fragment breakdown', async ({ page }) => {
     // HC001 is a multilingual tour-plan template full of `[placeholder]` slots;
     // search for an opening bracket which is reliably present regardless of language.

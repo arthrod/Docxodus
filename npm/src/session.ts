@@ -10,6 +10,7 @@ import type {
   EditResult,
   FormatOp,
   GrepOptions,
+  ReplaceOptions,
   TextMatch,
 } from "./types.js";
 
@@ -114,6 +115,35 @@ export class DocxSession {
     return JSON.parse(this.wasm.Grep(this.handle, pattern, options ? JSON.stringify(options) : "")) as TextMatch[];
   }
 
+  /**
+   * Finds every literal occurrence of `find` in the anchor's flat text and
+   * replaces it with `replace`, preserving the surrounding run formatting that
+   * the match didn't touch. Returns one `EditResult` per attempted match.
+   *
+   * Run-formatting contract: the replacement text inherits the formatting of
+   * the FIRST run the match spanned. Middle/trailing runs keep their `w:rPr`
+   * but lose the slice of text the match consumed.
+   *
+   * @see docs/architecture/docx_mutation_api.md#replacetextrange
+   */
+  replaceTextRange(anchorId: string, find: string, replace: string, options?: ReplaceOptions): EditResult[] {
+    return JSON.parse(
+      this.wasm.ReplaceTextRange(this.handle, anchorId, find, replace, options ? JSON.stringify(options) : "")
+    ) as EditResult[];
+  }
+
+  /**
+   * Replaces a specific Grep match in place — addresses the exact span by
+   * `enclosingAnchor.id` + `span.{start,length}`, so identical needles in the
+   * same paragraph (the template-fill case where five `[___]` placeholders
+   * each get a different value) don't collide.
+   */
+  replaceMatch(match: TextMatch, replace: string): EditResult {
+    return JSON.parse(
+      this.wasm.ReplaceTextAtSpan(this.handle, match.enclosingAnchor.id, match.span.start, match.span.length, replace)
+    ) as EditResult;
+  }
+
   // ─── Lifecycle ───────────────────────────────────────────────────────
 
   undo(): boolean {
@@ -153,4 +183,4 @@ export function openDocxSession(
   return new DocxSession(handle, bridge);
 }
 
-export type { AnchorRef, CharSpan, DocxSessionProjection, DocxSessionSettings, EditError, EditErrorCode, EditResult, FormatOp, GrepOptions, MarkdownPatch, RunFormatting, RunFragment, TextMatch } from "./types.js";
+export type { AnchorRef, CharSpan, DocxSessionProjection, DocxSessionSettings, EditError, EditErrorCode, EditResult, FormatOp, GrepOptions, MarkdownPatch, ReplaceOptions, RunFormatting, RunFragment, TextMatch } from "./types.js";

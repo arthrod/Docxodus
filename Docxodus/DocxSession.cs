@@ -97,6 +97,16 @@ public sealed record TextMatch
     public IReadOnlyList<string> Groups { get; init; } = Array.Empty<string>();
 }
 
+/// <summary>Options that tune <see cref="DocxSession.ReplaceTextRange"/>.</summary>
+public sealed record ReplaceOptions
+{
+    /// <summary>Case-insensitive matching for the literal <c>find</c> needle.</summary>
+    public bool IgnoreCase { get; init; }
+
+    /// <summary>Cap the number of replacements; null = unlimited.</summary>
+    public int? MaxReplacements { get; init; }
+}
+
 public sealed record AnchorInfo(string Id, string Kind, string Scope, string TextPreview);
 
 public sealed record MarkdownPatch(string ScopeAnchorId, string Markdown);
@@ -336,6 +346,214 @@ public sealed class DocxSession : IDisposable
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Surgical text replacement within a single paragraph/heading/list-item: finds every
+    /// literal occurrence of <paramref name="find"/> in the anchor's flat text and replaces
+    /// it with <paramref name="replace"/>, preserving the surrounding run formatting that
+    /// the match didn't touch. Returns one <see cref="EditResult"/> per attempted match.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The replacement text is plain-text and inherits the formatting of the FIRST run the
+    /// match spanned — middle/trailing runs keep their <c>w:rPr</c> but lose the slice of
+    /// text the match consumed (so a bold run that contributed three chars to the match now
+    /// has those three chars gone, but stays bold for everything else it held).
+    /// </para>
+    /// <para>
+    /// Matches are applied in reverse document order so multiple matches in the same
+    /// paragraph don't invalidate each other's offsets. The whole call records a single undo
+    /// snapshot — <see cref="Undo"/> rolls back every replacement together.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<EditResult> ReplaceTextRange(
+        string anchorId,
+        string find,
+        string replace,
+        ReplaceOptions? options = null)
+    {
+        if (_disposed)
+            return new[] { EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed") };
+        if (string.IsNullOrEmpty(find))
+            return new[] { EditResult.Fail(EditErrorCode.MalformedMarkdown, "find must be non-empty", anchorId) };
+
+        var target = FindAnchor(anchorId);
+        if (target is null)
+            return new[] { EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId) };
+        if (target.Anchor.Kind is not ("p" or "h" or "li"))
+            return new[] { EditResult.Fail(EditErrorCode.AnchorWrongKind,
+                $"ReplaceTextRange requires a paragraph/heading/list-item anchor; got kind={target.Anchor.Kind}", anchorId) };
+
+        var opts = options ?? new ReplaceOptions();
+        var regexOpts = opts.IgnoreCase
+            ? System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            : System.Text.RegularExpressions.RegexOptions.None;
+        var pattern = System.Text.RegularExpressions.Regex.Escape(find);
+
+        var matches = Grep(pattern, regexOpts)
+            .Where(m => m.EnclosingAnchor.Anchor.Id == target.Anchor.Id)
+            .ToList();
+        if (opts.MaxReplacements is int cap) matches = matches.Take(cap).ToList();
+        if (matches.Count == 0) return Array.Empty<EditResult>();
+
+        var element = target.Resolve(_doc!);
+        if (element is null)
+            return new[] { EditResult.Fail(EditErrorCode.AnchorNotFound, "element resolved null", anchorId) };
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            // Reverse offset order so earlier-offset matches' SpanInElement stays valid
+            // after later-offset edits land — see DS112/DS115.
+            foreach (var match in matches.OrderByDescending(m => m.Span.Start))
+                ApplyFragmentReplacement(element, match, replace);
+
+            InvalidateProjectionCache();
+            var success = new EditResult
+            {
+                Success = true,
+                Modified = new[] { target.Anchor },
+                Patch = ProjectScope(target),
+            };
+            return Enumerable.Repeat(success, matches.Count).ToArray();
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            var preOp = _history.PopForUndo();
+            if (preOp.ok) RestoreSnapshot(preOp.snapshot);
+            return new[] { EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId) };
+        }
+    }
+
+    /// <summary>
+    /// Convenience: replace a single <see cref="TextMatch"/> (typically from <see cref="Grep"/>)
+    /// in place with <paramref name="replace"/>. Same fragment-formatting semantics as
+    /// <see cref="ReplaceTextRange"/>.
+    /// </summary>
+    public EditResult ReplaceMatch(TextMatch match, string replace)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (match is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "match is null");
+        return ReplaceTextAtSpan(match.EnclosingAnchor.Anchor.Id, match.Span.Start, match.Span.Length, replace);
+    }
+
+    /// <summary>
+    /// Surgical replacement of an exact byte range within one block's flat text.
+    /// The natural pair to <see cref="Grep"/>: pass the <see cref="TextMatch.EnclosingAnchor"/>'s
+    /// id plus the <see cref="TextMatch.Span"/> coordinates to replace one specific match
+    /// even when several identical needles share the same paragraph (the template-filling
+    /// case where five <c>[___]</c> placeholders each get a different value).
+    /// </summary>
+    public EditResult ReplaceTextAtSpan(string anchorId, int spanStart, int spanLength, string replace)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        var target = FindAnchor(anchorId);
+        if (target is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
+        if (target.Anchor.Kind is not ("p" or "h" or "li"))
+            return EditResult.Fail(EditErrorCode.AnchorWrongKind,
+                $"ReplaceTextAtSpan requires a paragraph/heading/list-item anchor; got kind={target.Anchor.Kind}", anchorId);
+
+        var element = target.Resolve(_doc!);
+        if (element is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", anchorId);
+
+        var map = Internal.RunTextMap.Build(element);
+        if (spanStart < 0 || spanLength < 0 || spanStart + spanLength > map.FlatText.Length)
+            return EditResult.Fail(EditErrorCode.OffsetOutOfRange,
+                $"span {spanStart}+{spanLength} out of [0, {map.FlatText.Length}]", anchorId);
+
+        var pieces = Internal.RunTextMap.ResolveRange(map, spanStart, spanLength);
+        if (pieces.Count == 0)
+            return EditResult.Fail(EditErrorCode.OffsetOutOfRange, "span resolved to no runs", anchorId);
+
+        // Synthesize fragments from the resolved pieces. The replacement helper only
+        // reads Unid + SpanInElement, so the other fields are placeholders.
+        var fragments = new List<RunFragment>(pieces.Count);
+        foreach (var (seg, offsetInRun, len) in pieces)
+        {
+            var runUnid = (string?)seg.Run.Attribute(PtOpenXml.Unid) ?? string.Empty;
+            fragments.Add(new RunFragment
+            {
+                Unid = runUnid,
+                Text = string.Empty,
+                SpanInElement = new CharSpan(offsetInRun, len),
+                Formatting = new RunFormatting(),
+            });
+        }
+        var synthetic = new TextMatch
+        {
+            Text = map.FlatText.Substring(spanStart, spanLength),
+            EnclosingAnchor = target,
+            Span = new CharSpan(spanStart, spanLength),
+            Fragments = fragments,
+            ContextBefore = string.Empty,
+            ContextAfter = string.Empty,
+        };
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            ApplyFragmentReplacement(element, synthetic, replace);
+            InvalidateProjectionCache();
+            return new EditResult
+            {
+                Success = true,
+                Modified = new[] { target.Anchor },
+                Patch = ProjectScope(target),
+            };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            var preOp = _history.PopForUndo();
+            if (preOp.ok) RestoreSnapshot(preOp.snapshot);
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId);
+        }
+    }
+
+    /// <summary>
+    /// Apply <paramref name="match"/>'s fragment list to the live element, inserting
+    /// <paramref name="replace"/> into the first fragment's run and removing each
+    /// subsequent fragment's slice from its run (preserving each run's rPr).
+    /// </summary>
+    private static void ApplyFragmentReplacement(XElement blockElement, TextMatch match, string replace)
+    {
+        if (match.Fragments.Count == 0) return;
+
+        // Build a unid → XElement run lookup once. The run XElements are the live
+        // descendants of `blockElement` (walking hyperlink/sdt containers too).
+        var runsByUnid = new Dictionary<string, XElement>(StringComparer.Ordinal);
+        foreach (var run in InlineRuns(blockElement))
+        {
+            var unid = (string?)run.Attribute(PtOpenXml.Unid);
+            if (unid is not null) runsByUnid[unid] = run;
+        }
+
+        for (int i = 0; i < match.Fragments.Count; i++)
+        {
+            var fragment = match.Fragments[i];
+            if (!runsByUnid.TryGetValue(fragment.Unid, out var run)) continue;
+
+            var concat = RunText(run);
+            var start = fragment.SpanInElement.Start;
+            var len = fragment.SpanInElement.Length;
+            if (start < 0 || start + len > concat.Length) continue;
+
+            var before = concat.Substring(0, start);
+            var after = concat.Substring(start + len);
+            var newText = i == 0 ? before + replace + after : before + after;
+
+            // Collapse all w:t descendants in this run into a single w:t with the new text.
+            // Loses any inline <w:tab/>/<w:br/> inside the run's text section — they're rare
+            // for placeholder slots and supporting them here would balloon the impl. Run's
+            // rPr/proofErr siblings are untouched, which is the formatting-preservation contract.
+            foreach (var t in run.Elements(W.t).ToList()) t.Remove();
+            run.Add(new XElement(W.t,
+                new XAttribute(XNamespace.Xml + "space", "preserve"),
+                newText));
+        }
     }
 
     private static bool ScopeMatches(string anchorScope, ProjectionScopes filter)

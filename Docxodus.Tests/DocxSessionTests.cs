@@ -910,4 +910,189 @@ public class DocxSessionTests
         Assert.Equal(0, trailing.SpanInElement.Start);
         Assert.Equal(3, trailing.SpanInElement.Length);
     }
+
+    // ─── Phase 11: ReplaceTextRange (#139) ───────────────────────────────
+
+    private static string FlatBodyText(DocxSession s)
+    {
+        return string.Join("\n", s.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Scope == "body" && (t.Anchor.Kind == "p" || t.Anchor.Kind == "h" || t.Anchor.Kind == "li"))
+            .Select(t =>
+            {
+                var xml = s.Raw.GetXml(t.Anchor.Id);
+                var el = XElement.Parse(xml);
+                return string.Concat(el.Descendants(XName.Get("t", "http://schemas.openxmlformats.org/wordprocessingml/2006/main"))
+                    .Select(tn => (string)tn));
+            }));
+    }
+
+    [Fact]
+    public void DS110_ReplaceTextRange_SingleFragmentReplacement()
+    {
+        // First paragraph of the Grep fixture: one plain run with
+        // "Once upon a time, in a faraway land."
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var anchor = s.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Kind == "p").Anchor.Id;
+
+        var results = s.ReplaceTextRange(anchor, "faraway", "distant");
+
+        Assert.Single(results);
+        Assert.True(results[0].Success, results[0].Error?.Message);
+        Assert.Contains("Once upon a time, in a distant land.", FlatBodyText(s));
+        Assert.DoesNotContain("faraway", FlatBodyText(s));
+    }
+
+    [Fact]
+    public void DS111_ReplaceTextRange_MultiFragmentPreservesRemainingFormatting()
+    {
+        // Second paragraph: "Plain " + bold "BOLD" + " plain again."
+        // Replacing "ain BOLD pl" must:
+        //   - drop the participating slice from each of the 3 runs
+        //   - inject the replacement into the FIRST fragment's run
+        //   - leave the bold run's formatting intact for any text that survives
+        //     (in this case the bold run's slice is the whole run, so the bold run
+        //      ends up empty but still present with bold rPr)
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var paragraphs = s.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Kind == "p").ToList();
+        var second = paragraphs[1].Anchor.Id;
+
+        var results = s.ReplaceTextRange(second, "ain BOLD pl", "REPL");
+
+        Assert.Single(results);
+        Assert.True(results[0].Success, results[0].Error?.Message);
+
+        // Resulting flat text: "PlREPLain again."  ("Pl" from before "ain" + REPL + "ain again." after " pl")
+        var xml = s.Raw.GetXml(second);
+        var el = XElement.Parse(xml);
+        var Wt = XName.Get("t", "http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+        var Wr = XName.Get("r", "http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+        var Wb = XName.Get("b", "http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+        var concat = string.Concat(el.Descendants(Wt).Select(t => (string)t));
+        Assert.Equal("PlREPLain again.", concat);
+
+        // The bold run must still exist with rPr/<w:b/> even after losing all its text,
+        // because preserving formatting is the whole point. (Future op could prune
+        // empty runs but the contract is "formatting survives".)
+        var boldRun = el.Descendants(Wr).FirstOrDefault(r =>
+            r.Element(XName.Get("rPr", "http://schemas.openxmlformats.org/wordprocessingml/2006/main"))?.Element(Wb) is not null);
+        Assert.NotNull(boldRun);
+    }
+
+    [Fact]
+    public void DS112_ReplaceTextRange_MultipleMatchesInSameParagraph()
+    {
+        // First paragraph contains the letter "a" multiple times.
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var first = s.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Kind == "p").Anchor.Id;
+        var beforeCount = FlatBodyText(s).Count(c => c == 'a');
+
+        var results = s.ReplaceTextRange(first, "a", "@");
+
+        Assert.True(results.Count >= 3);
+        Assert.All(results, r => Assert.True(r.Success, r.Error?.Message));
+
+        var after = FlatBodyText(s);
+        // Every 'a' in the first paragraph is now '@'; no leftovers in that paragraph.
+        var firstParaXml = s.Raw.GetXml(first);
+        var firstParaText = string.Concat(XElement.Parse(firstParaXml)
+            .Descendants(XName.Get("t", "http://schemas.openxmlformats.org/wordprocessingml/2006/main"))
+            .Select(t => (string)t));
+        Assert.DoesNotContain("a", firstParaText);
+    }
+
+    [Fact]
+    public void DS113_ReplaceTextRange_FindNotFound_ReturnsEmpty()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var anchor = s.Project().AnchorIndex.Values.First(t => t.Anchor.Kind == "p").Anchor.Id;
+        var before = FlatBodyText(s);
+
+        var results = s.ReplaceTextRange(anchor, "nope-this-is-not-in-the-doc", "irrelevant");
+
+        Assert.Empty(results);
+        Assert.Equal(before, FlatBodyText(s));
+    }
+
+    [Fact]
+    public void DS114_ReplaceTextRange_IgnoreCase()
+    {
+        // "BOLD" is uppercase in the fixture; case-insensitive find with lowercase needle should hit.
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var second = s.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Kind == "p").Skip(1).First().Anchor.Id;
+
+        var results = s.ReplaceTextRange(second, "bold", "calm", new ReplaceOptions { IgnoreCase = true });
+        Assert.Single(results);
+        Assert.True(results[0].Success);
+        Assert.Contains("Plain calm plain again.", FlatBodyText(s));
+    }
+
+    [Fact]
+    public void DS115_ReplaceTextRange_MaxReplacementsHonored()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var first = s.Project().AnchorIndex.Values.First(t => t.Anchor.Kind == "p").Anchor.Id;
+
+        var results = s.ReplaceTextRange(first, "a", "@", new ReplaceOptions { MaxReplacements = 2 });
+        Assert.Equal(2, results.Count);
+
+        // Exactly two 'a's became '@'; subsequent 'a's still present in the paragraph.
+        var firstParaXml = s.Raw.GetXml(first);
+        var firstParaText = string.Concat(XElement.Parse(firstParaXml)
+            .Descendants(XName.Get("t", "http://schemas.openxmlformats.org/wordprocessingml/2006/main"))
+            .Select(t => (string)t));
+        Assert.Contains("a", firstParaText);
+        Assert.Equal(2, firstParaText.Count(c => c == '@'));
+    }
+
+    [Fact]
+    public void DS116_ReplaceTextRange_EmptyReplaceDeletesText()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var second = s.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Kind == "p").Skip(1).First().Anchor.Id;
+
+        var results = s.ReplaceTextRange(second, "BOLD", "");
+        Assert.Single(results);
+        Assert.True(results[0].Success);
+        Assert.Contains("Plain  plain again.", FlatBodyText(s));   // double space where BOLD was
+    }
+
+    [Fact]
+    public void DS117_ReplaceMatch_FromGrepResult()
+    {
+        // ReplaceMatch is the convenience overload that takes a TextMatch directly,
+        // so the caller doesn't pay for re-scanning the anchor.
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var match = s.Grep("faraway").Single();
+
+        var r = s.ReplaceMatch(match, "nearby");
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains("nearby land", FlatBodyText(s));
+    }
+
+    [Fact]
+    public void DS118_ReplaceTextRange_AnchorNotFound()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var results = s.ReplaceTextRange("p:body:deadbeefdeadbeefdeadbeefdeadbeef", "anything", "else");
+        Assert.Single(results);
+        Assert.False(results[0].Success);
+        Assert.Equal(EditErrorCode.AnchorNotFound, results[0].Error!.Code);
+    }
+
+    [Fact]
+    public void DS119_ReplaceTextRange_UndoRestoresPriorState()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var anchor = s.Project().AnchorIndex.Values.First(t => t.Anchor.Kind == "p").Anchor.Id;
+        var before = FlatBodyText(s);
+
+        s.ReplaceTextRange(anchor, "faraway", "distant");
+        Assert.True(s.Undo());
+        Assert.Equal(before, FlatBodyText(s));
+    }
 }

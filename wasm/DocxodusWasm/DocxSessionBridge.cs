@@ -129,6 +129,39 @@ public static partial class DocxSessionBridge
         return SerializeMatches(Get(h).Grep(pattern, regexOpts, scope, contextChars));
     }
 
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.ReplaceTextRange"/>. <paramref name="optionsJson"/>
+    /// accepts <c>{ignoreCase?: boolean, maxReplacements?: number}</c>. Returns a
+    /// JSON array of EditResult — one per attempted match.
+    /// </summary>
+    [JSExport]
+    public static string ReplaceTextRange(int h, string anchor, string find, string replace, string optionsJson)
+    {
+        ReplaceOptions? opts = null;
+        if (!string.IsNullOrEmpty(optionsJson))
+        {
+            using var doc = JsonDocument.Parse(optionsJson);
+            var root = doc.RootElement;
+            opts = new ReplaceOptions
+            {
+                IgnoreCase = TryGetBool(root, "ignoreCase", false),
+                MaxReplacements = root.TryGetProperty("maxReplacements", out var mr) && mr.ValueKind == JsonValueKind.Number
+                    ? mr.GetInt32() : (int?)null,
+            };
+        }
+        var results = Get(h).ReplaceTextRange(anchor, find, replace, opts);
+        return SerializeEditResults(results);
+    }
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.ReplaceTextAtSpan"/> — the span-addressable
+    /// variant that lets JS callers replace a specific Grep match (by its EnclosingAnchor
+    /// id + Span coordinates) instead of every occurrence of its text.
+    /// </summary>
+    [JSExport]
+    public static string ReplaceTextAtSpan(int h, string anchor, int spanStart, int spanLength, string replace) =>
+        Serialize(Get(h).ReplaceTextAtSpan(anchor, spanStart, spanLength, replace));
+
     [JSExport]
     public static bool Undo(int h) => Get(h).Undo();
 
@@ -244,6 +277,19 @@ public static partial class DocxSessionBridge
               .Append('}');
         }
         sb.Append(']');
+    }
+
+    private static string SerializeEditResults(System.Collections.Generic.IReadOnlyList<EditResult> results)
+    {
+        var sb = new StringBuilder(256);
+        sb.Append('[');
+        for (int i = 0; i < results.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append(Serialize(results[i]));
+        }
+        sb.Append(']');
+        return sb.ToString();
     }
 
     private static string SerializeMatches(System.Collections.Generic.IReadOnlyList<TextMatch> matches)
