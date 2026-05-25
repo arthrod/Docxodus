@@ -342,7 +342,7 @@ namespace Docxodus
             mainPart.Declaration.Standalone = Yes;
             mainPart.Declaration.Encoding = Utf8;
             mainPart.Root.ReplaceWith(
-                new XElement(W.document, NamespaceAttributes,
+                new XElement(W.document, FreshNamespaceAttributes(),
                     new XElement(W.body)));
             if (sources.Count > 0)
             {
@@ -990,7 +990,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                     var newXDoc = new XDocument(
                         new XDeclaration(OnePointZero, Utf8, Yes),
                         new XElement(W.glossaryDocument,
-                            NamespaceAttributes,
+                            FreshNamespaceAttributes(),
                             new XElement(W.docParts,
                                 fromXDoc.Descendants(W.docPart))));
                     outputGlossaryDocumentPart.PutXDocument(newXDoc);
@@ -1587,7 +1587,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                                 {
                                     oldNumbering = new XDocument();
                                     oldNumbering.Declaration = new XDeclaration(OnePointZero, Utf8, Yes);
-                                    oldNumbering.Add(new XElement(W.numbering, NamespaceAttributes));
+                                    oldNumbering.Add(new XElement(W.numbering, FreshNamespaceAttributes()));
                                 }
                             }
                             if (newNumbering == null)
@@ -1616,7 +1616,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                                     newNumbering = newDocument.MainDocumentPart.NumberingDefinitionsPart.GetXDocument();
                                     newNumbering.Declaration.Standalone = Yes;
                                     newNumbering.Declaration.Encoding = Utf8;
-                                    newNumbering.Add(new XElement(W.numbering, NamespaceAttributes));
+                                    newNumbering.Add(new XElement(W.numbering, FreshNamespaceAttributes()));
                                 }
                             }
                             string numId = idElement.Attribute(W.val).Value;
@@ -1974,7 +1974,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                         newComments = newDocument.MainDocumentPart.WordprocessingCommentsPart.GetXDocument();
                         newComments.Declaration.Standalone = Yes;
                         newComments.Declaration.Encoding = Utf8;
-                        newComments.Add(new XElement(W.comments, NamespaceAttributes));
+                        newComments.Add(new XElement(W.comments, FreshNamespaceAttributes()));
                     }
                 }
                 int id;
@@ -2651,7 +2651,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                             newNumbering = newDocument.MainDocumentPart.NumberingDefinitionsPart.GetXDocument();
                             newNumbering.Declaration.Standalone = Yes;
                             newNumbering.Declaration.Encoding = Utf8;
-                            newNumbering.Add(new XElement(W.numbering, NamespaceAttributes));
+                            newNumbering.Add(new XElement(W.numbering, FreshNamespaceAttributes()));
                         }
                     }
                     int numId = (int)idElement.Attribute(W.val);
@@ -2813,7 +2813,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                             newNumbering = newDocument.MainDocumentPart.NumberingDefinitionsPart.GetXDocument();
                             newNumbering.Declaration.Standalone = Yes;
                             newNumbering.Declaration.Encoding = Utf8;
-                            newNumbering.Add(new XElement(W.numbering, NamespaceAttributes));
+                            newNumbering.Add(new XElement(W.numbering, FreshNamespaceAttributes()));
                         }
                     }
                     int numId = (int)idElement.Attribute(W.val);
@@ -2975,7 +2975,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                             newNumbering = newDocument.MainDocumentPart.GlossaryDocumentPart.NumberingDefinitionsPart.GetXDocument();
                             newNumbering.Declaration.Standalone = Yes;
                             newNumbering.Declaration.Encoding = Utf8;
-                            newNumbering.Add(new XElement(W.numbering, NamespaceAttributes));
+                            newNumbering.Add(new XElement(W.numbering, FreshNamespaceAttributes()));
                         }
                     }
                     int numId = (int)idElement.Attribute(W.val);
@@ -3632,7 +3632,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                         newFootnotes = newDocument.MainDocumentPart.FootnotesPart.GetXDocument();
                         newFootnotes.Declaration.Standalone = Yes;
                         newFootnotes.Declaration.Encoding = Utf8;
-                        newFootnotes.Add(new XElement(W.footnotes, NamespaceAttributes));
+                        newFootnotes.Add(new XElement(W.footnotes, FreshNamespaceAttributes()));
                     }
                 }
                 string id = (string)footnote.Attribute(W.id);
@@ -3686,7 +3686,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                         newEndnotes = newDocument.MainDocumentPart.EndnotesPart.GetXDocument();
                         newEndnotes.Declaration.Standalone = Yes;
                         newEndnotes.Declaration.Encoding = Utf8;
-                        newEndnotes.Add(new XElement(W.endnotes, NamespaceAttributes));
+                        newEndnotes.Add(new XElement(W.endnotes, FreshNamespaceAttributes()));
                     }
                 }
                 string id = (string)endnote.Attribute(W.id);
@@ -3863,7 +3863,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                         newFootnotes = newDocument.MainDocumentPart.FootnotesPart.GetXDocument();
                         newFootnotes.Declaration.Standalone = Yes;
                         newFootnotes.Declaration.Encoding = Utf8;
-                        newFootnotes.Add(new XElement(W.footnotes, NamespaceAttributes));
+                        newFootnotes.Add(new XElement(W.footnotes, FreshNamespaceAttributes()));
                     }
                 }
                 string id = (string)footnote.Attribute(W.id);
@@ -3924,7 +3924,7 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
                         newEndnotes = newDocument.MainDocumentPart.EndnotesPart.GetXDocument();
                         newEndnotes.Declaration.Standalone = Yes;
                         newEndnotes.Declaration.Encoding = Utf8;
-                        newEndnotes.Add(new XElement(W.endnotes, NamespaceAttributes));
+                        newEndnotes.Add(new XElement(W.endnotes, FreshNamespaceAttributes()));
                     }
                 }
                 string id = (string)endnote.Attribute(W.id);
@@ -3966,25 +3966,34 @@ application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml
             return oldImageData;
         }
 
-        private static XAttribute[] NamespaceAttributes =
+        // Namespace declarations attached to freshly-created Word part roots
+        // (w:document, w:numbering, w:footnotes, w:endnotes, w:comments).
+        // Stored as (XName, string) pairs rather than ready-made XAttribute
+        // instances so each call materializes fresh attributes — XAttribute
+        // can only have one parent, and the prior static-XAttribute[] form
+        // raced under parallel test execution (issue #153).
+        private static readonly (XName Name, string Value)[] NamespaceAttributes =
         {
-            new XAttribute(XNamespace.Xmlns + "wpc", WPC.wpc),
-            new XAttribute(XNamespace.Xmlns + "mc", MC.mc),
-            new XAttribute(XNamespace.Xmlns + "o", O.o),
-            new XAttribute(XNamespace.Xmlns + "r", R.r),
-            new XAttribute(XNamespace.Xmlns + "m", M.m),
-            new XAttribute(XNamespace.Xmlns + "v", VML.vml),
-            new XAttribute(XNamespace.Xmlns + "wp14", WP14.wp14),
-            new XAttribute(XNamespace.Xmlns + "wp", WP.wp),
-            new XAttribute(XNamespace.Xmlns + "w10", W10.w10),
-            new XAttribute(XNamespace.Xmlns + "w", W.w),
-            new XAttribute(XNamespace.Xmlns + "w14", W14.w14),
-            new XAttribute(XNamespace.Xmlns + "wpg", WPG.wpg),
-            new XAttribute(XNamespace.Xmlns + "wpi", WPI.wpi),
-            new XAttribute(XNamespace.Xmlns + "wne", WNE.wne),
-            new XAttribute(XNamespace.Xmlns + "wps", WPS.wps),
-            new XAttribute(MC.Ignorable, "w14 wp14"),
+            (XNamespace.Xmlns + "wpc", WPC.wpc.NamespaceName),
+            (XNamespace.Xmlns + "mc", MC.mc.NamespaceName),
+            (XNamespace.Xmlns + "o", O.o.NamespaceName),
+            (XNamespace.Xmlns + "r", R.r.NamespaceName),
+            (XNamespace.Xmlns + "m", M.m.NamespaceName),
+            (XNamespace.Xmlns + "v", VML.vml.NamespaceName),
+            (XNamespace.Xmlns + "wp14", WP14.wp14.NamespaceName),
+            (XNamespace.Xmlns + "wp", WP.wp.NamespaceName),
+            (XNamespace.Xmlns + "w10", W10.w10.NamespaceName),
+            (XNamespace.Xmlns + "w", W.w.NamespaceName),
+            (XNamespace.Xmlns + "w14", W14.w14.NamespaceName),
+            (XNamespace.Xmlns + "wpg", WPG.wpg.NamespaceName),
+            (XNamespace.Xmlns + "wpi", WPI.wpi.NamespaceName),
+            (XNamespace.Xmlns + "wne", WNE.wne.NamespaceName),
+            (XNamespace.Xmlns + "wps", WPS.wps.NamespaceName),
+            (MC.Ignorable, "w14 wp14"),
         };
+
+        private static IEnumerable<XAttribute> FreshNamespaceAttributes() =>
+            NamespaceAttributes.Select(p => new XAttribute(p.Name, p.Value));
     }
 
     public class DocumentBuilderException : Exception

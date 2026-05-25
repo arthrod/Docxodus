@@ -1497,28 +1497,36 @@ namespace Docxodus
             }
         }
 
-        private static XAttribute[] NamespaceAttributes =
+        // Namespace declarations attached to a freshly-created w:comments root.
+        // Stored as (XName, string) pairs rather than ready-made XAttribute
+        // instances so each call materializes fresh attributes — XAttribute can
+        // only have one parent, and the prior static-XAttribute[] form raced
+        // under parallel test execution (issue #153).
+        private static readonly (XName Name, string Value)[] NamespaceAttributes =
         {
-            new XAttribute(XNamespace.Xmlns + "wpc", WPC.wpc),
-            new XAttribute(XNamespace.Xmlns + "mc", MC.mc),
-            new XAttribute(XNamespace.Xmlns + "o", O.o),
-            new XAttribute(XNamespace.Xmlns + "r", R.r),
-            new XAttribute(XNamespace.Xmlns + "m", M.m),
-            new XAttribute(XNamespace.Xmlns + "v", VML.vml),
-            new XAttribute(XNamespace.Xmlns + "wp14", WP14.wp14),
-            new XAttribute(XNamespace.Xmlns + "wp", WP.wp),
-            new XAttribute(XNamespace.Xmlns + "w10", W10.w10),
-            new XAttribute(XNamespace.Xmlns + "w", W.w),
-            new XAttribute(XNamespace.Xmlns + "w14", W14.w14),
-            new XAttribute(XNamespace.Xmlns + "w15", W15.w15),
-            new XAttribute(XNamespace.Xmlns + "w16se", W16SE.w16se),
-            new XAttribute(XNamespace.Xmlns + "wpg", WPG.wpg),
-            new XAttribute(XNamespace.Xmlns + "wpi", WPI.wpi),
-            new XAttribute(XNamespace.Xmlns + "wne", WNE.wne),
-            new XAttribute(XNamespace.Xmlns + "wps", WPS.wps),
-            new XAttribute(XNamespace.Xmlns + "pt", PtOpenXml.pt),
-            new XAttribute(MC.Ignorable, "w14 wp14 w15 w16se pt"),
+            (XNamespace.Xmlns + "wpc", WPC.wpc.NamespaceName),
+            (XNamespace.Xmlns + "mc", MC.mc.NamespaceName),
+            (XNamespace.Xmlns + "o", O.o.NamespaceName),
+            (XNamespace.Xmlns + "r", R.r.NamespaceName),
+            (XNamespace.Xmlns + "m", M.m.NamespaceName),
+            (XNamespace.Xmlns + "v", VML.vml.NamespaceName),
+            (XNamespace.Xmlns + "wp14", WP14.wp14.NamespaceName),
+            (XNamespace.Xmlns + "wp", WP.wp.NamespaceName),
+            (XNamespace.Xmlns + "w10", W10.w10.NamespaceName),
+            (XNamespace.Xmlns + "w", W.w.NamespaceName),
+            (XNamespace.Xmlns + "w14", W14.w14.NamespaceName),
+            (XNamespace.Xmlns + "w15", W15.w15.NamespaceName),
+            (XNamespace.Xmlns + "w16se", W16SE.w16se.NamespaceName),
+            (XNamespace.Xmlns + "wpg", WPG.wpg.NamespaceName),
+            (XNamespace.Xmlns + "wpi", WPI.wpi.NamespaceName),
+            (XNamespace.Xmlns + "wne", WNE.wne.NamespaceName),
+            (XNamespace.Xmlns + "wps", WPS.wps.NamespaceName),
+            (XNamespace.Xmlns + "pt", PtOpenXml.pt.NamespaceName),
+            (MC.Ignorable, "w14 wp14 w15 w16se pt"),
         };
+
+        private static IEnumerable<XAttribute> FreshNamespaceAttributes() =>
+            NamespaceAttributes.Select(p => new XAttribute(p.Name, p.Value));
 
         public static void AddContentTypeToBlockContent(WmlToXmlSettings settings, OpenXmlPart part, XElement blc, string contentType)
         {
@@ -1548,7 +1556,7 @@ namespace Docxodus
                         newComments = mainPart.WordprocessingCommentsPart.GetXDocument();
                         newComments.Declaration.Standalone = "yes";
                         newComments.Declaration.Encoding = "UTF-8";
-                        newComments.Add(new XElement(W.comments, NamespaceAttributes));
+                        newComments.Add(new XElement(W.comments, FreshNamespaceAttributes()));
                         commentNumber = 1;
                     }
 #if false
@@ -1730,7 +1738,7 @@ namespace Docxodus
                         newComments = mainPart.WordprocessingCommentsPart.GetXDocument();
                         newComments.Declaration.Standalone = "yes";
                         newComments.Declaration.Encoding = "UTF-8";
-                        newComments.Add(new XElement(W.comments, NamespaceAttributes));
+                        newComments.Add(new XElement(W.comments, FreshNamespaceAttributes()));
                         commentNumber = 1;
                     }
                     XElement newElement = new XElement(W.comment,
