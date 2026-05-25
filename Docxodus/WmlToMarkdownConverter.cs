@@ -921,25 +921,12 @@ public static class WmlToMarkdownConverter
 
     /// <summary>
     /// Resolve the numbering prefix for a Heading paragraph that carries <c>w:numPr</c>.
-    /// Returns <c>null</c> when the paragraph has no resolvable number, or when the resolved
-    /// marker is a plain bullet glyph (bullets aren't a meaningful heading prefix).
+    /// Delegates to <see cref="Internal.ListNumberResolver"/> so <see cref="DocxSession.ReplaceText"/>
+    /// can use the same resolver to strip the prefix from agent payloads (otherwise an agent
+    /// that echoes back what it sees in the projection ends up doubling the prefix).
     /// </summary>
-    private static string? ResolveHeadingNumberPrefix(XElement p, EmitContext ctx)
-    {
-        if (p.Element(W.pPr)?.Element(W.numPr) == null) return null;
-        try
-        {
-            var resolved = ListItemRetriever.RetrieveListItem(ctx.Document, p, ctx.ListItemRetrieverSettings);
-            if (string.IsNullOrWhiteSpace(resolved)) return null;
-            var trimmed = resolved.TrimEnd();
-            if (trimmed.Length == 1 && !char.IsLetterOrDigit(trimmed, 0)) return null;
-            return trimmed;
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    private static string? ResolveHeadingNumberPrefix(XElement p, EmitContext ctx) =>
+        Internal.ListNumberResolver.Resolve(p, ctx.Document, ctx.ListItemRetrieverSettings);
 
     private static string ResolveListMarker(XElement p, EmitContext ctx)
     {

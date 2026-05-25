@@ -333,4 +333,193 @@ public class DocxSessionPR131RegressionTests
         Assert.NotNull(projectorTarget);
         Assert.Equal(projectorTarget!.Anchor.Kind, createdAnchor.Kind);
     }
+
+    // ─── Bluth-Co smoke-test regressions ─────────────────────────────────
+
+    /// <summary>Heading2 paragraph with both Heading2 style AND a decimal numPr,
+    /// so the projector shows "## 1. text" with the auto-number as part of the visible heading.</summary>
+    private static byte[] BuildNumberedHeadingFixture()
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.Document = new Document();
+            var body = new Body();
+            main.Document.Body = body;
+
+            main.AddNewPart<StyleDefinitionsPart>().Styles =
+                new Styles(new Style { Type = StyleValues.Paragraph, StyleId = "Heading2", StyleName = new StyleName { Val = "heading 2" } });
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            var numPart = main.AddNewPart<NumberingDefinitionsPart>();
+            numPart.Numbering = new Numbering(
+                new AbstractNum(
+                    new Level(
+                        new NumberingFormat { Val = NumberFormatValues.Decimal },
+                        new LevelText { Val = "%1." },
+                        new StartNumberingValue { Val = 1 })
+                    { LevelIndex = 0 })
+                { AbstractNumberId = 1 },
+                new NumberingInstance(new AbstractNumId { Val = 1 }) { NumberID = 1 });
+
+            var pPr = new ParagraphProperties(
+                new ParagraphStyleId { Val = "Heading2" },
+                new NumberingProperties(
+                    new NumberingLevelReference { Val = 0 },
+                    new NumberingId { Val = 1 }));
+            body.Append(new Paragraph(pPr, new Run(new Text("The name of this corporation."))));
+
+            main.Document.Save();
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void DS091_ReplaceText_StripsResolvedAutoNumberPrefix()
+    {
+        // Repro from the NVCA-COI smoke test: the projector emits a heading as
+        // "## Fourth The total number..." (auto-number + space + run text). An
+        // agent that echoes the visible heading back as its replacement payload
+        // ends up with "Fourth Fourth: ..." in the saved DOCX because Word still
+        // applies the auto-number and the run text now also starts with "Fourth".
+        //
+        // Fix contract: ReplaceText strips a leading prefix from the payload that
+        // matches the paragraph's resolved auto-number (followed by an optional
+        // single separator space/tab/NBSP). Idempotent — if the agent omits the
+        // prefix, no stripping happens.
+        using var s = new DocxSession(BuildNumberedHeadingFixture());
+        var proj = s.Project();
+        var headingTarget = proj.AnchorIndex.Values.Single(t => t.Anchor.Kind == "h");
+
+        // Sanity check: projection shows the auto-number prefix inline.
+        Assert.Matches(@"\{#h:body:[0-9a-f]{32}\} ## 1\. The name of this corporation\.", proj.Markdown);
+
+        // Agent's natural payload: echoes the visible "1. " prefix.
+        var r = s.ReplaceText(headingTarget.Anchor.Id, "1. Replaced heading text.");
+        Assert.True(r.Success, r.Error?.Message);
+
+        // The next projection must show the prefix EXACTLY ONCE.
+        var after = s.Project().Markdown;
+        Assert.Contains("1. Replaced heading text.", after);
+        Assert.DoesNotContain("1. 1. ", after);
+    }
+
+    [Fact]
+    public void DS091b_ReplaceText_AutoNumberStripping_NoOpWhenPayloadHasNoPrefix()
+    {
+        // The fix must be invisible when the agent omits the prefix.
+        using var s = new DocxSession(BuildNumberedHeadingFixture());
+        var headingTarget = s.Project().AnchorIndex.Values.Single(t => t.Anchor.Kind == "h");
+
+        var r = s.ReplaceText(headingTarget.Anchor.Id, "Bare replacement text.");
+        Assert.True(r.Success, r.Error?.Message);
+
+        var after = s.Project().Markdown;
+        Assert.Contains("1. Bare replacement text.", after);
+    }
+
+    [Fact]
+    public void DS092_RawReplaceXml_ReportsModifiedOnUnidPreservingRoundTrip()
+    {
+        // Repro from the NVCA-COI smoke test: the Get→mutate→Replace recipe
+        // documented in docs/architecture/docx_mutation_api.md preserves the
+        // element's Unid. The old impl always put target.Anchor in Removed AND
+        // re-added the (same-Unid) element to Created, so an agent that pattern-
+        // matched on Created/Removed saw a phantom "deleted and recreated"
+        // operation. Fix: classify by unid set intersection — overlap is Modified.
+        using var s = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = s.Project().AnchorIndex.Keys.First();
+
+        var xml = s.Raw.GetXml(anchor);
+        var mutated = xml.Replace("First paragraph.", "EDITED: First paragraph.");
+        var r = s.Raw.ReplaceXml(anchor, mutated);
+
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains(r.Modified, a => a.Id == anchor);
+        Assert.DoesNotContain(r.Removed, a => a.Id == anchor);
+        Assert.DoesNotContain(r.Created, a => a.Id == anchor);
+    }
+
+    [Fact]
+    public void DS092b_RawReplaceXml_FreshXml_StillReportsRemovedAndCreated()
+    {
+        // The complementary case: when the replacement XML has fresh Unids
+        // (because it didn't come from GetXml), the old anchor is gone and the
+        // new element gets a brand-new anchor. Removed/Created — NOT Modified.
+        using var s = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        var freshXml = "<w:p xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:r><w:t>Fresh.</w:t></w:r></w:p>";
+
+        var r = s.Raw.ReplaceXml(anchor, freshXml);
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains(r.Removed, a => a.Id == anchor);
+        Assert.Empty(r.Modified);
+        Assert.NotEmpty(r.Created);
+        Assert.DoesNotContain(r.Created, a => a.Id == anchor); // new Unid, not the old one
+    }
+
+    /// <summary>
+    /// Unzips a DOCX in-memory and concatenates every text part's XML into one string,
+    /// so substring assertions over attribute presence work without a compressed-bytes
+    /// false-negative.
+    /// </summary>
+    private static string ReadAllPartXml(byte[] docxBytes)
+    {
+        using var stream = new MemoryStream(docxBytes);
+        using var zip = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Read);
+        var sb = new System.Text.StringBuilder();
+        foreach (var entry in zip.Entries)
+        {
+            if (!entry.FullName.EndsWith(".xml", System.StringComparison.OrdinalIgnoreCase)) continue;
+            using var es = entry.Open();
+            using var reader = new StreamReader(es);
+            sb.Append(reader.ReadToEnd());
+        }
+        return sb.ToString();
+    }
+
+    [Fact]
+    public void DS093_Save_StripsInternalUnidsByDefault()
+    {
+        // Repro from the NVCA-COI smoke test: a 148 KB input round-tripped
+        // through DocxSession came back as 588 KB (4×). The bloat was 14,000+
+        // PtOpenXml:Unid attributes (~50 bytes each) persisted into the saved
+        // DOCX. Per the comment in RawDocxOps.cs, this attribute is "internal-
+        // only ... not in the OOXML schema" — so Save() now strips it from all
+        // parts by default. Opt back in with DocxSessionSettings.PersistAnchorIds.
+        using var s = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        s.Project(); // assigns Unids
+        var saved = s.Save();
+
+        var allXml = ReadAllPartXml(saved);
+        Assert.DoesNotContain("PtOpenXml:Unid", allXml);
+        // The string `:Unid="` is how the attribute serializes (with the
+        // namespace prefix). Tight enough to skip identifier text like "Unique".
+        Assert.DoesNotContain(":Unid=\"", allXml);
+
+        // Session must still operate correctly after Save (in-memory Unids restored).
+        var proj = s.Project();
+        Assert.Contains("First paragraph.", proj.Markdown);
+        Assert.True(proj.AnchorIndex.Count >= 2);
+
+        // Re-loading the stripped bytes must produce a working session
+        // (with fresh Unids — anchor ids change across save/reload by default).
+        using var s2 = new DocxSession(saved);
+        Assert.Contains("First paragraph.", s2.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS094_Save_PersistAnchorIds_OptInKeepsUnids()
+    {
+        // The escape hatch for callers that need anchor ids to survive
+        // save/reload (matches the spec's open-question scenario).
+        var settings = new DocxSessionSettings { PersistAnchorIds = true };
+        using var s = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs(), settings);
+        s.Project();
+        var saved = s.Save();
+
+        var allXml = ReadAllPartXml(saved);
+        Assert.Contains(":Unid=\"", allXml);
+    }
 }

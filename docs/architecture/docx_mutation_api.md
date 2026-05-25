@@ -99,7 +99,7 @@ Each mutation reports which anchors it created, removed, or modified. This table
 | `RemoveListMembership(p)` | — | — | `p` (kind flips `li`→`p`) | enclosing list |
 | `ReplaceCellContent(tc, md)` | — | descendant inline anchors (rare) | `tc` | `tc` |
 | `Raw.InsertXml(a, pos, xml)` | every block in the new XML | — | — | enclosing parent |
-| `Raw.ReplaceXml(a, xml)` | every block in the new XML | `a` + descendants | — | enclosing parent |
+| `Raw.ReplaceXml(a, xml)` | unids present in the new XML but not the old (typical for caller-authored XML) | unids present in the old element but not the new (when `a` itself is gone) | unids present in both (typical for the `GetXml → mutate → ReplaceXml` round trip, which preserves Unids) | enclosing parent |
 | `Undo()` / `Redo()` | (diff vs current) | (diff vs current) | (diff vs current) | `null` — caller re-projects |
 
 Two conventions worth pinning down because they affect agent reasoning:
@@ -108,6 +108,8 @@ Two conventions worth pinning down because they affect agent reasoning:
 - **`MergeParagraphs` lets the first anchor absorb the second.** Symmetric reason: the first anchor is to the left in reading order and is more likely to be the one a caller has cached.
 
 **Tracked-change mode shifts the semantics for `ReplaceText` and `DeleteBlock`.** When `Settings.TrackedChanges = RenderInline`, deletions don't remove elements — they wrap old runs in `w:del` and new content in `w:ins`. So the affected anchor stays live and appears in `Modified` instead of `Removed`. The agent's view of the world doesn't have to change; the `EditResult` shape is unchanged.
+
+**`ReplaceText` quietly strips a leading auto-number prefix from the payload.** When the target paragraph carries `w:numPr` (numbered heading or list item), the projector emits the resolved number inline (`## Fourth The total number…`) so a human can read what Word renders. An agent that echoes the visible heading back as its `ReplaceText` payload would otherwise see `Fourth Fourth: …` in the saved DOCX — the auto-number is still applied by Word, *and* the new run text now also starts with the prefix. The session resolves the number via the shared `Internal.ListNumberResolver` and strips a matching prefix (plus one optional separator: space, tab, or NBSP) from the payload before parsing. Idempotent — if the agent skipped the prefix, nothing is stripped. Documented in `DS091`/`DS091b`.
 
 ## When to use what
 
@@ -342,6 +344,7 @@ These are aspirations. Microbenchmarks aren't in CI by default — flag in PR if
 - **Snapshot granularity is per-part XML clone.** For documents with very large embedded images or huge tables, per-element diffs would be more memory-efficient. Deferred until measured to be a problem.
 - **No `ListStyles()` query API in v1.** Agents must guess `styleId` values for `SetParagraphStyle` from what they see in the projection. `Heading1`–`Heading6`, `Quote`, and `Code` are reliable defaults across most documents.
 - **Closing a session mid-flight from JS.** The WASM bridge holds sessions in a static dictionary keyed by handle; if a JS caller drops a `DocxSession` without calling `close()`, the .NET-side session is not eligible for GC. The npm wrapper exposes `Symbol.dispose` for TypeScript 5.2+ `using` blocks; older runtimes need explicit `.close()`.
+- **`Save()` strips internal `PtOpenXml:Unid` attributes by default.** The projector assigns a Unid to every descendant of every projected scope; persisting them grows large documents by hundreds of KB of attribute noise (a 148 KB NVCA Model COI round-tripped at 588 KB before this default flipped). Anchor ids therefore do **not** survive `Save` → re-open by default — a fresh session re-assigns Unids and gets new ids. Set `DocxSessionSettings.PersistAnchorIds = true` to keep the ids (which keeps the bloat). This resolves Open Question #1 in `markdown_projection.md` in favor of "clean OOXML out by default, opt in to anchor stability."
 
 ## Related
 

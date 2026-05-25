@@ -747,6 +747,13 @@ export interface DocxSessionSettings {
   validateRawOps?: boolean;
   trackedChanges?: "accept" | "render_inline" | "strip_deletions";
   revisionAuthor?: string;
+  /**
+   * When false (default), `save()` strips the projector's internal `PtOpenXml:Unid`
+   * attributes before serializing — they aren't OOXML schema, and persisting them
+   * bloats large documents significantly (~700 KB on a 100-page DOCX). Set to true
+   * only when anchor ids must survive a save/reopen round trip.
+   */
+  persistAnchorIds?: boolean;
 }
 
 export interface DocxSessionProjection {

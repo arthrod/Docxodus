@@ -138,12 +138,14 @@ public static partial class DocxSessionBridge
             _ => TrackedChangeMode.Accept,
         };
         var revisionAuthor = TryGetString(root, "revisionAuthor", null);
+        bool persistAnchorIds = TryGetBool(root, "persistAnchorIds", false);
         return new DocxSessionSettings
         {
             UndoDepth = undoDepth,
             ValidateRawOps = validateRawOps,
             TrackedChanges = tracked,
             RevisionAuthor = revisionAuthor,
+            PersistAnchorIds = persistAnchorIds,
         };
     }
 

@@ -87,6 +87,16 @@ public sealed class DocxSessionSettings
     public TrackedChangeMode TrackedChanges { get; init; } = TrackedChangeMode.Accept;
     public string? RevisionAuthor { get; init; }
     public WmlToMarkdownConverterSettings ProjectionSettings { get; init; } = new();
+
+    /// <summary>
+    /// When <c>false</c> (default) <see cref="DocxSession.Save"/> strips
+    /// <c>PtOpenXml:Unid</c> attributes from every part — the attribute is internal
+    /// to the projector and not in the OOXML schema, so persisting it bloats saved
+    /// DOCX files (a 100-page document grows by ~700 KB of attribute noise). Set to
+    /// <c>true</c> when anchor ids must survive a save/reopen round trip — the
+    /// scenario flagged by Open Question #1 in <c>docs/architecture/markdown_projection.md</c>.
+    /// </summary>
+    public bool PersistAnchorIds { get; init; } = false;
 }
 
 // ─── Session ───────────────────────────────────────────────────────────────
@@ -165,10 +175,61 @@ public sealed class DocxSession : IDisposable
     public byte[] Save()
     {
         ThrowIfDisposed();
-        _doc!.Save();
-        _stream!.Flush();
-        _stream.Position = 0;
-        return _stream.ToArray();
+
+        if (_settings.PersistAnchorIds)
+        {
+            _doc!.Save();
+            _stream!.Flush();
+            _stream.Position = 0;
+            return _stream.ToArray();
+        }
+
+        // Strip the internal PtOpenXml:Unid attributes before serializing — they're
+        // projector bookkeeping, not OOXML schema, and on a real document the bloat
+        // is significant (each Unid is ~50 bytes and the projector assigns one to
+        // every descendant of every projected scope). We snapshot first so the
+        // session's in-memory state can keep using Unids after the save completes;
+        // Project() / Resolve() rely on them.
+        var snapshot = TakeSnapshot();
+        try
+        {
+            foreach (var part in EnumerateProjectedParts())
+            {
+                var xdoc = part.GetXDocument();
+                if (xdoc.Root is null) continue;
+                bool any = false;
+                foreach (var el in xdoc.Root.DescendantsAndSelf())
+                {
+                    var attr = el.Attribute(PtOpenXml.Unid);
+                    if (attr is not null) { attr.Remove(); any = true; }
+                }
+                if (any) part.PutXDocument();
+            }
+            _doc!.Save();
+            _stream!.Flush();
+            _stream.Position = 0;
+            return _stream.ToArray();
+        }
+        finally
+        {
+            RestoreSnapshot(snapshot);
+        }
+    }
+
+    /// <summary>
+    /// Enumerates every OOXML part the projector walks. Kept centralized so
+    /// <see cref="Save"/> (Unid stripping) and any future part-level pass don't drift.
+    /// </summary>
+    private IEnumerable<OpenXmlPart> EnumerateProjectedParts()
+    {
+        var main = _doc!.MainDocumentPart;
+        if (main is null) yield break;
+        yield return main;
+        foreach (var h in main.HeaderParts) yield return h;
+        foreach (var f in main.FooterParts) yield return f;
+        if (main.FootnotesPart is not null) yield return main.FootnotesPart;
+        if (main.EndnotesPart is not null) yield return main.EndnotesPart;
+        if (main.WordprocessingCommentsPart is not null) yield return main.WordprocessingCommentsPart;
     }
 
     // ─── Tier A: text CRUD ────────────────────────────────────────────────
@@ -183,13 +244,21 @@ public sealed class DocxSession : IDisposable
             return EditResult.Fail(EditErrorCode.AnchorWrongKind,
                 $"ReplaceText requires a paragraph/heading/list-item anchor; got kind={target.Anchor.Kind}", anchorId);
 
-        var parsed = Internal.MarkdownPayloadParser.Parse(markdownPayload);
-        if (!parsed.Success)
-            return EditResult.Fail(parsed.Error!.Code, parsed.Error.Message, anchorId);
-
         var element = target.Resolve(_doc!);
         if (element is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, "element resolved null", anchorId);
+
+        // Strip a leading auto-number prefix from the payload before parsing. The
+        // projector emits "## Fourth The total number…" — auto-number from numPr
+        // plus a space separator plus the run text — so an agent that echoes the
+        // visible heading back as its replacement payload otherwise gets the
+        // prefix applied twice (Word renders the auto-number AND the run text now
+        // begins with "Fourth"). See DS091.
+        markdownPayload = StripResolvedAutoNumberPrefix(element, markdownPayload);
+
+        var parsed = Internal.MarkdownPayloadParser.Parse(markdownPayload);
+        if (!parsed.Success)
+            return EditResult.Fail(parsed.Error!.Code, parsed.Error.Message, anchorId);
 
         _history.RecordPreOp(TakeSnapshot());
         try
@@ -575,9 +644,30 @@ public sealed class DocxSession : IDisposable
 
             InvalidateProjectionCache();
             var freshIndex = Project().AnchorIndex;
+            var newUnids = CollectUnids(parsedXml).ToHashSet();
+
+            // Classify by Unid set membership: the documented Get→mutate→Replace
+            // recipe preserves Unids, so the target anchor must surface as
+            // Modified (not as a phantom Removed-then-Created pair). When the
+            // replacement XML has fresh Unids — because the caller authored it
+            // from scratch — the target is genuinely Removed and the new
+            // element(s) are Created. See DS092 / DS092b.
+            var modified = new List<Anchor>();
+            var removed = new List<Anchor>();
             var created = new List<Anchor>();
-            foreach (var unid in CollectUnids(parsedXml))
+
+            if (newUnids.Contains(target.Unid))
             {
+                var hit = freshIndex.Values.FirstOrDefault(t => t.Unid == target.Unid);
+                if (hit is not null) modified.Add(hit.Anchor);
+            }
+            else
+            {
+                removed.Add(target.Anchor);
+            }
+            foreach (var unid in newUnids)
+            {
+                if (unid == target.Unid) continue;
                 var hit = freshIndex.Values.FirstOrDefault(t => t.Unid == unid);
                 if (hit is not null) created.Add(hit.Anchor);
             }
@@ -585,8 +675,9 @@ public sealed class DocxSession : IDisposable
             return new EditResult
             {
                 Success = true,
-                Removed = new[] { target.Anchor },
+                Removed = removed,
                 Created = created,
+                Modified = modified,
                 Patch = ProjectScope(target),
             };
         }
@@ -957,6 +1048,28 @@ public sealed class DocxSession : IDisposable
             else pre.Add(c); // interleaved → wrap from the start (best-effort)
         }
         return (pre, post);
+    }
+
+    /// <summary>
+    /// If <paramref name="paragraph"/> carries a resolvable <c>w:numPr</c> auto-number
+    /// (e.g. <c>"1."</c>, <c>"Fourth"</c>), strip a matching leading prefix from
+    /// <paramref name="payload"/> plus one optional separator character (ASCII space,
+    /// tab, or NBSP — matching the projector's emission and the common variants an
+    /// agent might use). Idempotent when the prefix isn't present.
+    /// </summary>
+    private string StripResolvedAutoNumberPrefix(XElement paragraph, string payload)
+    {
+        if (string.IsNullOrEmpty(payload)) return payload;
+        // ListItemRetrieverSettings is internal to the projector; pass null so the
+        // resolver uses defaults that match what the projector itself emits.
+        var prefix = Internal.ListNumberResolver.Resolve(paragraph, _doc!);
+        if (string.IsNullOrEmpty(prefix)) return payload;
+        if (!payload.StartsWith(prefix, StringComparison.Ordinal)) return payload;
+
+        var after = payload.Substring(prefix.Length);
+        if (after.Length > 0 && (after[0] == ' ' || after[0] == '\t' || after[0] == ' '))
+            after = after.Substring(1);
+        return after;
     }
 
     private static void ApplyReplaceTextAccept(XElement paragraph, IReadOnlyList<Internal.ParsedBlock> blocks)
