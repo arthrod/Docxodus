@@ -1223,6 +1223,7 @@ public class MarkdownProjectionSettingsDto
     public int TableInlineCellMax { get; set; } = 80;
     public int TrackedChanges { get; set; } // TrackedChangeMode.Accept = 0
     public bool ResolveNumbering { get; set; } = true;
+    public int EmptyParagraphs { get; set; } // EmptyParagraphMode.AnchorOnly = 0
 }
 
 /// <summary>
