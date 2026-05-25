@@ -204,6 +204,28 @@ public class DocxSessionTests
         return ms.ToArray();
     }
 
+    /// <summary>
+    /// Five-paragraph document covering the placeholder shapes that <see cref="DocxSession.FindPlaceholders"/>
+    /// recognizes — used by the template-fill convenience tests (Issue #163, units A/B/C).
+    /// Includes a leading-prefix case (<c>$[___]</c>) so tests can verify that
+    /// <see cref="DocxSession.ReplaceInner"/> preserves text outside the brackets.
+    /// </summary>
+    internal static byte[] BuildDocWithBracketPlaceholders()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Document(new Body(
+                new Paragraph(new Run(new Text("The name of this corporation is [_____]."))),
+                new Paragraph(new Run(new Text("The price per share is $[___]."))),
+                new Paragraph(new Run(new Text("Located at [____________]."))),
+                new Paragraph(new Run(new Text("[Notwithstanding the foregoing, additional terms may apply.]"))),
+                new Paragraph(new Run(new Text("[outer [inner] clause]")))));
+        }
+        return ms.ToArray();
+    }
+
     // ─── Phase 1: Skeleton tests ─────────────────────────────────────────
 
     [Fact]
@@ -311,6 +333,49 @@ public class DocxSessionTests
             Assert.NotNull(info);
             Assert.Equal(t.TextPreview, info!.TextPreview);
         }
+    }
+
+    [Fact]
+    public void DS230_ReplaceInner_StripsBracketsKeepsPrefix()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+
+        // The "$[___]" placeholder includes the leading "$" in the match (regex \$?\[…\]).
+        // ReplaceInner must keep the "$" prefix and substitute only the bracketed portion.
+        var dollarMatch = session.FindPlaceholders(PlaceholderKinds.BlankFill)
+            .Single(p => p.Match.Text.StartsWith("$["));
+
+        var r = session.ReplaceInner(dollarMatch.Match, "0.20");
+        Assert.True(r.Success);
+
+        // After replacement, the paragraph should read "The price per share is $0.20."
+        var anchorId = dollarMatch.Match.EnclosingAnchor.Anchor.Id;
+        var info = session.GetAnchorInfo(anchorId);
+        Assert.NotNull(info);
+        Assert.Equal("The price per share is $0.20.", info!.TextPreview);
+    }
+
+    [Fact]
+    public void DS231_ReplaceInner_NoBracketsReturnsError()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+
+        // Pick any match, then hand-craft a TextMatch whose Text has no brackets.
+        var p = session.FindPlaceholders(PlaceholderKinds.BlankFill).First();
+        var bogus = new TextMatch
+        {
+            Text = "no brackets here",
+            EnclosingAnchor = p.Match.EnclosingAnchor,
+            Span = p.Match.Span,
+            Fragments = p.Match.Fragments,
+            ContextBefore = "",
+            ContextAfter = "",
+            Groups = Array.Empty<string>(),
+        };
+
+        var r = session.ReplaceInner(bogus, "anything");
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.MalformedMarkdown, r.Error?.Code);
     }
 
     // ─── Phase 3: text CRUD + undo/redo ──────────────────────────────────

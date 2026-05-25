@@ -990,6 +990,32 @@ public sealed class DocxSession : IDisposable
     }
 
     /// <summary>
+    /// Replace the bracketed portion of a <see cref="TextMatch"/> with <paramref name="newInner"/>,
+    /// preserving any prefix or suffix outside the brackets. Designed for
+    /// <see cref="FindPlaceholders"/> matches like <c>$[___]</c> where the regex
+    /// <c>\$?\[…\]</c> captures the leading <c>$</c>: <c>ReplaceInner(match, "0.20")</c>
+    /// yields <c>$0.20</c> (not <c>0.20</c>). For matches without any prefix/suffix,
+    /// this is equivalent to <see cref="ReplaceMatch"/> with the new inner value.
+    /// Returns <see cref="EditErrorCode.MalformedMarkdown"/> if the match text does
+    /// not contain balanced brackets.
+    /// </summary>
+    public EditResult ReplaceInner(TextMatch match, string newInner)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (match is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "match is null");
+
+        int lb = match.Text.IndexOf('[');
+        int rb = match.Text.LastIndexOf(']');
+        if (lb < 0 || rb <= lb)
+            return EditResult.Fail(EditErrorCode.MalformedMarkdown,
+                $"match text has no balanced brackets: '{match.Text}'");
+
+        var prefix = match.Text[..lb];
+        var suffix = match.Text[(rb + 1)..];
+        return ReplaceMatch(match, prefix + newInner + suffix);
+    }
+
+    /// <summary>
     /// Surgical replacement of an exact byte range within one block's flat text.
     /// The natural pair to <see cref="Grep"/>: pass the <see cref="TextMatch.EnclosingAnchor"/>'s
     /// id plus the <see cref="TextMatch.Span"/> coordinates to replace one specific match
