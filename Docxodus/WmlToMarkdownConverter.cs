@@ -325,8 +325,28 @@ public static class WmlToMarkdownConverter
             // can resolve relationship-bound URIs without threading the part through every call.
             if (scope.Root.Annotation<OpenXmlPart>() == null)
                 scope.Root.AddAnnotation(scope.Part);
+
+            // Word-reserved footnote/endnote separators (type="separator" / type="continuationSeparator")
+            // are structural plumbing that cannot be deleted and should not appear in the agent-facing
+            // AnchorIndex. Pre-collect them and their descendants so the walker skips both the notes
+            // themselves and any paragraphs/runs they contain.
+            var skip = new HashSet<XElement>();
+            if (scope.Name is "fn" or "en")
+            {
+                var noteName = scope.Name == "fn" ? W.footnote : W.endnote;
+                foreach (var n in scope.Root.Elements(noteName))
+                {
+                    if (IsBoilerplateNote(n))
+                    {
+                        skip.Add(n);
+                        foreach (var d in n.Descendants()) skip.Add(d);
+                    }
+                }
+            }
+
             foreach (var el in scope.Root.DescendantsAndSelf())
             {
+                if (skip.Contains(el)) continue;
                 var kind = KindFor(el);
                 if (kind == null) continue;
                 var unid = (string?)el.Attribute(PtOpenXml.Unid);

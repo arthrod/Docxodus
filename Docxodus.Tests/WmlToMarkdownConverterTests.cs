@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
@@ -999,5 +1000,48 @@ public class WmlToMarkdownConverterTests
         // (BuildDS001 paragraphs start with "First paragraph" and "Second paragraph").
         Assert.Contains(bodyParas, t => t.TextPreview.StartsWith("First paragraph"));
         Assert.Contains(bodyParas, t => t.TextPreview.StartsWith("Second paragraph"));
+    }
+
+    [Fact]
+    public void MD006_BoilerplateFootnotesNotInAnchorIndex()
+    {
+        // Every DOCX with a FootnotesPart includes two Word-reserved boilerplate
+        // footnotes (type="separator" and type="continuationSeparator") used to
+        // render the horizontal separator lines above footnote text. They are
+        // structural plumbing — not editorial content — and must not appear in
+        // the agent-facing AnchorIndex.
+        var bytes = DocxSessionTests.BuildDocWithFootnotes();
+        var wml = new WmlDocument("test.docx", bytes);
+
+        var projection = WmlToMarkdownConverter.Convert(wml, new WmlToMarkdownConverterSettings());
+
+        // Resolve every fn-kind anchor in the fn scope back to its XElement
+        // and assert none is a separator/continuationSeparator.
+        using var sm = new OpenXmlMemoryStreamDocument(wml);
+        using var doc = sm.GetWordprocessingDocument();
+        foreach (var t in projection.AnchorIndex.Values
+                     .Where(t => t.Anchor.Scope == "fn" && t.Anchor.Kind == "fn"))
+        {
+            var el = t.Resolve(doc);
+            Assert.NotNull(el);
+            var type = (string?)el.Attribute(W.type);
+            Assert.False(type is "separator" or "continuationSeparator",
+                $"Boilerplate fn (type={type}) leaked into AnchorIndex: {t.Anchor.Id}");
+        }
+
+        // And descendant paragraphs of boilerplate notes shouldn't appear either —
+        // their scope is "fn" but their kind is "p"/"h"/"li". An empty set is also
+        // valid (a doc with no real footnotes), so we just verify no leakage.
+        foreach (var t in projection.AnchorIndex.Values
+                     .Where(t => t.Anchor.Scope == "fn" && t.Anchor.Kind is "p" or "h" or "li"))
+        {
+            var el = t.Resolve(doc);
+            Assert.NotNull(el);
+            var ancestorFn = el.Ancestors(W.footnote).FirstOrDefault();
+            Assert.NotNull(ancestorFn);
+            var type = (string?)ancestorFn.Attribute(W.type);
+            Assert.False(type is "separator" or "continuationSeparator",
+                $"Descendant of boilerplate fn leaked into AnchorIndex: {t.Anchor.Id}");
+        }
     }
 }
