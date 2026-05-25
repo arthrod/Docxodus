@@ -306,10 +306,17 @@ public sealed class DocxSession : IDisposable
             foreach (var block in parsed.Blocks)
             {
                 var p = BuildParagraphFromParsedBlock(block);
+                // List items: try to inherit numbering from a sibling list item so the
+                // payload actually projects as a bullet/numbered item. If no sibling
+                // has numbering, the paragraph stays bare and the projector classifies
+                // it as a plain "p" — which is what we report below.
+                if (block.Kind is Internal.ParserBlockKind.BulletItem
+                                or Internal.ParserBlockKind.OrderedItem)
+                    TryInheritNumPrFromSibling(p, element);
                 UnidHelper.AssignToSelfAndDescendants(p);
                 newElements.Add(p);
                 var unid = (string)p.Attribute(PtOpenXml.Unid)!;
-                var kind = ParserBlockKindToAnchorKind(block.Kind);
+                var kind = ClassifyParagraphKind(p);
                 created.Add(new Anchor($"{kind}:{target.Anchor.Scope}:{unid}", kind, target.Anchor.Scope, unid));
             }
 
@@ -365,21 +372,12 @@ public sealed class DocxSession : IDisposable
             var second = new XElement(W.p);
             if (pPr is not null) second.Add(new XElement(pPr));
 
-            // Split the run at the boundary, then move all runs at-or-past offset to `second`.
+            // Split any run that straddles the offset (descends into hyperlinks/sdts),
+            // then split any container (hyperlink) that still straddles, then move all
+            // inline children + markers at-or-past the offset to `second`.
             SplitRunsAtOffset(element, characterOffset);
-            int consumed = 0;
-            var runsToMove = new List<XElement>();
-            foreach (var run in element.Elements(W.r).ToList())
-            {
-                var runText = RunText(run);
-                if (consumed >= characterOffset) runsToMove.Add(run);
-                consumed += runText.Length;
-            }
-            foreach (var run in runsToMove)
-            {
-                run.Remove();
-                second.Add(run);
-            }
+            SplitInlineContainersAtOffset(element, characterOffset);
+            MoveInlineChildrenAfter(element, characterOffset, second);
 
             UnidHelper.AssignToSelfAndDescendants(second);
             element.AddAfterSelf(second);
@@ -428,10 +426,28 @@ public sealed class DocxSession : IDisposable
         _history.RecordPreOp(TakeSnapshot());
         try
         {
-            foreach (var run in secondEl.Elements(W.r).ToList())
+            // Insert a single-space separator if both sides end/start with non-whitespace.
+            // Sentences from two paragraphs should not jam into one another.
+            var firstTail = ParagraphText(firstEl);
+            var secondHead = ParagraphText(secondEl);
+            if (firstTail.Length > 0 && secondHead.Length > 0
+                && !char.IsWhiteSpace(firstTail[^1])
+                && !char.IsWhiteSpace(secondHead[0]))
             {
-                run.Remove();
-                firstEl.Add(run);
+                firstEl.Add(new XElement(W.r,
+                    new XElement(W.t,
+                        new XAttribute(XNamespace.Xml + "space", "preserve"), " ")));
+            }
+
+            // Move every paragraph-level child from secondEl into firstEl in document
+            // order — runs, hyperlinks, sdts, fldSimples, bookmarkStart/End, comment
+            // range markers, etc. The old implementation only moved direct <w:r>
+            // children which silently discarded everything else.
+            foreach (var child in secondEl.Elements().ToList())
+            {
+                if (child.Name == W.pPr) continue; // second's pPr is dropped; first's wins
+                child.Remove();
+                firstEl.Add(child);
             }
             secondEl.Remove();
             InvalidateProjectionCache();
@@ -708,7 +724,7 @@ public sealed class DocxSession : IDisposable
             SplitRunsAtOffset(element, actualSpan.Start + actualSpan.Length);
 
             int consumed = 0;
-            foreach (var run in element.Elements(W.r))
+            foreach (var run in InlineRuns(element).ToList())
             {
                 var runText = RunText(run);
                 int runStart = consumed;
@@ -914,14 +930,46 @@ public sealed class DocxSession : IDisposable
         return new MarkdownPatch(target.Anchor.Id, fresh.Markdown);
     }
 
+    // Zero-width, semantically-significant inline markers that must survive ReplaceText.
+    // Discarding them silently destroys bookmark/comment/permission ranges that point
+    // into the paragraph from other parts of the document.
+    private static readonly HashSet<XName> PreservedMarkerNames = new()
+    {
+        W.bookmarkStart, W.bookmarkEnd,
+        W.commentRangeStart, W.commentRangeEnd, W.commentReference,
+        W.permStart, W.permEnd,
+        W.proofErr,
+    };
+
+    private static (List<XElement> pre, List<XElement> post) ExtractWrappingMarkers(XElement paragraph)
+    {
+        var children = paragraph.Elements().Where(e => e.Name != W.pPr).ToList();
+        int firstRunIdx = children.FindIndex(IsInlineChild);
+        int lastRunIdx = children.FindLastIndex(IsInlineChild);
+        var pre = new List<XElement>();
+        var post = new List<XElement>();
+        for (int i = 0; i < children.Count; i++)
+        {
+            var c = children[i];
+            if (!PreservedMarkerNames.Contains(c.Name)) continue;
+            if (firstRunIdx < 0 || i < firstRunIdx) pre.Add(c);
+            else if (i > lastRunIdx) post.Add(c);
+            else pre.Add(c); // interleaved → wrap from the start (best-effort)
+        }
+        return (pre, post);
+    }
+
     private static void ApplyReplaceTextAccept(XElement paragraph, IReadOnlyList<Internal.ParsedBlock> blocks)
     {
         var pPr = paragraph.Element(W.pPr);
+        var (preMarkers, postMarkers) = ExtractWrappingMarkers(paragraph);
         paragraph.RemoveNodes();
         if (pPr is not null) paragraph.Add(pPr);
+        foreach (var m in preMarkers) paragraph.Add(m);
         if (blocks.Count > 0)
             foreach (var run in blocks[0].RunElements)
                 paragraph.Add(new XElement(run));
+        foreach (var m in postMarkers) paragraph.Add(m);
     }
 
     private void ApplyReplaceTextTracked(XElement paragraph, IReadOnlyList<Internal.ParsedBlock> blocks)
@@ -987,13 +1035,27 @@ public sealed class DocxSession : IDisposable
     private void PromoteHyperlinkRelationships(XElement paragraph)
     {
         var main = _doc!.MainDocumentPart!;
+        // Reuse an existing relationship when the same URL has already been registered.
+        // Without dedup, every ReplaceText with a link adds a fresh rId; an agent loop
+        // that edits the same paragraph N times grows the .rels file unboundedly.
+        var existing = main.HyperlinkRelationships
+            .GroupBy(rl => rl.Uri.ToString())
+            .ToDictionary(g => g.Key, g => g.First().Id);
         foreach (var link in paragraph.Descendants(W.hyperlink).ToList())
         {
             var hrefAttr = link.Attribute(Internal.MarkdownPayloadParser.HrefAttr);
             if (hrefAttr is null) continue;
-            var rel = main.AddHyperlinkRelationship(
-                new Uri(hrefAttr.Value, UriKind.RelativeOrAbsolute), true);
-            link.SetAttributeValue(R.id, rel.Id);
+            var url = hrefAttr.Value;
+            string relId;
+            if (existing.TryGetValue(url, out var foundId)) relId = foundId;
+            else
+            {
+                var rel = main.AddHyperlinkRelationship(
+                    new Uri(url, UriKind.RelativeOrAbsolute), true);
+                relId = rel.Id;
+                existing[url] = relId;
+            }
+            link.SetAttributeValue(R.id, relId);
             hrefAttr.Remove();
         }
     }
@@ -1092,20 +1154,106 @@ public sealed class DocxSession : IDisposable
         _ => "p",
     };
 
+    /// <summary>
+    /// Mirror the classifier used by <see cref="WmlToMarkdownConverter"/> so the kind
+    /// reported in <see cref="EditResult.Created"/> matches what the projector will
+    /// emit on the next <see cref="DocxSession.Project"/>. If we used the parser's
+    /// kind blindly, a bullet-payload paragraph without a <c>w:numPr</c> would be
+    /// reported as "li" but appear as "p" in the projection — a stale anchor id.
+    /// </summary>
+    internal static string ClassifyParagraphKind(XElement paragraph)
+    {
+        var pPr = paragraph.Element(W.pPr);
+        var styleId = (string?)pPr?.Element(W.pStyle)?.Attribute(W.val);
+        if (!string.IsNullOrEmpty(styleId)
+            && (styleId.StartsWith("Heading", StringComparison.OrdinalIgnoreCase)
+                || styleId.Equals("Title", StringComparison.OrdinalIgnoreCase)
+                || styleId.Equals("Subtitle", StringComparison.OrdinalIgnoreCase)))
+            return "h";
+        if (pPr?.Element(W.numPr) is not null) return "li";
+        return "p";
+    }
+
+    /// <summary>
+    /// Copy <c>w:numPr</c> from a nearby sibling list item into the new paragraph so
+    /// a bullet/ordered-item payload actually renders as part of an existing list.
+    /// Walks previous siblings first (closest match first), then next siblings.
+    /// No-op when no sibling carries numbering — caller then reports kind="p" via
+    /// <see cref="ClassifyParagraphKind"/>.
+    /// </summary>
+    private static void TryInheritNumPrFromSibling(XElement newParagraph, XElement anchorElement)
+    {
+        XElement? donorNumPr = null;
+        XElement? donorPStyle = null;
+        foreach (var sib in anchorElement.ElementsBeforeSelf().Reverse()
+                                .Concat(new[] { anchorElement })
+                                .Concat(anchorElement.ElementsAfterSelf()))
+        {
+            if (sib.Name != W.p) continue;
+            var nump = sib.Element(W.pPr)?.Element(W.numPr);
+            if (nump is null) continue;
+            donorNumPr = nump;
+            donorPStyle = sib.Element(W.pPr)?.Element(W.pStyle);
+            break;
+        }
+        if (donorNumPr is null) return;
+
+        var pPr = newParagraph.Element(W.pPr);
+        if (pPr is null) { pPr = new XElement(W.pPr); newParagraph.AddFirst(pPr); }
+        if (pPr.Element(W.numPr) is null) pPr.Add(new XElement(donorNumPr));
+        if (donorPStyle is not null && pPr.Element(W.pStyle) is null)
+            pPr.AddFirst(new XElement(donorPStyle));
+    }
+
+    // Top-level inline children of <w:p> that participate in text flow.
+    // Hyperlinks, sdts, fldSimple and smartTag are transparent containers — their
+    // descendant runs contribute to the paragraph's visible text. Bookmark/comment
+    // markers (zero-width) are tracked separately and not enumerated here.
+    private static readonly HashSet<XName> InlineContainerNames = new()
+    {
+        W.hyperlink, W.sdt, W.fldSimple, W.smartTag,
+    };
+
+    private static bool IsInlineChild(XElement e) =>
+        e.Name == W.r || InlineContainerNames.Contains(e.Name);
+
+    /// <summary>
+    /// All <c>&lt;w:r&gt;</c> elements that contribute to the paragraph's visible text,
+    /// in document order — including runs nested inside hyperlinks, sdts, fldSimple,
+    /// smartTags. Iterating only <c>Elements(W.r)</c> silently skips hyperlink-internal
+    /// runs, which produced the bugs documented in DS080-DS090.
+    /// </summary>
+    internal static IEnumerable<XElement> InlineRuns(XElement paragraph)
+    {
+        foreach (var child in paragraph.Elements())
+        {
+            if (child.Name == W.r) yield return child;
+            else if (InlineContainerNames.Contains(child.Name))
+                foreach (var run in child.Descendants(W.r))
+                    yield return run;
+        }
+    }
+
     internal static string ParagraphText(XElement paragraph) =>
-        string.Concat(paragraph.Elements(W.r).Select(RunText));
+        string.Concat(InlineRuns(paragraph).Select(RunText));
 
     internal static string RunText(XElement run) =>
         string.Concat(run.Elements(W.t).Select(t => (string)t));
 
+    private static int InlineChildTextLength(XElement child) =>
+        string.Concat(child.DescendantsAndSelf(W.t).Select(t => (string)t)).Length;
+
     /// <summary>
     /// If a run straddles <paramref name="offset"/>, split it into two adjacent runs
-    /// at that offset. After this call, no run will straddle the offset.
+    /// at that offset. Walks runs inside hyperlinks/sdts/etc. too, so the boundary
+    /// is clean regardless of which container the run lives in. The new sibling run
+    /// is inserted into the same parent as the original (preserving hyperlink/sdt
+    /// membership for the keep-half).
     /// </summary>
     internal static void SplitRunsAtOffset(XElement paragraph, int offset)
     {
         int consumed = 0;
-        foreach (var run in paragraph.Elements(W.r).ToList())
+        foreach (var run in InlineRuns(paragraph).ToList())
         {
             var runText = RunText(run);
             if (consumed == offset) return;
@@ -1128,5 +1276,75 @@ public sealed class DocxSession : IDisposable
             run.AddAfterSelf(newRun);
             return;
         }
+    }
+
+    /// <summary>
+    /// Ensures no top-level inline child straddles <paramref name="offset"/>: if a
+    /// hyperlink (or other splittable container) crosses the boundary, it's split
+    /// into two sibling containers sharing the same attributes (e.g. <c>r:id</c>),
+    /// each holding half the runs. After this call, <see cref="MoveInlineChildrenAfter"/>
+    /// can move whole-child elements without slicing through anything.
+    /// </summary>
+    internal static void SplitInlineContainersAtOffset(XElement paragraph, int offset)
+    {
+        int consumed = 0;
+        foreach (var child in paragraph.Elements().Where(IsInlineChild).ToList())
+        {
+            int len = InlineChildTextLength(child);
+            if (consumed + len <= offset) { consumed += len; continue; }
+            if (consumed == offset) return; // boundary already clean
+            int local = offset - consumed;
+
+            if (child.Name == W.hyperlink)
+                SplitHyperlinkAt(child, local);
+            // For <w:r>: SplitRunsAtOffset already handled it. For sdt/fldSimple/smartTag:
+            // treat as atomic — splitting these requires semantic care; the whole element
+            // stays with whichever side its leading run lands on.
+            return;
+        }
+    }
+
+    private static void SplitHyperlinkAt(XElement hyperlink, int localOffset)
+    {
+        // Split runs inside the hyperlink at the local offset (works because SplitRunsAtOffset
+        // walks descendants through container types).
+        SplitRunsAtOffset(hyperlink, localOffset);
+
+        int consumed = 0;
+        var movedRuns = new List<XElement>();
+        foreach (var run in hyperlink.Elements(W.r).ToList())
+        {
+            int len = RunText(run).Length;
+            if (consumed >= localOffset) movedRuns.Add(run);
+            consumed += len;
+        }
+        if (movedRuns.Count == 0) return;
+
+        var newLink = new XElement(W.hyperlink);
+        foreach (var a in hyperlink.Attributes()) newLink.SetAttributeValue(a.Name, a.Value);
+        foreach (var run in movedRuns) { run.Remove(); newLink.Add(run); }
+        hyperlink.AddAfterSelf(newLink);
+    }
+
+    /// <summary>
+    /// Move every paragraph child (inline run/container OR zero-width marker)
+    /// whose position is at or past <paramref name="offset"/> from
+    /// <paramref name="paragraph"/> into <paramref name="destination"/>. Inline
+    /// children advance the position counter by their text length; markers
+    /// (bookmarkStart/End, comment range markers, etc.) advance it by 0 and so
+    /// inherit the position they're sandwiched between.
+    /// </summary>
+    internal static void MoveInlineChildrenAfter(XElement paragraph, int offset, XElement destination)
+    {
+        int consumed = 0;
+        var toMove = new List<XElement>();
+        foreach (var child in paragraph.Elements().ToList())
+        {
+            if (child.Name == W.pPr) continue;
+            int len = IsInlineChild(child) ? InlineChildTextLength(child) : 0;
+            if (consumed >= offset) toMove.Add(child);
+            consumed += len;
+        }
+        foreach (var c in toMove) { c.Remove(); destination.Add(c); }
     }
 }

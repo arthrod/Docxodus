@@ -421,7 +421,9 @@ public class DocxSessionTests
         Assert.Contains(r.Modified, a => a.Id == first);
         Assert.Contains(r.Removed, a => a.Id == second);
         Assert.False(s.Exists(second));
-        Assert.Contains("First paragraph.Second paragraph.", s.Project().Markdown);
+        // MergeParagraphs inserts a single-space separator when both sides end/start
+        // with non-whitespace — otherwise sentences jam together. See DS085.
+        Assert.Contains("First paragraph. Second paragraph.", s.Project().Markdown);
     }
 
     [Fact]
