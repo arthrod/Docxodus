@@ -56,16 +56,16 @@ public sealed record RunFormatting
 public sealed record RunFragment
 {
     /// <summary>PtOpenXml.Unid of the <c>w:r</c> element this fragment came from.</summary>
-    public required string Unid { get; init; }
+    required public string Unid { get; init; }
 
     /// <summary>The text from this run that participates in the match.</summary>
-    public required string Text { get; init; }
+    required public string Text { get; init; }
 
     /// <summary>Character offset + length of this fragment inside the run's flat text.</summary>
-    public required CharSpan SpanInElement { get; init; }
+    required public CharSpan SpanInElement { get; init; }
 
     /// <summary>Visible formatting of the run this fragment came from.</summary>
-    public required RunFormatting Formatting { get; init; }
+    required public RunFormatting Formatting { get; init; }
 }
 
 /// <summary>
@@ -76,22 +76,22 @@ public sealed record RunFragment
 public sealed record TextMatch
 {
     /// <summary>The matched text.</summary>
-    public required string Text { get; init; }
+    required public string Text { get; init; }
 
     /// <summary>The smallest block-level anchor (paragraph/heading/list item/table cell) that fully contains the match.</summary>
-    public required AnchorTarget EnclosingAnchor { get; init; }
+    required public AnchorTarget EnclosingAnchor { get; init; }
 
     /// <summary>Character offset + length of the match in the enclosing block's flat text.</summary>
-    public required CharSpan Span { get; init; }
+    required public CharSpan Span { get; init; }
 
     /// <summary>The run fragments the match spans, in document order. Always non-empty for a successful match.</summary>
-    public required IReadOnlyList<RunFragment> Fragments { get; init; }
+    required public IReadOnlyList<RunFragment> Fragments { get; init; }
 
     /// <summary>Up to <c>contextChars</c> chars from the enclosing block immediately before the match.</summary>
-    public required string ContextBefore { get; init; }
+    required public string ContextBefore { get; init; }
 
     /// <summary>Up to <c>contextChars</c> chars from the enclosing block immediately after the match.</summary>
-    public required string ContextAfter { get; init; }
+    required public string ContextAfter { get; init; }
 
     /// <summary>Regex capture groups (index 0 is always the whole match; named groups appear at their numeric index).</summary>
     public IReadOnlyList<string> Groups { get; init; } = Array.Empty<string>();
