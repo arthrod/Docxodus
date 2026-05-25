@@ -6,6 +6,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Xml.Linq;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
@@ -711,5 +712,202 @@ public class DocxSessionTests
         Assert.False(r.Success);
         Assert.Equal(EditErrorCode.ValidationFailed, r.Error!.Code);
         Assert.Equal(before, s.Project().Markdown);
+    }
+
+    // ─── Phase 10: Grep primitive (#143) ─────────────────────────────────
+
+    /// <summary>
+    /// Three-paragraph fixture: paragraph 1 has a single plain run "Once upon a time, in a faraway land.";
+    /// paragraph 2 has formatting boundaries that split runs ("Plain " + bold "BOLD" + " plain again");
+    /// paragraph 3 has a hyperlink in the middle ("Visit " + hyperlink("Anthropic") + " for more.").
+    /// </summary>
+    internal static byte[] BuildDS100_GrepFixture()
+    {
+        XNamespace W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        XNamespace R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.AddNewPart<StyleDefinitionsPart>().Styles = BuildHeadingStyles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+            var rel = main.AddHyperlinkRelationship(new System.Uri("https://www.anthropic.com"), true);
+
+            var body = new XElement(W + "body",
+                new XElement(W + "p",
+                    new XElement(W + "r",
+                        new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"),
+                            "Once upon a time, in a faraway land."))),
+                new XElement(W + "p",
+                    new XElement(W + "r",
+                        new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), "Plain ")),
+                    new XElement(W + "r",
+                        new XElement(W + "rPr", new XElement(W + "b")),
+                        new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), "BOLD")),
+                    new XElement(W + "r",
+                        new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), " plain again."))),
+                new XElement(W + "p",
+                    new XElement(W + "r",
+                        new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), "Visit ")),
+                    new XElement(W + "hyperlink",
+                        new XAttribute(R + "id", rel.Id),
+                        new XElement(W + "r",
+                            new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), "Anthropic"))),
+                    new XElement(W + "r",
+                        new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), " for more."))));
+
+            var doc = new XElement(W + "document",
+                new XAttribute(XNamespace.Xmlns + "w", W.NamespaceName),
+                new XAttribute(XNamespace.Xmlns + "r", R.NamespaceName),
+                body);
+            main.PutXDocument(new XDocument(doc));
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void DS100_Grep_SingleRunMatch()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var matches = s.Grep("faraway land");
+        Assert.Single(matches);
+
+        var m = matches[0];
+        Assert.Equal("faraway land", m.Text);
+        Assert.Equal("p", m.EnclosingAnchor.Anchor.Kind);
+        Assert.Single(m.Fragments);
+        Assert.Equal("faraway land", m.Fragments[0].Text);
+        Assert.False(m.Fragments[0].Formatting.Bold);
+        Assert.Null(m.Fragments[0].Formatting.HyperlinkUrl);
+    }
+
+    [Fact]
+    public void DS101_Grep_MatchSpanningFormattingBoundary()
+    {
+        // "ain BOLD pl" crosses two formatting boundaries: plain → bold → plain.
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var matches = s.Grep("ain BOLD pl");
+        Assert.Single(matches);
+
+        var m = matches[0];
+        Assert.Equal("ain BOLD pl", m.Text);
+        Assert.Equal(3, m.Fragments.Count);
+
+        Assert.Equal("ain ", m.Fragments[0].Text);
+        Assert.False(m.Fragments[0].Formatting.Bold);
+
+        Assert.Equal("BOLD", m.Fragments[1].Text);
+        Assert.True(m.Fragments[1].Formatting.Bold);
+
+        Assert.Equal(" pl", m.Fragments[2].Text);
+        Assert.False(m.Fragments[2].Formatting.Bold);
+
+        // The three fragments must reference three distinct runs (distinct Unids).
+        var unids = m.Fragments.Select(f => f.Unid).Distinct().ToList();
+        Assert.Equal(3, unids.Count);
+    }
+
+    [Fact]
+    public void DS102_Grep_MatchSpanningHyperlink()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var matches = s.Grep("Visit Anthropic for");
+        Assert.Single(matches);
+
+        var m = matches[0];
+        Assert.Equal(3, m.Fragments.Count);
+        Assert.Equal("Visit ", m.Fragments[0].Text);
+        Assert.Null(m.Fragments[0].Formatting.HyperlinkUrl);
+
+        Assert.Equal("Anthropic", m.Fragments[1].Text);
+        Assert.Equal("https://www.anthropic.com/", m.Fragments[1].Formatting.HyperlinkUrl);
+
+        Assert.Equal(" for", m.Fragments[2].Text);
+        Assert.Null(m.Fragments[2].Formatting.HyperlinkUrl);
+    }
+
+    [Fact]
+    public void DS103_Grep_RegexWithGroups()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var matches = s.Grep(@"(?<who>Once) upon a (?<when>time)");
+        Assert.Single(matches);
+
+        var m = matches[0];
+        Assert.Equal("Once upon a time", m.Text);
+        // Group 0 == whole match; named groups appear at their index.
+        Assert.Equal("Once", m.Groups[1]);
+        Assert.Equal("time", m.Groups[2]);
+    }
+
+    [Fact]
+    public void DS104_Grep_NoMatchReturnsEmpty()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var matches = s.Grep("string that absolutely does not appear anywhere");
+        Assert.Empty(matches);
+    }
+
+    [Fact]
+    public void DS105_Grep_ContextBeforeAndAfter()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var matches = s.Grep("BOLD");
+        Assert.Single(matches);
+
+        var m = matches[0];
+        Assert.EndsWith("Plain ", m.ContextBefore);
+        Assert.StartsWith(" plain again.", m.ContextAfter);
+    }
+
+    [Fact]
+    public void DS106_Grep_MultipleMatchesInDocumentOrder()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var matches = s.Grep("a"); // very common letter, will hit many places
+        Assert.True(matches.Count >= 3);
+
+        // Document order: first match comes from paragraph 1, then 2, then 3.
+        var firstThreeAnchors = matches.Take(3).Select(x => x.EnclosingAnchor.Anchor.Id).ToList();
+        var bodyAnchors = s.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Kind == "p").Select(t => t.Anchor.Id).ToList();
+        // Each successive match's anchor index must be >= the previous (matches are emitted in doc order).
+        var positions = firstThreeAnchors.Select(a => bodyAnchors.IndexOf(a)).ToList();
+        for (int i = 1; i < positions.Count; i++)
+            Assert.True(positions[i] >= positions[i - 1], "matches must be in document order");
+    }
+
+    [Fact]
+    public void DS107_Grep_RegexOptionsRespected()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        // Case-insensitive should find "BOLD" via lowercase "bold".
+        var insensitive = s.Grep("bold", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        Assert.Single(insensitive);
+        Assert.Equal("BOLD", insensitive[0].Text);
+
+        // Case-sensitive (default) must not match.
+        var sensitive = s.Grep("bold");
+        Assert.Empty(sensitive);
+    }
+
+    [Fact]
+    public void DS108_Grep_SpanInsideElement_PointsAtMatchingSubstring()
+    {
+        // For the bold-spanning case, the middle fragment's text is the WHOLE w:r
+        // text ("BOLD") and SpanInElement covers 0..4 of that run.
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var m = s.Grep("ain BOLD pl").Single();
+
+        var bold = m.Fragments[1];
+        Assert.Equal("BOLD", bold.Text);
+        Assert.Equal(0, bold.SpanInElement.Start);
+        Assert.Equal(4, bold.SpanInElement.Length);
+
+        // The trailing-plain fragment starts at offset 0 of " plain again." and covers " pl" (3 chars).
+        var trailing = m.Fragments[2];
+        Assert.Equal(0, trailing.SpanInElement.Start);
+        Assert.Equal(3, trailing.SpanInElement.Length);
     }
 }

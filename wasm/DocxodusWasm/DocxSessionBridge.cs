@@ -102,6 +102,33 @@ public static partial class DocxSessionBridge
     public static string RawReplaceXml(int h, string anchor, string xml) =>
         Serialize(Get(h).Raw.ReplaceXml(anchor, xml));
 
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.Grep"/>. <paramref name="optionsJson"/>
+    /// accepts <c>{regexOptions?: number, scope?: number, contextChars?: number}</c>;
+    /// numeric values follow the .NET <see cref="System.Text.RegularExpressions.RegexOptions"/>
+    /// and <see cref="ProjectionScopes"/> flag layouts. Missing fields use sensible
+    /// defaults (no options, body-only, 40 chars of context).
+    /// </summary>
+    [JSExport]
+    public static string Grep(int h, string pattern, string optionsJson)
+    {
+        var regexOpts = System.Text.RegularExpressions.RegexOptions.None;
+        var scope = ProjectionScopes.Body;
+        var contextChars = 40;
+        if (!string.IsNullOrEmpty(optionsJson))
+        {
+            using var doc = JsonDocument.Parse(optionsJson);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("regexOptions", out var ro) && ro.ValueKind == JsonValueKind.Number)
+                regexOpts = (System.Text.RegularExpressions.RegexOptions)ro.GetInt32();
+            if (root.TryGetProperty("scope", out var s) && s.ValueKind == JsonValueKind.Number)
+                scope = (ProjectionScopes)s.GetInt32();
+            if (root.TryGetProperty("contextChars", out var c) && c.ValueKind == JsonValueKind.Number)
+                contextChars = c.GetInt32();
+        }
+        return SerializeMatches(Get(h).Grep(pattern, regexOpts, scope, contextChars));
+    }
+
     [JSExport]
     public static bool Undo(int h) => Get(h).Undo();
 
@@ -217,6 +244,60 @@ public static partial class DocxSessionBridge
               .Append('}');
         }
         sb.Append(']');
+    }
+
+    private static string SerializeMatches(System.Collections.Generic.IReadOnlyList<TextMatch> matches)
+    {
+        var sb = new StringBuilder(512);
+        sb.Append('[');
+        for (int i = 0; i < matches.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var m = matches[i];
+            sb.Append("{\"text\":").Append(JsonString(m.Text))
+              .Append(",\"enclosingAnchor\":{")
+              .Append("\"id\":").Append(JsonString(m.EnclosingAnchor.Anchor.Id))
+              .Append(",\"kind\":").Append(JsonString(m.EnclosingAnchor.Anchor.Kind))
+              .Append(",\"scope\":").Append(JsonString(m.EnclosingAnchor.Anchor.Scope))
+              .Append(",\"unid\":").Append(JsonString(m.EnclosingAnchor.Anchor.Unid))
+              .Append('}')
+              .Append(",\"span\":{\"start\":").Append(m.Span.Start).Append(",\"length\":").Append(m.Span.Length).Append('}')
+              .Append(",\"contextBefore\":").Append(JsonString(m.ContextBefore))
+              .Append(",\"contextAfter\":").Append(JsonString(m.ContextAfter))
+              .Append(",\"groups\":[");
+            for (int g = 0; g < m.Groups.Count; g++)
+            {
+                if (g > 0) sb.Append(',');
+                sb.Append(JsonString(m.Groups[g]));
+            }
+            sb.Append(']')
+              .Append(",\"fragments\":[");
+            for (int f = 0; f < m.Fragments.Count; f++)
+            {
+                if (f > 0) sb.Append(',');
+                var fr = m.Fragments[f];
+                sb.Append("{\"unid\":").Append(JsonString(fr.Unid))
+                  .Append(",\"text\":").Append(JsonString(fr.Text))
+                  .Append(",\"spanInElement\":{\"start\":").Append(fr.SpanInElement.Start)
+                  .Append(",\"length\":").Append(fr.SpanInElement.Length).Append('}')
+                  .Append(",\"formatting\":{")
+                  .Append("\"bold\":").Append(fr.Formatting.Bold ? "true" : "false")
+                  .Append(",\"italic\":").Append(fr.Formatting.Italic ? "true" : "false")
+                  .Append(",\"underline\":").Append(fr.Formatting.Underline ? "true" : "false")
+                  .Append(",\"strike\":").Append(fr.Formatting.Strike ? "true" : "false")
+                  .Append(",\"code\":").Append(fr.Formatting.Code ? "true" : "false");
+                if (fr.Formatting.Color is not null)
+                    sb.Append(",\"color\":").Append(JsonString(fr.Formatting.Color));
+                if (fr.Formatting.HyperlinkUrl is not null)
+                    sb.Append(",\"hyperlinkUrl\":").Append(JsonString(fr.Formatting.HyperlinkUrl));
+                if (fr.Formatting.RunStyle is not null)
+                    sb.Append(",\"runStyle\":").Append(JsonString(fr.Formatting.RunStyle));
+                sb.Append("}}");
+            }
+            sb.Append("]}");
+        }
+        sb.Append(']');
+        return sb.ToString();
     }
 
     private static string SerializeProjection(MarkdownProjection p)

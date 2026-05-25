@@ -668,6 +668,7 @@ export interface DocxodusWasmExports {
     RawGetXml: (handle: number, anchor: string) => string;
     RawInsertXml: (handle: number, anchor: string, pos: string, xml: string) => string;
     RawReplaceXml: (handle: number, anchor: string, xml: string) => string;
+    Grep: (handle: number, pattern: string, optionsJson: string) => string;
     Undo: (handle: number) => boolean;
     Redo: (handle: number) => boolean;
     Save: (handle: number) => Uint8Array;
@@ -764,6 +765,66 @@ export interface DocxSessionProjection {
     kind: string;
     scope: string;
   }>;
+}
+
+/**
+ * Per-fragment visible formatting reported by {@link DocxSession.grep}.
+ */
+export interface RunFormatting {
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  strike: boolean;
+  code: boolean;
+  color?: string;
+  hyperlinkUrl?: string;
+  runStyle?: string;
+}
+
+/**
+ * One piece of a {@link TextMatch} that came from a single `<w:r>` run.
+ */
+export interface RunFragment {
+  /** PtOpenXml:Unid of the `w:r` element this fragment came from. */
+  unid: string;
+  /** The text from this run that participates in the match. */
+  text: string;
+  /** Character offset + length of this fragment inside the run's flat text. */
+  spanInElement: CharSpan;
+  /** Visible formatting of the run this fragment came from. */
+  formatting: RunFormatting;
+}
+
+/**
+ * A single match returned by {@link DocxSession.grep}. The match always lives
+ * within one block-level element.
+ */
+export interface TextMatch {
+  text: string;
+  enclosingAnchor: AnchorRef;
+  span: CharSpan;
+  fragments: RunFragment[];
+  contextBefore: string;
+  contextAfter: string;
+  /** Regex capture groups; index 0 is always the whole match. */
+  groups: string[];
+}
+
+/**
+ * Options for {@link DocxSession.grep}.
+ *
+ * `regexOptions` and `scope` use the numeric flag layouts of the .NET
+ * `System.Text.RegularExpressions.RegexOptions` and `ProjectionScopes` enums.
+ * Common values:
+ *   - `RegexOptions.IgnoreCase = 1`
+ *   - `RegexOptions.Multiline = 2`
+ *   - `ProjectionScopes.Body = 1`, `Headers = 2`, `Footers = 4`,
+ *     `Footnotes = 8`, `Endnotes = 16`, `Comments = 32`, `All = 63`.
+ */
+export interface GrepOptions {
+  regexOptions?: number;
+  scope?: number;
+  contextChars?: number;
 }
 
 /**

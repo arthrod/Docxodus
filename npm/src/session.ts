@@ -9,6 +9,8 @@ import type {
   DocxSessionSettings,
   EditResult,
   FormatOp,
+  GrepOptions,
+  TextMatch,
 } from "./types.js";
 
 /**
@@ -95,6 +97,23 @@ export class DocxSession {
       JSON.parse(this.wasm.RawReplaceXml(this.handle, anchorId, xml)) as EditResult,
   };
 
+  // ─── Search ──────────────────────────────────────────────────────────
+
+  /**
+   * Searches the flat text of every paragraph/heading/list-item in scope for
+   * matches of `pattern`, returning them in document order with the run
+   * fragments each match spans. Lets callers rewrite a match in place while
+   * preserving each fragment's formatting (bold/italic/hyperlink/etc.).
+   *
+   * `pattern` is a regular expression — use plain string equivalents wrapped
+   * in `^` / `$` or pass literal text escaped via a helper.
+   *
+   * @see docs/architecture/docx_mutation_api.md#grep
+   */
+  grep(pattern: string, options?: GrepOptions): TextMatch[] {
+    return JSON.parse(this.wasm.Grep(this.handle, pattern, options ? JSON.stringify(options) : "")) as TextMatch[];
+  }
+
   // ─── Lifecycle ───────────────────────────────────────────────────────
 
   undo(): boolean {
@@ -134,4 +153,4 @@ export function openDocxSession(
   return new DocxSession(handle, bridge);
 }
 
-export type { AnchorRef, CharSpan, DocxSessionProjection, DocxSessionSettings, EditError, EditErrorCode, EditResult, FormatOp, MarkdownPatch } from "./types.js";
+export type { AnchorRef, CharSpan, DocxSessionProjection, DocxSessionSettings, EditError, EditErrorCode, EditResult, FormatOp, GrepOptions, MarkdownPatch, RunFormatting, RunFragment, TextMatch } from "./types.js";

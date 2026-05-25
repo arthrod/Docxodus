@@ -29,6 +29,74 @@ public sealed record FormatOp
     public string? RunStyle { get; init; }
 }
 
+/// <summary>
+/// Per-fragment visible formatting reported by <see cref="DocxSession.Grep"/>.
+/// Booleans default to <c>false</c> meaning "not set on this fragment". The
+/// fields cover what a callerlikely wants to preserve when rewriting a match in
+/// place — character emphasis, color, hyperlink target, named run style.
+/// </summary>
+public sealed record RunFormatting
+{
+    public bool Bold { get; init; }
+    public bool Italic { get; init; }
+    public bool Underline { get; init; }
+    public bool Strike { get; init; }
+    public bool Code { get; init; }
+    public string? Color { get; init; }
+    public string? HyperlinkUrl { get; init; }
+    public string? RunStyle { get; init; }
+}
+
+/// <summary>
+/// One piece of a <see cref="TextMatch"/> that came from a single <c>&lt;w:r&gt;</c> run.
+/// The <see cref="Unid"/> uniquely identifies the run within the document; callers
+/// rewriting the match can address each piece by its Unid + <see cref="SpanInElement"/>
+/// and preserve the run's <see cref="Formatting"/> when constructing replacement XML.
+/// </summary>
+public sealed record RunFragment
+{
+    /// <summary>PtOpenXml.Unid of the <c>w:r</c> element this fragment came from.</summary>
+    required public string Unid { get; init; }
+
+    /// <summary>The text from this run that participates in the match.</summary>
+    required public string Text { get; init; }
+
+    /// <summary>Character offset + length of this fragment inside the run's flat text.</summary>
+    required public CharSpan SpanInElement { get; init; }
+
+    /// <summary>Visible formatting of the run this fragment came from.</summary>
+    required public RunFormatting Formatting { get; init; }
+}
+
+/// <summary>
+/// A single match returned by <see cref="DocxSession.Grep"/>. The match always lives
+/// within one block-level element (the <see cref="EnclosingAnchor"/>); cross-block
+/// matches aren't represented because OOXML doesn't allow text to span paragraphs.
+/// </summary>
+public sealed record TextMatch
+{
+    /// <summary>The matched text.</summary>
+    required public string Text { get; init; }
+
+    /// <summary>The smallest block-level anchor (paragraph/heading/list item/table cell) that fully contains the match.</summary>
+    required public AnchorTarget EnclosingAnchor { get; init; }
+
+    /// <summary>Character offset + length of the match in the enclosing block's flat text.</summary>
+    required public CharSpan Span { get; init; }
+
+    /// <summary>The run fragments the match spans, in document order. Always non-empty for a successful match.</summary>
+    required public IReadOnlyList<RunFragment> Fragments { get; init; }
+
+    /// <summary>Up to <c>contextChars</c> chars from the enclosing block immediately before the match.</summary>
+    required public string ContextBefore { get; init; }
+
+    /// <summary>Up to <c>contextChars</c> chars from the enclosing block immediately after the match.</summary>
+    required public string ContextAfter { get; init; }
+
+    /// <summary>Regex capture groups (index 0 is always the whole match; named groups appear at their numeric index).</summary>
+    public IReadOnlyList<string> Groups { get; init; } = Array.Empty<string>();
+}
+
 public sealed record AnchorInfo(string Id, string Kind, string Scope, string TextPreview);
 
 public sealed record MarkdownPatch(string ScopeAnchorId, string Markdown);
@@ -170,6 +238,151 @@ public sealed class DocxSession : IDisposable
         var element = target.Resolve(_doc!);
         var preview = element is null ? "" : ElementTextPreview(element);
         return new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, preview);
+    }
+
+    /// <summary>
+    /// Searches the flat text of every paragraph/heading/list-item in <paramref name="scope"/>
+    /// for matches of <paramref name="pattern"/> and returns them in document order, each
+    /// with the run fragments it spans. The fragment list lets callers rewrite a match in
+    /// place while preserving each fragment's formatting — see #143 for design context.
+    /// </summary>
+    /// <param name="pattern">Regular-expression pattern (use <c>Regex.Escape</c> for literal text).</param>
+    /// <param name="options">Standard <see cref="System.Text.RegularExpressions.RegexOptions"/> flags.</param>
+    /// <param name="scope">Which package parts to search. Defaults to <see cref="ProjectionScopes.Body"/>.</param>
+    /// <param name="contextChars">Number of characters of surrounding text to include in
+    /// <see cref="TextMatch.ContextBefore"/> and <see cref="TextMatch.ContextAfter"/>.</param>
+    public IReadOnlyList<TextMatch> Grep(
+        string pattern,
+        System.Text.RegularExpressions.RegexOptions options = System.Text.RegularExpressions.RegexOptions.None,
+        ProjectionScopes scope = ProjectionScopes.Body,
+        int contextChars = 40)
+    {
+        ThrowIfDisposed();
+        if (string.IsNullOrEmpty(pattern)) return Array.Empty<TextMatch>();
+
+        var regex = new System.Text.RegularExpressions.Regex(pattern, options);
+        var results = new List<TextMatch>();
+
+        // Walk the projection's AnchorIndex so document order is the same order
+        // an agent sees in the projection. Only block-level kinds that hold runs
+        // qualify (paragraphs/headings/list-items/table cells); other kinds either
+        // don't contain text directly (tbl, tr, sec) or live in non-body scopes
+        // we filter explicitly below.
+        var index = Project().AnchorIndex;
+        foreach (var target in index.Values)
+        {
+            if (!ScopeMatches(target.Anchor.Scope, scope)) continue;
+            if (target.Anchor.Kind is not ("p" or "h" or "li" or "tc")) continue;
+
+            var element = target.Resolve(_doc!);
+            if (element is null) continue;
+
+            // Table cells contain paragraphs; recurse so a Grep over the body
+            // also hits cell text. Other kinds operate on the element directly.
+            if (target.Anchor.Kind == "tc")
+            {
+                // Cell paragraphs are reachable via their own AnchorIndex entries,
+                // so skip the cell wrapper to avoid double-counting matches.
+                continue;
+            }
+
+            var map = Internal.RunTextMap.Build(element);
+            if (map.FlatText.Length == 0) continue;
+
+            // Look up the owner part once per anchor so the hyperlink resolver
+            // doesn't have to walk back up to the root annotation per run.
+            var ownerPart = ResolvePart(target.PartUri);
+
+            foreach (System.Text.RegularExpressions.Match m in regex.Matches(map.FlatText))
+            {
+                if (!m.Success || m.Length == 0) continue;
+
+                var pieces = Internal.RunTextMap.ResolveRange(map, m.Index, m.Length);
+                if (pieces.Count == 0) continue;
+
+                var fragments = new List<RunFragment>(pieces.Count);
+                foreach (var (seg, offsetInRun, len) in pieces)
+                {
+                    var runUnid = (string?)seg.Run.Attribute(PtOpenXml.Unid) ?? string.Empty;
+                    var runText = RunText(seg.Run);
+                    fragments.Add(new RunFragment
+                    {
+                        Unid = runUnid,
+                        Text = runText.Substring(offsetInRun, len),
+                        SpanInElement = new CharSpan(offsetInRun, len),
+                        Formatting = ExtractFormatting(seg.Run, ownerPart),
+                    });
+                }
+
+                var ctxStart = Math.Max(0, m.Index - contextChars);
+                var ctxBefore = map.FlatText.Substring(ctxStart, m.Index - ctxStart);
+                var ctxEnd = Math.Min(map.FlatText.Length, m.Index + m.Length + contextChars);
+                var ctxAfter = map.FlatText.Substring(m.Index + m.Length, ctxEnd - (m.Index + m.Length));
+
+                var groups = new string[m.Groups.Count];
+                for (int i = 0; i < m.Groups.Count; i++) groups[i] = m.Groups[i].Value;
+
+                results.Add(new TextMatch
+                {
+                    Text = m.Value,
+                    EnclosingAnchor = target,
+                    Span = new CharSpan(m.Index, m.Length),
+                    Fragments = fragments,
+                    ContextBefore = ctxBefore,
+                    ContextAfter = ctxAfter,
+                    Groups = groups,
+                });
+            }
+        }
+
+        return results;
+    }
+
+    private static bool ScopeMatches(string anchorScope, ProjectionScopes filter)
+    {
+        // Anchor scopes are strings ("body", "hdr1", "ftr2", "fn", "en", "cmt").
+        // ProjectionScopes is a flags enum over the same categories.
+        if (anchorScope == "body") return filter.HasFlag(ProjectionScopes.Body);
+        if (anchorScope.StartsWith("hdr", StringComparison.Ordinal)) return filter.HasFlag(ProjectionScopes.Headers);
+        if (anchorScope.StartsWith("ftr", StringComparison.Ordinal)) return filter.HasFlag(ProjectionScopes.Footers);
+        if (anchorScope == "fn") return filter.HasFlag(ProjectionScopes.Footnotes);
+        if (anchorScope == "en") return filter.HasFlag(ProjectionScopes.Endnotes);
+        if (anchorScope == "cmt") return filter.HasFlag(ProjectionScopes.Comments);
+        return false;
+    }
+
+    private OpenXmlPart? ResolvePart(string partUri) =>
+        EnumerateProjectedParts().FirstOrDefault(p => p.Uri.ToString() == partUri);
+
+    private static RunFormatting ExtractFormatting(XElement run, OpenXmlPart? ownerPart)
+    {
+        var rPr = run.Element(W.rPr);
+        string? hyperlinkUrl = null;
+        for (var p = run.Parent; p is not null; p = p.Parent)
+        {
+            if (p.Name == W.hyperlink)
+            {
+                var rid = (string?)p.Attribute(R.id);
+                if (!string.IsNullOrEmpty(rid) && ownerPart is not null)
+                {
+                    var rel = ownerPart.HyperlinkRelationships.FirstOrDefault(x => x.Id == rid);
+                    if (rel is not null) hyperlinkUrl = rel.Uri.ToString();
+                }
+                break;
+            }
+        }
+
+        return new RunFormatting
+        {
+            Bold = rPr?.Element(W.b) is not null,
+            Italic = rPr?.Element(W.i) is not null,
+            Underline = rPr?.Element(W.u) is not null,
+            Strike = rPr?.Element(W.strike) is not null,
+            Code = string.Equals((string?)rPr?.Element(W.rStyle)?.Attribute(W.val), "Code", StringComparison.Ordinal),
+            Color = (string?)rPr?.Element(W.color)?.Attribute(W.val),
+            HyperlinkUrl = hyperlinkUrl,
+            RunStyle = (string?)rPr?.Element(W.rStyle)?.Attribute(W.val),
+        };
     }
 
     public byte[] Save()
