@@ -1095,4 +1095,121 @@ public class DocxSessionTests
         Assert.True(s.Undo());
         Assert.Equal(before, FlatBodyText(s));
     }
+
+    // ─── Phase 12: FindPlaceholders (#142) ───────────────────────────────
+
+    /// <summary>
+    /// Three-paragraph fixture covering each PlaceholderKind:
+    ///   1. BlankFill — "Name: [_______]" + "Price: $[___]"
+    ///   2. AlternativeClause — "[There shall be no cumulative voting.]"
+    ///   3. Instruction — "[insert percentage] of the outstanding shares" + "[*specify name*]"
+    /// </summary>
+    internal static byte[] BuildDS120_PlaceholderFixture()
+    {
+        XNamespace W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.AddNewPart<StyleDefinitionsPart>().Styles = BuildHeadingStyles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            XElement Para(string text) => new XElement(W + "p",
+                new XElement(W + "r",
+                    new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), text)));
+
+            var body = new XElement(W + "body",
+                Para("Name: [_______] and price: $[___]"),
+                Para("[There shall be no cumulative voting.]"),
+                Para("Holders of at least [insert percentage] of the outstanding shares of [*specify name*]."));
+
+            var doc = new XElement(W + "document",
+                new XAttribute(XNamespace.Xmlns + "w", W.NamespaceName),
+                body);
+            main.PutXDocument(new XDocument(doc));
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void DS120_FindPlaceholders_DetectsBlankFill()
+    {
+        using var s = new DocxSession(BuildDS120_PlaceholderFixture());
+        var placeholders = s.FindPlaceholders(PlaceholderKinds.BlankFill);
+
+        Assert.Equal(2, placeholders.Count);
+        Assert.All(placeholders, p => Assert.Equal(PlaceholderKind.BlankFill, p.Kind));
+        Assert.Contains(placeholders, p => p.Match.Text == "[_______]");
+        Assert.Contains(placeholders, p => p.Match.Text == "$[___]");
+    }
+
+    [Fact]
+    public void DS121_FindPlaceholders_DetectsAlternativeClause()
+    {
+        using var s = new DocxSession(BuildDS120_PlaceholderFixture());
+        var alts = s.FindPlaceholders(PlaceholderKinds.AlternativeClause);
+
+        Assert.Single(alts);
+        Assert.Equal(PlaceholderKind.AlternativeClause, alts[0].Kind);
+        Assert.Equal("[There shall be no cumulative voting.]", alts[0].Match.Text);
+    }
+
+    [Fact]
+    public void DS122_FindPlaceholders_DetectsInstruction_ExtractsHint()
+    {
+        using var s = new DocxSession(BuildDS120_PlaceholderFixture());
+        var instructions = s.FindPlaceholders(PlaceholderKinds.Instruction);
+
+        Assert.Equal(2, instructions.Count);
+        Assert.All(instructions, i => Assert.Equal(PlaceholderKind.Instruction, i.Kind));
+        Assert.Contains(instructions, i => i.Hint == "insert percentage");
+        // Italic-styled instructions ([*specify name*]) strip the asterisks for the hint.
+        Assert.Contains(instructions, i => i.Hint == "specify name");
+    }
+
+    [Fact]
+    public void DS123_FindPlaceholders_DefaultKindsReturnsAll()
+    {
+        using var s = new DocxSession(BuildDS120_PlaceholderFixture());
+        var all = s.FindPlaceholders();
+        // 2 BlankFill + 1 AlternativeClause + 2 Instruction = 5
+        Assert.Equal(5, all.Count);
+    }
+
+    [Fact]
+    public void DS124_FindPlaceholders_KindsFilterCombines()
+    {
+        using var s = new DocxSession(BuildDS120_PlaceholderFixture());
+        var blankAndInstr = s.FindPlaceholders(PlaceholderKinds.BlankFill | PlaceholderKinds.Instruction);
+        Assert.Equal(4, blankAndInstr.Count);
+        Assert.DoesNotContain(blankAndInstr, p => p.Kind == PlaceholderKind.AlternativeClause);
+    }
+
+    [Fact]
+    public void DS125_FindPlaceholders_EmptyDocReturnsEmpty()
+    {
+        // BuildDS001 is two paragraphs with no brackets at all.
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        Assert.Empty(s.FindPlaceholders());
+    }
+
+    [Fact]
+    public void DS126_FindPlaceholders_ProvidesEnoughInfoForReplaceMatch()
+    {
+        // End-to-end: enumerate placeholders, fill each via ReplaceMatch.
+        // This is the canonical agentic template-fill recipe.
+        using var s = new DocxSession(BuildDS120_PlaceholderFixture());
+
+        // Fill each BlankFill in reverse offset order (per the ReplaceTextRange contract).
+        var fills = s.FindPlaceholders(PlaceholderKinds.BlankFill)
+            .OrderByDescending(p => p.Match.Span.Start);
+        foreach (var p in fills)
+            s.ReplaceMatch(p.Match, p.Match.Text == "$[___]" ? "$42" : "Bluth Co.");
+
+        var flat = FlatBodyText(s);
+        Assert.Contains("Name: Bluth Co. and price: $42", flat);
+        // Remaining placeholders untouched.
+        Assert.Contains("[There shall be no cumulative voting.]", flat);
+        Assert.Contains("[insert percentage]", flat);
+    }
 }

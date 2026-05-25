@@ -11,8 +11,10 @@ import type {
   FormatOp,
   GrepOptions,
   ReplaceOptions,
+  TemplatePlaceholder,
   TextMatch,
 } from "./types.js";
+import { PlaceholderKinds } from "./types.js";
 
 /**
  * Stateful in-memory DOCX editing session keyed by markdown-projection anchor ids.
@@ -144,6 +146,24 @@ export class DocxSession {
     ) as EditResult;
   }
 
+  /**
+   * Enumerate template placeholders in the document. Thin classifier over
+   * {@link grep}: distinguishes `[___]` value blanks (`blank_fill`),
+   * `[bracketed alternative clauses]` (`alternative_clause`), and
+   * `[insert X]` / `[*italic hint*]` instructions (`instruction`).
+   *
+   * Combine kinds with bitwise OR: `PlaceholderKinds.BlankFill | PlaceholderKinds.Instruction`.
+   * Default is `PlaceholderKinds.All`; default scope is body only (1).
+   *
+   * @see docs/architecture/docx_mutation_api.md#findplaceholders
+   */
+  findPlaceholders(
+    kinds: number = PlaceholderKinds.All,
+    scope: number = 1,
+  ): TemplatePlaceholder[] {
+    return JSON.parse(this.wasm.FindPlaceholders(this.handle, kinds, scope)) as TemplatePlaceholder[];
+  }
+
   // ─── Lifecycle ───────────────────────────────────────────────────────
 
   undo(): boolean {
@@ -183,4 +203,5 @@ export function openDocxSession(
   return new DocxSession(handle, bridge);
 }
 
-export type { AnchorRef, CharSpan, DocxSessionProjection, DocxSessionSettings, EditError, EditErrorCode, EditResult, FormatOp, GrepOptions, MarkdownPatch, ReplaceOptions, RunFormatting, RunFragment, TextMatch } from "./types.js";
+export type { AnchorRef, CharSpan, DocxSessionProjection, DocxSessionSettings, EditError, EditErrorCode, EditResult, FormatOp, GrepOptions, MarkdownPatch, PlaceholderKind, ReplaceOptions, RunFormatting, RunFragment, TemplatePlaceholder, TextMatch } from "./types.js";
+export { PlaceholderKinds } from "./types.js";

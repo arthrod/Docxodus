@@ -107,6 +107,51 @@ public sealed record ReplaceOptions
     public int? MaxReplacements { get; init; }
 }
 
+/// <summary>
+/// Categories of bracketed placeholders that <see cref="DocxSession.FindPlaceholders"/>
+/// recognizes. Templates routinely mix these — a real-world COI has dozens of value
+/// blanks, dozens of optional clauses, and dozens of drafter hints, all inside
+/// square brackets — and an agent fills each kind differently.
+/// </summary>
+public enum PlaceholderKind
+{
+    /// <summary><c>[_______]</c> or <c>$[_______]</c> — a value slot the agent fills with text.</summary>
+    BlankFill,
+
+    /// <summary><c>[entire clause text in brackets]</c> — an optional clause the agent keeps or strips.</summary>
+    AlternativeClause,
+
+    /// <summary><c>[insert X]</c>, <c>[specify Y]</c>, <c>[*italicized hint*]</c> — a drafter hint the agent treats as a parameter description.</summary>
+    Instruction,
+}
+
+/// <summary>Flag set for narrowing <see cref="DocxSession.FindPlaceholders"/>.</summary>
+[System.Flags]
+public enum PlaceholderKinds
+{
+    BlankFill = 1,
+    AlternativeClause = 2,
+    Instruction = 4,
+    All = BlankFill | AlternativeClause | Instruction,
+}
+
+/// <summary>
+/// A single placeholder found by <see cref="DocxSession.FindPlaceholders"/>. Wraps the
+/// underlying <see cref="TextMatch"/> with a classified <see cref="Kind"/> and (for
+/// <see cref="PlaceholderKind.Instruction"/> placeholders) a parsed <see cref="Hint"/>.
+/// </summary>
+public sealed record TemplatePlaceholder
+{
+    required public TextMatch Match { get; init; }
+    required public PlaceholderKind Kind { get; init; }
+
+    /// <summary>For <see cref="PlaceholderKind.Instruction"/>: the inner text with
+    /// surrounding brackets/asterisks stripped (e.g. <c>"[insert percentage]"</c> →
+    /// <c>"insert percentage"</c>; <c>"[*specify name*]"</c> → <c>"specify name"</c>).
+    /// <c>null</c> for other kinds.</summary>
+    public string? Hint { get; init; }
+}
+
 public sealed record AnchorInfo(string Id, string Kind, string Scope, string TextPreview);
 
 public sealed record MarkdownPatch(string ScopeAnchorId, string Markdown);
@@ -511,6 +556,86 @@ public sealed class DocxSession : IDisposable
             if (preOp.ok) RestoreSnapshot(preOp.snapshot);
             return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId);
         }
+    }
+
+    /// <summary>
+    /// Enumerate the template placeholders in the document. A thin classifier over
+    /// <see cref="Grep"/> that distinguishes <c>[___]</c> value blanks, <c>[bracketed
+    /// alternative clauses]</c>, and <c>[insert X]</c> / <c>[*italic hint*]</c>
+    /// instruction placeholders — the three families a template-filling agent treats
+    /// differently. See <see cref="PlaceholderKind"/> for the taxonomy.
+    /// </summary>
+    /// <remarks>
+    /// Nested brackets resolve to the INNERMOST bracket. A construct like
+    /// <c>[under the name [Bluth Co.]]</c> produces a placeholder for the inner
+    /// <c>[Bluth Co.]</c> only — usually what an agent cares about — but the outer
+    /// optional-clause bracket isn't reported separately. Use <see cref="Grep"/> with
+    /// a balanced-bracket regex if you need both.
+    /// </remarks>
+    public IReadOnlyList<TemplatePlaceholder> FindPlaceholders(
+        PlaceholderKinds kinds = PlaceholderKinds.All,
+        ProjectionScopes scope = ProjectionScopes.Body)
+    {
+        ThrowIfDisposed();
+        if (kinds == 0) return Array.Empty<TemplatePlaceholder>();
+
+        // Single bracket-or-dollar-bracket scan; classify by content after the match.
+        // Non-greedy inner content + negated character class keeps the regex from
+        // crossing into a sibling bracket pair on the same line.
+        var matches = Grep(@"\$?\[[^\[\]]+\]", System.Text.RegularExpressions.RegexOptions.None, scope);
+        var results = new List<TemplatePlaceholder>(matches.Count);
+        foreach (var m in matches)
+        {
+            var classified = Classify(m.Text);
+            if (classified is not PlaceholderKind kind) continue;
+            if (!kinds.HasFlag(KindToFlag(kind))) continue;
+            results.Add(new TemplatePlaceholder
+            {
+                Match = m,
+                Kind = kind,
+                Hint = kind == PlaceholderKind.Instruction ? ExtractHint(m.Text) : null,
+            });
+        }
+        return results;
+
+        static PlaceholderKind? Classify(string text)
+        {
+            var inner = text.StartsWith('$') ? text[2..^1] : text[1..^1];
+
+            // BlankFill: 2+ underscores anywhere inside (so "[__]" director-count slots,
+            // "[___ times]" unit-suffix slots, and "[________ __, 20__]" date-shaped
+            // slots all qualify). Tighter than "any underscore" to avoid false positives
+            // on quoted identifiers like "[a_b]". Trade-off in writeup at the FindPlaceholders
+            // section of docs/architecture/docx_mutation_api.md.
+            if (inner.Count(c => c == '_') >= 2) return PlaceholderKind.BlankFill;
+
+            // Instruction: italicized (asterisk-wrapped) text, or starts with the
+            // drafter verbs "insert" / "specify". Conservative leading-word check
+            // so general prose in brackets doesn't mis-classify.
+            if (inner.StartsWith('*') && inner.EndsWith('*') && inner.Length > 2) return PlaceholderKind.Instruction;
+            var firstWord = inner.TakeWhile(char.IsLetter).ToArray();
+            var w = new string(firstWord).ToLowerInvariant();
+            if (w is "insert" or "specify") return PlaceholderKind.Instruction;
+
+            return PlaceholderKind.AlternativeClause;
+        }
+
+        static string ExtractHint(string text)
+        {
+            var inner = text.StartsWith('$') ? text[2..^1] : text[1..^1];
+            // Strip a single pair of surrounding asterisks (italic markers from the projector).
+            if (inner.StartsWith('*') && inner.EndsWith('*') && inner.Length > 2)
+                inner = inner[1..^1];
+            return inner.Trim();
+        }
+
+        static PlaceholderKinds KindToFlag(PlaceholderKind k) => k switch
+        {
+            PlaceholderKind.BlankFill => PlaceholderKinds.BlankFill,
+            PlaceholderKind.AlternativeClause => PlaceholderKinds.AlternativeClause,
+            PlaceholderKind.Instruction => PlaceholderKinds.Instruction,
+            _ => 0,
+        };
     }
 
     /// <summary>
