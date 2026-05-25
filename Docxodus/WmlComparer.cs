@@ -5155,10 +5155,17 @@ namespace Docxodus
                             .Skip(countCommonAtBeginning)
                             .ToArray();
 
-                        var lastContentAtomLeft = unknown.ComparisonUnitArray1[countCommonAtBeginning - 1].DescendantContentAtoms().FirstOrDefault();
-                        var lastContentAtomRight = unknown.ComparisonUnitArray2[countCommonAtBeginning - 1].DescendantContentAtoms().FirstOrDefault();
+                        var boundaryLeft = unknown.ComparisonUnitArray1[countCommonAtBeginning - 1];
+                        var boundaryRight = unknown.ComparisonUnitArray2[countCommonAtBeginning - 1];
+                        var lastContentAtomLeft = boundaryLeft?.Contents == null
+                            ? null
+                            : boundaryLeft.DescendantContentAtoms().FirstOrDefault();
+                        var lastContentAtomRight = boundaryRight?.Contents == null
+                            ? null
+                            : boundaryRight.DescendantContentAtoms().FirstOrDefault();
 
-                        if (lastContentAtomLeft.ContentElement.Name != W.pPr && lastContentAtomRight.ContentElement.Name != W.pPr)
+                        if (lastContentAtomLeft != null && lastContentAtomRight != null &&
+                            lastContentAtomLeft.ContentElement.Name != W.pPr && lastContentAtomRight.ContentElement.Name != W.pPr)
                         {
                             var split1 = SplitAtParagraphMark(remainingInLeft);
                             var split2 = SplitAtParagraphMark(remainingInRight);
@@ -5561,7 +5568,10 @@ namespace Docxodus
             int i;
             for (i = 0; i < cua.Length; i++)
             {
-                var atom = cua[i].DescendantContentAtoms().FirstOrDefault();
+                var unit = cua[i];
+                if (unit == null || unit.Contents == null)
+                    continue;
+                var atom = unit.DescendantContentAtoms().FirstOrDefault();
                 if (atom != null && atom.ContentElement.Name == W.pPr)
                     break;
             }
@@ -7417,8 +7427,16 @@ namespace Docxodus
                         return newListOfCorrelatedSequence;
                     }
 
-                    var lastContentAtomLeft = unknown.ComparisonUnitArray1.Select(cu => cu.DescendantContentAtoms().Last()).LastOrDefault();
-                    var lastContentAtomRight = unknown.ComparisonUnitArray2.Select(cu => cu.DescendantContentAtoms().Last()).LastOrDefault();
+                    var lastContentAtomLeft = unknown.ComparisonUnitArray1
+                        .Where(cu => cu != null && cu.Contents != null)
+                        .Select(cu => cu.DescendantContentAtoms().LastOrDefault())
+                        .Where(a => a != null)
+                        .LastOrDefault();
+                    var lastContentAtomRight = unknown.ComparisonUnitArray2
+                        .Where(cu => cu != null && cu.Contents != null)
+                        .Select(cu => cu.DescendantContentAtoms().LastOrDefault())
+                        .Where(a => a != null)
+                        .LastOrDefault();
                     if (lastContentAtomLeft != null && lastContentAtomRight != null)
                     {
                         if (lastContentAtomLeft.ContentElement.Name == W.pPr &&
