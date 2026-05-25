@@ -1344,6 +1344,55 @@ public sealed class DocxSession : IDisposable
 
     // ─── Tier C: formatting ──────────────────────────────────────────────
 
+    /// <summary>
+    /// Convenience: find <paramref name="substring"/> in the anchor's flat text and apply
+    /// <paramref name="op"/> to the first occurrence. Eliminates the offset-arithmetic
+    /// trap where an auto-number prefix shifts the visible text vs the run-text indices
+    /// the underlying <see cref="ApplyFormat(string, CharSpan?, FormatOp)"/> overload
+    /// expects — see issue #138. Named distinctly (rather than overloading) so existing
+    /// <c>ApplyFormat(anchor, null, op)</c> calls (whole-paragraph format) stay
+    /// unambiguous to the C# overload resolver.
+    /// </summary>
+    public EditResult ApplyFormatToSubstring(string anchorId, string substring, FormatOp op)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (string.IsNullOrEmpty(substring))
+            return EditResult.Fail(EditErrorCode.MalformedMarkdown, "substring must be non-empty", anchorId);
+
+        var target = FindAnchor(anchorId);
+        if (target is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
+        if (target.Anchor.Kind is not ("p" or "h" or "li"))
+            return EditResult.Fail(EditErrorCode.AnchorWrongKind,
+                $"ApplyFormat requires a paragraph/heading/list-item anchor; got kind={target.Anchor.Kind}", anchorId);
+
+        var element = target.Resolve(_doc!);
+        if (element is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", anchorId);
+
+        var map = Internal.RunTextMap.Build(element);
+        var idx = map.FlatText.IndexOf(substring, StringComparison.Ordinal);
+        if (idx < 0) return EditResult.Fail(EditErrorCode.OffsetOutOfRange,
+            $"substring not found in anchor's text", anchorId);
+
+        return ApplyFormat(anchorId, new CharSpan(idx, substring.Length), op);
+    }
+
+    /// <summary>
+    /// Convenience: apply <paramref name="op"/> to the exact span covered by a
+    /// <see cref="TextMatch"/> (typically from <see cref="Grep"/>). The match's
+    /// <see cref="TextMatch.EnclosingAnchor"/> + <see cref="TextMatch.Span"/> address
+    /// one specific occurrence even when several identical needles share the same block.
+    /// </summary>
+    public EditResult ApplyFormat(TextMatch match, FormatOp op)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (match is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "match is null");
+        return ApplyFormat(
+            match.EnclosingAnchor.Anchor.Id,
+            new CharSpan(match.Span.Start, match.Span.Length),
+            op);
+    }
+
     public EditResult ApplyFormat(string anchorId, CharSpan? span, FormatOp op)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");

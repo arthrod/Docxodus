@@ -52,6 +52,18 @@ export enum TrackedChangeMode {
 }
 
 /**
+ * How empty paragraphs are rendered. Mirrors the .NET `Docxodus.EmptyParagraphMode` enum.
+ */
+export enum EmptyParagraphMode {
+  /** Default: emit the anchor on its own line (`{#p:body:UNID}\n`). */
+  AnchorOnly = 0,
+  /** Tag the empty paragraph visibly so agents can pattern-match (`{#p:body:UNID} ∅`). */
+  MarkedEmpty = 1,
+  /** Skip empty paragraphs entirely — they don't appear in the markdown or the anchor index. */
+  Suppress = 2,
+}
+
+/**
  * Settings controlling the markdown projection. Mirrors the .NET
  * `WmlToMarkdownConverterSettings` class — see `docs/architecture/markdown_projection.md`.
  */
@@ -63,6 +75,7 @@ export interface MarkdownProjectionSettings {
   tableInlineCellMax?: number;
   trackedChanges?: TrackedChangeMode;
   resolveNumbering?: boolean;
+  emptyParagraphs?: EmptyParagraphMode;
 }
 
 /**
@@ -661,6 +674,7 @@ export interface DocxodusWasmExports {
     SplitParagraph: (handle: number, anchor: string, offset: number) => string;
     MergeParagraphs: (handle: number, first: string, second: string) => string;
     ApplyFormat: (handle: number, anchor: string, spanJson: string, opJson: string) => string;
+    ApplyFormatBySubstring: (handle: number, anchor: string, substring: string, opJson: string) => string;
     SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
     SetListLevel: (handle: number, anchor: string, delta: number) => string;
     RemoveListMembership: (handle: number, anchor: string) => string;

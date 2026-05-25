@@ -886,6 +886,7 @@ public partial class DocumentConverter
                 TableInlineCellMax = dto.TableInlineCellMax,
                 TrackedChanges = (TrackedChangeMode)dto.TrackedChanges,
                 ResolveNumbering = dto.ResolveNumbering,
+                EmptyParagraphs = (EmptyParagraphMode)dto.EmptyParagraphs,
             };
 
             var wmlDoc = new WmlDocument("document.docx", docxBytes);

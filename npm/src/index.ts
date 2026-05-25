@@ -88,6 +88,7 @@ import {
   AnchorRenderMode,
   TableRenderMode,
   TrackedChangeMode,
+  EmptyParagraphMode,
   DocumentElementType,
   ComparisonLogLevel,
   ComparisonLogCodes,
@@ -184,6 +185,7 @@ export {
   AnchorRenderMode,
   TableRenderMode,
   TrackedChangeMode,
+  EmptyParagraphMode,
   DocumentElementType,
   ComparisonLogLevel,
   ComparisonLogCodes,
@@ -1391,6 +1393,7 @@ export async function convertWmlToMarkdown(
     TableInlineCellMax: settings.tableInlineCellMax ?? 80,
     TrackedChanges: settings.trackedChanges ?? TrackedChangeMode.Accept,
     ResolveNumbering: settings.resolveNumbering ?? true,
+    EmptyParagraphs: settings.emptyParagraphs ?? EmptyParagraphMode.AnchorOnly,
   });
 
   const result = exports.DocumentConverter.ConvertWmlToMarkdown(bytes, settingsJson);

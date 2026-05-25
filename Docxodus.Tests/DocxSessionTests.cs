@@ -1193,6 +1193,46 @@ public class DocxSessionTests
         Assert.Empty(s.FindPlaceholders());
     }
 
+    // ─── Phase 13: ApplyFormat substring + TextMatch overloads (#138) ────
+
+    [Fact]
+    public void DS130_ApplyFormat_BySubstring_FormatsFirstOccurrence()
+    {
+        // Avoids the offset-arithmetic trap from #138: caller passes the visible
+        // text they want bolded; we resolve to a CharSpan internally.
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var first = s.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Kind == "p").Anchor.Id;
+
+        var r = s.ApplyFormatToSubstring(first, "faraway", new FormatOp { Bold = true });
+        Assert.True(r.Success, r.Error?.Message);
+        // After projection, "faraway" wraps in **…** markers.
+        Assert.Contains("**faraway**", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS131_ApplyFormat_BySubstring_NotFound_ReturnsOffsetOutOfRange()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var first = s.Project().AnchorIndex.Values.First(t => t.Anchor.Kind == "p").Anchor.Id;
+        var r = s.ApplyFormatToSubstring(first, "this-string-not-in-doc", new FormatOp { Bold = true });
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.OffsetOutOfRange, r.Error!.Code);
+    }
+
+    [Fact]
+    public void DS132_ApplyFormat_FromTextMatch_AddressesExactSpan()
+    {
+        // The TextMatch overload is the pair to ReplaceMatch — same shape: take the
+        // exact (anchor, span) from a Grep result and apply formatting to it.
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var match = s.Grep("faraway").Single();
+
+        var r = s.ApplyFormat(match, new FormatOp { Italic = true });
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains("*faraway*", s.Project().Markdown);
+    }
+
     [Fact]
     public void DS126_FindPlaceholders_ProvidesEnoughInfoForReplaceMatch()
     {

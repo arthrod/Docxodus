@@ -72,6 +72,27 @@ export class DocxSession {
     return JSON.parse(this.wasm.ApplyFormat(this.handle, anchorId, spanJson, JSON.stringify(op))) as EditResult;
   }
 
+  /**
+   * Convenience: find `substring` in the anchor's flat text and apply `op` to the
+   * first occurrence. Eliminates the offset-arithmetic trap from #138 — caller passes
+   * the visible text they want formatted, the WASM-side resolves it to a CharSpan.
+   */
+  applyFormatBySubstring(anchorId: string, substring: string, op: FormatOp): EditResult {
+    return JSON.parse(
+      this.wasm.ApplyFormatBySubstring(this.handle, anchorId, substring, JSON.stringify(op))
+    ) as EditResult;
+  }
+
+  /**
+   * Convenience: apply `op` to the exact span of a {@link TextMatch} (typically from
+   * {@link grep}). The match's `enclosingAnchor.id` + `span` address one specific
+   * occurrence even when several identical needles share the same block.
+   */
+  applyFormatToMatch(match: TextMatch, op: FormatOp): EditResult {
+    const span: CharSpan = { start: match.span.start, length: match.span.length };
+    return this.applyFormat(match.enclosingAnchor.id, span, op);
+  }
+
   setParagraphStyle(anchorId: string, styleId: string): EditResult {
     return JSON.parse(this.wasm.SetParagraphStyle(this.handle, anchorId, styleId)) as EditResult;
   }

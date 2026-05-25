@@ -109,6 +109,29 @@ public class WmlToMarkdownConverterSettings
     /// <c>docxodus://img/{unid}</c>; callers that want data URIs or HTTP URLs can override.
     /// </summary>
     public Func<ImageInfo, string>? ImageUriBuilder { get; set; }
+
+    /// <summary>
+    /// How empty paragraphs (paragraphs with no visible runs — Word's "spacer" paragraphs)
+    /// render in the projection. Default <see cref="EmptyParagraphMode.AnchorOnly"/>
+    /// preserves the addressable anchor on its own line so callers can target the spacer
+    /// for edits; <see cref="EmptyParagraphMode.MarkedEmpty"/> tags it visibly for agents
+    /// pattern-matching; <see cref="EmptyParagraphMode.Suppress"/> drops empty paragraphs
+    /// entirely (and from the anchor index) for callers that want a denser projection.
+    /// </summary>
+    public EmptyParagraphMode EmptyParagraphs { get; set; } = EmptyParagraphMode.AnchorOnly;
+}
+
+/// <summary>How empty paragraphs are rendered by <see cref="WmlToMarkdownConverter"/>.</summary>
+public enum EmptyParagraphMode
+{
+    /// <summary>Default: emit <c>{#p:body:UNID}\n</c> (anchor + newline, no body text).</summary>
+    AnchorOnly,
+
+    /// <summary>Emit <c>{#p:body:UNID} ∅\n</c> so agents can pattern-match empty paragraphs.</summary>
+    MarkedEmpty,
+
+    /// <summary>Skip empty paragraphs entirely — they don't appear in the markdown or the anchor index.</summary>
+    Suppress,
 }
 
 /// <summary>
@@ -290,6 +313,14 @@ public static class WmlToMarkdownConverter
                 if (kind == null) continue;
                 var unid = (string?)el.Attribute(PtOpenXml.Unid);
                 if (unid == null) continue;
+                // Suppress-mode: drop empty paragraphs from the AnchorIndex too,
+                // so callers iterating the index don't see anchors that have no
+                // corresponding line in the projection. Mirrors what EmitParagraph does.
+                if (settings.EmptyParagraphs == EmptyParagraphMode.Suppress
+                    && el.Name == W.p
+                    && kind is "p" or "h" or "li"
+                    && !el.Descendants(W.t).Any(t => !string.IsNullOrEmpty((string)t)))
+                    continue;
                 var id = $"{kind}:{scope.Name}:{unid}";
                 if (index.ContainsKey(id)) continue;
                 var anchor = new Anchor(id, kind, scope.Name, unid);
@@ -594,19 +625,52 @@ public static class WmlToMarkdownConverter
             return;
         }
 
+        // Empty-paragraph handling honors EmptyParagraphMode. Detected by "no visible
+        // inline content emitted between the anchor token and the line terminator."
+        var modeForEmpty = ctx.Settings.EmptyParagraphs;
+        if (modeForEmpty == EmptyParagraphMode.Suppress && !HasVisibleInlineContent(p, ctx))
+        {
+            // Skip the paragraph entirely. Section breaks still need to surface
+            // (they're metadata, not content) so emit them even when the spacer is dropped.
+            EmitInlineSectionBreak(p, ctx);
+            return;
+        }
+
         var beforeContent = ctx.Sb.Length;
         ctx.Sb.Append(anchor);
         var afterAnchor = ctx.Sb.Length;
         EmitInlineRuns(p, ctx);
-        // If the paragraph had no visible runs, the anchor's trailing separator space is
-        // dangling — strip it so the line is `{#anchor}\n` instead of `{#anchor} \n`.
-        if (ctx.Sb.Length == afterAnchor && afterAnchor > beforeContent && ctx.Sb[ctx.Sb.Length - 1] == ' ')
+        // If the paragraph had no visible runs, either tag it with the marked-empty
+        // sentinel (∅) or strip the anchor's dangling trailing separator space.
+        if (ctx.Sb.Length == afterAnchor && afterAnchor > beforeContent)
         {
-            ctx.Sb.Length--;
+            if (modeForEmpty == EmptyParagraphMode.MarkedEmpty)
+            {
+                ctx.Sb.Append('∅');
+            }
+            else if (ctx.Sb[ctx.Sb.Length - 1] == ' ')
+            {
+                ctx.Sb.Length--;
+            }
         }
         ctx.Sb.AppendLine();
         ctx.Sb.AppendLine();
         EmitInlineSectionBreak(p, ctx);
+    }
+
+    /// <summary>True when the paragraph would emit any visible inline content under
+    /// the current tracked-change mode. Used by <see cref="EmptyParagraphMode.Suppress"/>
+    /// to decide whether to skip a paragraph entirely.</summary>
+    private static bool HasVisibleInlineContent(XElement p, EmitContext ctx)
+    {
+        foreach (var (_, runs) in GroupInlineRuns(p))
+        {
+            foreach (var r in runs)
+            {
+                if (r.Descendants(W.t).Any(t => !string.IsNullOrEmpty((string)t))) return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>

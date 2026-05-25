@@ -851,4 +851,58 @@ public class WmlToMarkdownConverterTests
         }
         return new WmlDocument("test.docx", ms.ToArray());
     }
+
+    // ─── EmptyParagraphMode (#135) ────────────────────────────────────
+
+    private static WmlDocument BuildDocWithSpacerParagraph()
+    {
+        // First paragraph has visible text, second is an empty spacer, third has text again.
+        // The spacer is the test target: an empty <w:p> with no runs at all.
+        return BuildDoc(body =>
+        {
+            body.Append(new Paragraph(new Run(new Text("Before."))));
+            body.Append(new Paragraph());          // <-- the empty spacer
+            body.Append(new Paragraph(new Run(new Text("After."))));
+        });
+    }
+
+    [Fact]
+    public void MD030_EmptyParagraph_AnchorOnly_Default()
+    {
+        var md = WmlToMarkdownConverter.Convert(BuildDocWithSpacerParagraph(),
+            new WmlToMarkdownConverterSettings()).Markdown;
+
+        // Default mode: the spacer appears as a bare anchor line with no text and no marker.
+        Assert.Matches(@"\{#p:body:[0-9a-f]{32}\}\n", md);
+        Assert.DoesNotContain('∅', md);
+    }
+
+    [Fact]
+    public void MD031_EmptyParagraph_MarkedEmpty()
+    {
+        var md = WmlToMarkdownConverter.Convert(BuildDocWithSpacerParagraph(),
+            new WmlToMarkdownConverterSettings { EmptyParagraphs = EmptyParagraphMode.MarkedEmpty }).Markdown;
+
+        // Marked mode: the spacer ends with `∅`.
+        Assert.Matches(@"\{#p:body:[0-9a-f]{32}\}\s*∅", md);
+    }
+
+    [Fact]
+    public void MD032_EmptyParagraph_Suppress_DropsFromMarkdownAndIndex()
+    {
+        var proj = WmlToMarkdownConverter.Convert(BuildDocWithSpacerParagraph(),
+            new WmlToMarkdownConverterSettings { EmptyParagraphs = EmptyParagraphMode.Suppress });
+
+        // Only the two text-bearing paragraphs survive in the anchor index.
+        var bodyParagraphs = proj.AnchorIndex.Values
+            .Where(t => t.Anchor.Kind == "p" && t.Anchor.Scope == "body")
+            .ToList();
+        Assert.Equal(2, bodyParagraphs.Count);
+
+        // Markdown contains Before. and After. but no orphan {#p:body:…} bare line
+        // between them (the spacer is gone, so no anchor for it appears anywhere).
+        Assert.Contains("Before.", proj.Markdown);
+        Assert.Contains("After.", proj.Markdown);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(proj.Markdown, @"\{#p:body:[0-9a-f]{32}\}").Count);
+    }
 }

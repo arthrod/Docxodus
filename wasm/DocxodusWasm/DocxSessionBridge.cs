@@ -75,6 +75,15 @@ public static partial class DocxSessionBridge
         return Serialize(Get(h).ApplyFormat(anchor, span, op));
     }
 
+    /// <summary>
+    /// Bridge for the substring-targeted <see cref="DocxSession.ApplyFormat(string, string, FormatOp)"/>
+    /// overload. Lets JS callers say "bold the substring 'foo' in this paragraph" without
+    /// computing offsets — the overload finds the first occurrence and converts to a CharSpan.
+    /// </summary>
+    [JSExport]
+    public static string ApplyFormatBySubstring(int h, string anchor, string substring, string opJson) =>
+        Serialize(Get(h).ApplyFormatToSubstring(anchor, substring, ParseFormatOp(opJson)));
+
     [JSExport]
     public static string SetParagraphStyle(int h, string anchor, string styleId) =>
         Serialize(Get(h).SetParagraphStyle(anchor, styleId));

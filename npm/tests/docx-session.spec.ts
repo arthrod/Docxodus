@@ -154,6 +154,33 @@ test.describe('DocxSession (WASM bridge)', () => {
     expect(result.totalAfter).toBe(result.totalBefore - 1);
   });
 
+  test('applyFormatBySubstring resolves a visible substring to a span and formats it', async ({ page }) => {
+    const bytes = readTestFile('HC001-5DayTourPlanTemplate.docx');
+
+    const result = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const bridge = (window as any).Docxodus.DocxSessionBridge;
+      const handle = bridge.OpenSession(bin, '');
+      try {
+        // Pick a paragraph with bracketed text we know exists.
+        const placeholders = JSON.parse(bridge.FindPlaceholders(handle, 7, 1));
+        if (placeholders.length === 0) return { error: 'no placeholders' };
+        const target = placeholders[0];
+
+        // Format the placeholder text via the substring overload.
+        const r = JSON.parse(bridge.ApplyFormatBySubstring(
+          handle, target.match.enclosingAnchor.id, target.match.text, JSON.stringify({ Bold: true })
+        ));
+        return { rSuccess: r.success, rError: r.error };
+      } finally {
+        bridge.CloseSession(handle);
+      }
+    }, Array.from(bytes));
+
+    expect(result.error).toBeUndefined();
+    expect(result.rSuccess).toBe(true);
+  });
+
   test('findPlaceholders enumerates and classifies template slots', async ({ page }) => {
     const bytes = readTestFile('HC001-5DayTourPlanTemplate.docx');
 

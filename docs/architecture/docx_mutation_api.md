@@ -200,6 +200,20 @@ Two caveats to internalize while [#132](https://github.com/JSv4/Docxodus/issues/
 
 The agent's prompt should also be aware: it can call `AnnotationManager.GetAnnotations(doc)` once at the start of a session to enumerate available labels (e.g., "you can target: INDEMNIFICATION, TERMINATION, GOVERNING_LAW") and present those as tools rather than asking the LLM to discover them from text.
 
+## ApplyFormat — substring and TextMatch overloads
+
+Three entry points for character-formatting (bold/italic/underline/strike/code/color/runStyle):
+
+```
+session.ApplyFormat(anchor, span, op)              // explicit CharSpan (use null for whole paragraph)
+session.ApplyFormatToSubstring(anchor, str, op)    // find first occurrence of str, format it
+session.ApplyFormat(textMatch, op)                 // exact span from a Grep result
+```
+
+The substring + `TextMatch` overloads exist because computing a `CharSpan` by hand is fragile when an auto-number prefix (`# Fourth The total…`) shifts the visible text relative to the run-text indices the `CharSpan` overload expects — see issue #138. Both convenience overloads just resolve to a `CharSpan` and call the underlying overload.
+
+`ApplyFormatToSubstring` is named distinctly (rather than overloading) so existing `ApplyFormat(anchor, null, op)` whole-paragraph calls stay unambiguous to the C# resolver.
+
 ## FindPlaceholders — template-slot enumeration
 
 `session.FindPlaceholders(kinds?, scope?)` is a thin classifier over `Grep` for the workflow every template-filling agent eventually writes itself. It scans for `\$?\[…\]` regions and tags each one as:

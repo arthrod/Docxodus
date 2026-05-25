@@ -25,7 +25,7 @@ Anchors derive from the `Unid` system Docxodus already maintains on paragraphs a
 
 | Field | Values | Meaning |
 |---|---|---|
-| `kind` | `p`, `h`, `li`, `tbl`, `tr`, `tc`, `cmt`, `fn`, `en`, `img`, `drw`, `unk` | Element type |
+| `kind` | `p`, `h`, `li`, `tbl`, `tr`, `tc`, `cmt`, `fn`, `en`, `img`, `drw`, `sec`, `unk` | Element type |
 | `scope` | `body`, `hdr1`…`hdrN`, `ftr1`…`ftrN`, `fn`, `en`, `cmt` | Which part of the package |
 | `unid` | 8–16 hex chars | Stable element identifier |
 
@@ -66,7 +66,7 @@ Anchors appear at the start of the line they refer to (block-level) or as inline
 | `w:drawing` / `w:pict` (image) | `![alt](docxodus://img/…){#img:…}` | URL is a scheme the caller resolves; metadata accessible via anchor |
 | `w:sdt` (content control) | Rendered content, anchor on outer SDT | The SDT itself is an anchor target so callers can address "this content control" |
 | `w:ins` / `w:del` (tracked changes) | Configurable: accept, show as `{+ins+}`/`{-del-}`, or omit | Mirrors `WmlToHtmlConverter.RenderTrackedChanges` |
-| `w:sectPr` | `---` thematic break with section anchor | Sections become navigable |
+| `w:sectPr` | `---` thematic break preceded by `{#sec:scope:unid}` | Section breaks are addressable as `sec` kind — useful for "find the next section break" tooling. Today no mutation op accepts a `sec` anchor (only block-level `p`/`h`/`li`/`tbl` kinds are mutable); treat `sec` as a passive read-side marker. |
 
 Anything not in the table above renders as a single line:
 
