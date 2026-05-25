@@ -1395,6 +1395,70 @@ public class DocxSessionTests
         Assert.DoesNotContain("commentRangeEnd", bodyXml);
     }
 
+    // ─── Phase 15: WhitespaceMode + FindBy helpers + SmartQuotes (#136/#137/#140) ────
+
+    /// <summary>Single body paragraph where the only whitespace between "First" and ":" is a NBSP.</summary>
+    internal static byte[] BuildDS150_NbspFixture()
+    {
+        XNamespace W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.AddNewPart<StyleDefinitionsPart>().Styles = BuildHeadingStyles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            // The whitespace between "First" and ":" is a NON-BREAKING SPACE (U+00A0) —
+            // exactly what NVCA legal templates use for ordinal: headings. Written as an
+            // explicit escape so the source character isn't lost in editor round trips.
+            var body = new XElement(W + "body",
+                new XElement(W + "p",
+                    new XElement(W + "r",
+                        new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"),
+                            "First\u00A0: The name of this corporation."))));
+            main.PutXDocument(new XDocument(new XElement(W + "document",
+                new XAttribute(XNamespace.Xmlns + "w", W.NamespaceName),
+                body)));
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void DS150_Grep_WhitespacePreserve_DoesNotMatchSpaceWhenSourceIsNbsp()
+    {
+        // Default behavior: NBSP is preserved as-is, so a needle with regular space misses.
+        using var s = new DocxSession(BuildDS150_NbspFixture());
+        var matches = s.Grep("First :");
+        Assert.Empty(matches);
+    }
+
+    [Fact]
+    public void DS151_Grep_WhitespaceNormalize_MatchesSpaceWhenSourceIsNbsp()
+    {
+        // Normalize mode: NBSP folds to regular space so the needle hits.
+        using var s = new DocxSession(BuildDS150_NbspFixture());
+        var matches = s.Grep(
+            "First :",
+            scope: ProjectionScopes.Body,
+            whitespace: WhitespaceMode.Normalize);
+        Assert.Single(matches);
+        Assert.Equal("First :", matches[0].Text);
+    }
+
+    [Fact]
+    public void DS152_Grep_WhitespaceNormalize_FragmentSpansPointAtOriginalText()
+    {
+        // Critical correctness check: even though we MATCHED on the normalized text,
+        // the returned Span must address the same character positions in the original.
+        // Otherwise a follow-up ReplaceMatch would land in the wrong place.
+        using var s = new DocxSession(BuildDS150_NbspFixture());
+        var m = s.Grep("First :", whitespace: WhitespaceMode.Normalize).Single();
+
+        var r = s.ReplaceMatch(m, "Section 1 :");
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains("Section 1 : The name of this corporation.", s.Project().Markdown);
+    }
+
     [Fact]
     public void DS143_DeleteBlock_Footnote_UndoRestores()
     {

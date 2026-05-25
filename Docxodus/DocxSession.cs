@@ -16,6 +16,21 @@ namespace Docxodus;
 
 public enum Position { Before, After }
 
+/// <summary>
+/// How <see cref="DocxSession.Grep"/> and the <c>FindBy*</c> helpers treat Unicode
+/// whitespace variants (NBSP, narrow NBSP, thin space) when matching. Word documents
+/// routinely use NBSP between ordinals and colons (<c>First<NBSP>:</c>) so a needle
+/// written with regular spaces silently misses without normalization — see issue #136.
+/// </summary>
+public enum WhitespaceMode
+{
+    /// <summary>Default: match against the document's original characters; NBSP stays NBSP.</summary>
+    Preserve,
+
+    /// <summary>Map U+00A0 / U+202F / U+2009 to ASCII space (U+0020) before matching.</summary>
+    Normalize,
+}
+
 public readonly record struct CharSpan(int Start, int Length);
 
 public sealed record FormatOp
@@ -310,7 +325,8 @@ public sealed class DocxSession : IDisposable
         string pattern,
         System.Text.RegularExpressions.RegexOptions options = System.Text.RegularExpressions.RegexOptions.None,
         ProjectionScopes scope = ProjectionScopes.Body,
-        int contextChars = 40)
+        int contextChars = 40,
+        WhitespaceMode whitespace = WhitespaceMode.Preserve)
     {
         ThrowIfDisposed();
         if (string.IsNullOrEmpty(pattern)) return Array.Empty<TextMatch>();
@@ -348,7 +364,16 @@ public sealed class DocxSession : IDisposable
             // doesn't have to walk back up to the root annotation per run.
             var ownerPart = ResolvePart(target.PartUri);
 
-            foreach (System.Text.RegularExpressions.Match m in regex.Matches(map.FlatText))
+            // For Normalize mode: match against a whitespace-normalized COPY of the
+            // flat text while keeping the segment offset map pointing at the original
+            // positions. Match indices apply unchanged because the substitutions are
+            // 1:1 (NBSP → space, narrow-NBSP → space, thin-space → space) — same
+            // character count, just different code points.
+            var matchText = whitespace == WhitespaceMode.Normalize
+                ? NormalizeWhitespace(map.FlatText)
+                : map.FlatText;
+
+            foreach (System.Text.RegularExpressions.Match m in regex.Matches(matchText))
             {
                 if (!m.Success || m.Length == 0) continue;
 
@@ -679,6 +704,28 @@ public sealed class DocxSession : IDisposable
                 new XAttribute(XNamespace.Xml + "space", "preserve"),
                 newText));
         }
+    }
+
+    /// <summary>
+    /// Maps the Unicode whitespace variants Word documents commonly use (NBSP, narrow
+    /// NBSP, thin space) to ASCII space. Each substitution is one-character-for-one,
+    /// so character offsets in the result map 1:1 to the input.
+    /// </summary>
+    private static string NormalizeWhitespace(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        var sb = new System.Text.StringBuilder(text.Length);
+        foreach (var c in text)
+        {
+            sb.Append(c switch
+            {
+                ' ' => ' ', // non-breaking space
+                ' ' => ' ', // narrow no-break space
+                ' ' => ' ', // thin space
+                _ => c,
+            });
+        }
+        return sb.ToString();
     }
 
     private static bool ScopeMatches(string anchorScope, ProjectionScopes filter)
