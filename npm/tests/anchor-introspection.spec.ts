@@ -158,4 +158,60 @@ test.describe('anchor-introspection (WASM bridge)', () => {
       `fnPreviews=${JSON.stringify(result.fnPreviews)}`,
     ).toBe(true);
   });
+
+  test('session Project() serializer emits textPreview on anchorIndex entries', async ({ page }) => {
+    // Follow-up regression: DocxSessionBridge.SerializeProjection (the JSExport
+    // backing session.project() / bridge.Project(handle)) was originally a third
+    // serialization path that the Unit D textPreview rollout missed. This test
+    // pins the fix — every body p/h/li entry in proj.anchorIndex must carry a
+    // string `textPreview`, and at least one must be non-empty for HC031 which
+    // has real body content.
+    const bytes = readTestFile('HC031-Complicated-Document.docx');
+
+    const result = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const bridge = (window as any).Docxodus.DocxSessionBridge;
+      const handle = bridge.OpenSession(bin, '');
+      try {
+        const proj = JSON.parse(bridge.Project(handle));
+        const entries = Object.entries(proj.anchorIndex) as [string, any][];
+        const bodyBlocks = entries
+          .map(([id, t]) => ({ id, ...t }))
+          .filter(t => t.scope === 'body' && ['p', 'h', 'li'].includes(t.kind));
+        const allHaveStringPreview = bodyBlocks.every(
+          t => typeof t.textPreview === 'string',
+        );
+        const nonEmptyPreviews = bodyBlocks
+          .map(t => t.textPreview)
+          .filter((p: string) => typeof p === 'string' && p.length > 0);
+        return {
+          bodyBlockCount: bodyBlocks.length,
+          allHaveStringPreview,
+          nonEmptyPreviewCount: nonEmptyPreviews.length,
+          sampleEntry: bodyBlocks[0] ?? null,
+          previewSamples: nonEmptyPreviews.slice(0, 3),
+        };
+      } finally {
+        bridge.CloseSession(handle);
+      }
+    }, Array.from(bytes));
+
+    expect(result.bodyBlockCount).toBeGreaterThan(0);
+    expect(
+      result.allHaveStringPreview,
+      `sampleEntry=${JSON.stringify(result.sampleEntry)}`,
+    ).toBe(true);
+    expect(
+      result.nonEmptyPreviewCount,
+      `previewSamples=${JSON.stringify(result.previewSamples)}`,
+    ).toBeGreaterThan(0);
+    // The sample entry must conform to the documented anchorIndex value shape:
+    // partUri, unid, kind, scope, textPreview — all strings.
+    expect(result.sampleEntry).not.toBeNull();
+    expect(typeof result.sampleEntry!.partUri).toBe('string');
+    expect(typeof result.sampleEntry!.unid).toBe('string');
+    expect(typeof result.sampleEntry!.kind).toBe('string');
+    expect(typeof result.sampleEntry!.scope).toBe('string');
+    expect(typeof result.sampleEntry!.textPreview).toBe('string');
+  });
 });

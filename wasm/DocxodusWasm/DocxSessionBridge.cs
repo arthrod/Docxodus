@@ -627,6 +627,7 @@ public static partial class DocxSessionBridge
               .Append(",\"unid\":").Append(JsonString(kv.Value.Unid))
               .Append(",\"kind\":").Append(JsonString(kv.Value.Anchor.Kind))
               .Append(",\"scope\":").Append(JsonString(kv.Value.Anchor.Scope))
+              .Append(",\"textPreview\":").Append(JsonString(kv.Value.TextPreview))
               .Append('}');
         }
         sb.Append("}}");

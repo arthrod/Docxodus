@@ -798,6 +798,7 @@ export interface DocxSessionProjection {
     unid: string;
     kind: string;
     scope: string;
+    textPreview: string;
   }>;
 }
 
