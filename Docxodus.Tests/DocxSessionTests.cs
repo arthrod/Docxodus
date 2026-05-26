@@ -412,6 +412,86 @@ public class DocxSessionTests
         }
     }
 
+    /// <summary>
+    /// Build a one-paragraph doc whose only paragraph has a numbered Heading2 style.
+    /// The numbering renders as "1." so callers can verify AutoNumberPrefix resolution.
+    /// </summary>
+    internal static byte[] BuildNumberedHeadingDoc(string text = "The total number of shares")
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+            mainPart.Document = new Document(new Body());
+            var body = mainPart.Document.Body!;
+
+            var stylesPart = mainPart.AddNewPart<StyleDefinitionsPart>();
+            stylesPart.Styles = new Styles(
+                new Style { Type = StyleValues.Paragraph, StyleId = "Heading2", StyleName = new StyleName { Val = "heading 2" } });
+            mainPart.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            var numPart = mainPart.AddNewPart<NumberingDefinitionsPart>();
+            numPart.Numbering = new Numbering(
+                new AbstractNum(
+                    new Level(
+                        new NumberingFormat { Val = NumberFormatValues.Decimal },
+                        new LevelText { Val = "%1." },
+                        new StartNumberingValue { Val = 1 })
+                    { LevelIndex = 0 })
+                { AbstractNumberId = 1 },
+                new NumberingInstance(new AbstractNumId { Val = 1 }) { NumberID = 1 });
+
+            var pPr = new ParagraphProperties(
+                new ParagraphStyleId { Val = "Heading2" },
+                new NumberingProperties(
+                    new NumberingLevelReference { Val = 0 },
+                    new NumberingId { Val = 1 }));
+            body.Append(new Paragraph(pPr, new Run(new Text(text))));
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void DS222_AnchorTarget_AutoNumberPrefix_ResolvedForNumberedHeading()
+    {
+        using var session = new DocxSession(BuildNumberedHeadingDoc());
+        var projection = session.Project();
+        var target = projection.AnchorIndex.Values
+            .Single(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "h");
+        Assert.Equal("1.", target.AutoNumberPrefix);
+        Assert.Equal("The total number of shares", target.TextPreview);
+        Assert.Equal("1. The total number of shares", target.FullText);
+    }
+
+    [Fact]
+    public void DS222a_AnchorInfo_CarriesAutoNumberPrefix()
+    {
+        // GetAnchorInfo() must surface the resolved prefix all the way to the
+        // public API so callers don't need to walk AnchorIndex themselves.
+        using var session = new DocxSession(BuildNumberedHeadingDoc("My heading"));
+        var projection = session.Project();
+        var target = projection.AnchorIndex.Values
+            .Single(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "h");
+        var info = session.GetAnchorInfo(target.Anchor.Id);
+        Assert.NotNull(info);
+        Assert.Equal("1.", info!.AutoNumberPrefix);
+        Assert.Equal("1. My heading", info.FullText);
+    }
+
+    [Fact]
+    public void DS222b_AnchorTarget_AutoNumberPrefix_NullForUnnumberedParagraph()
+    {
+        // A plain paragraph without w:numPr has no prefix and FullText == TextPreview.
+        using var session = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var projection = session.Project();
+        foreach (var t in projection.AnchorIndex.Values
+                      .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p"))
+        {
+            Assert.Null(t.AutoNumberPrefix);
+            Assert.Equal(t.TextPreview, t.FullText);
+        }
+    }
+
     [Fact]
     public void DS230_ReplaceInner_StripsBracketsKeepsPrefix()
     {
@@ -536,6 +616,24 @@ public class DocxSessionTests
         var projection = session.Project();
         Assert.Contains("share is 0.20.", projection.Markdown);
         Assert.DoesNotContain("$0.20", projection.Markdown);
+    }
+
+    [Fact]
+    public void DS244a_FillPlaceholders_DefaultKindsVisitsAlternativeClauses()
+    {
+        // After the FillOptions.Kinds default change, the picker should be invoked
+        // for AlternativeClause placeholders too — without the caller needing to
+        // opt in via Kinds = All. Picker that unwraps every bracketed match should
+        // strip every alternative in one pass over BuildDocWithBracketPlaceholders.
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var result = session.FillPlaceholders(p => p.Kind == PlaceholderKind.AlternativeClause
+            ? p.Match.Text.Trim('[', ']')
+            : null);
+        Assert.True(result.Filled >= 1, "Expected at least one AlternativeClause unwrapped");
+
+        // No AlternativeClause matches should remain after convergence.
+        var leftover = session.FindPlaceholders(PlaceholderKinds.AlternativeClause);
+        Assert.Empty(leftover);
     }
 
     [Fact]
@@ -2701,6 +2799,164 @@ public class DocxSessionTests
         Assert.DoesNotContain("para 1.A.1", afterMd);
         Assert.Contains("Section Two", afterMd);
         Assert.Contains("para 2.1", afterMd);
+    }
+
+    // ─── GetEditSummary (issue #166 — DS280-DS283) ────────────────────────
+
+    [Fact]
+    public void DS280_GetEditSummary_CountsPlaceholdersOnUneditedDoc()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var summary = session.GetEditSummary();
+        Assert.True(summary.RemainingPlaceholders.Count >= 4);
+        Assert.True(summary.TotalAnchors > 0);
+    }
+
+    [Fact]
+    public void DS280b_GetEditSummary_BareUnderscoresExcludeBracketPlaceholders()
+    {
+        // BuildDocWithBracketPlaceholders contains "[_____]" and "[____________]"
+        // — both are bracketed placeholders, not bare underscore runs.
+        // EditSummary.BareUnderscoreRuns must be empty for this doc.
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var summary = session.GetEditSummary();
+        Assert.Empty(summary.BareUnderscoreRuns);
+    }
+
+    [Fact]
+    public void DS280c_GetEditSummary_BareUnderscoresPositiveCase()
+    {
+        // A doc with both a bare ____ and a bracketed [___] — only the bare run should match.
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Document(new Body(
+                new Paragraph(new Run(new Text("Fill ____ here. Also [___] should not count.")))));
+        }
+        using var session = new DocxSession(ms.ToArray());
+        var summary = session.GetEditSummary();
+        Assert.Single(summary.BareUnderscoreRuns);   // exactly the bare ____
+    }
+
+    [Fact]
+    public void DS281_GetEditSummary_RemainingPlaceholdersShrinksAfterFill()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var before = session.GetEditSummary().RemainingPlaceholders.Count;
+        var result = session.FillPlaceholders(p => "FILLED", new FillOptions
+        {
+            Kinds = PlaceholderKinds.BlankFill,
+        });
+        Assert.True(result.Filled > 0);
+        var after = session.GetEditSummary().RemainingPlaceholders.Count;
+        Assert.True(after < before, $"expected after < before; got after={after} before={before}");
+    }
+
+    [Fact]
+    public void DS282_RemainingPlaceholders_MatchesFindPlaceholders()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var fromAlias = session.RemainingPlaceholders().Count;
+        var fromCanonical = session.FindPlaceholders().Count;
+        Assert.Equal(fromCanonical, fromAlias);
+    }
+
+    [Fact]
+    public void DS283_GetEditSummary_FootnoteCountsExcludeBoilerplate()
+    {
+        using var session = new DocxSession(BuildDocWithFootnotes());
+        var summary = session.GetEditSummary();
+        Assert.Equal(1, summary.FootnoteCount);
+        Assert.Equal(1, summary.InlineFootnoteRefCount);
+    }
+
+    // ─── GetDiff (issue #166 — DS284-DS289) ───────────────────────────────
+
+    [Fact]
+    public void DS284_GetDiff_OnUneditedDoc_IsEmptyArray()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var diffJson = session.GetDiff();
+        // JSON empty array (no mutations have happened).
+        Assert.Equal("[]", diffJson);
+    }
+
+    [Fact]
+    public void DS285_GetDiff_AfterDelete_ShowsDeleteOp()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var firstP = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p");
+        var r = session.DeleteBlock(firstP.Anchor.Id);
+        Assert.True(r.Success);
+
+        var diffJson = session.GetDiff();
+        // Expect at least one entry with op=delete pointing at firstP's anchor id.
+        Assert.Contains("\"delete\"", diffJson);
+        Assert.Contains(firstP.Anchor.Id, diffJson);
+    }
+
+    [Fact]
+    public void DS285b_GetDiff_DetectsKindChangeWithoutTextChange()
+    {
+        // SetParagraphStyle flips anchor kind (p→h) without changing text.
+        // ComputeDiff must detect this as a modify, not silently miss it.
+        // Uses BuildDS001_SimpleTwoParagraphs because it ships with the heading
+        // style definitions that SetParagraphStyle needs.
+        using var session = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var firstP = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p");
+
+        var r = session.SetParagraphStyle(firstP.Anchor.Id, "Heading2");
+        Assert.True(r.Success);
+
+        var diffJson = session.GetDiff();
+        Assert.Contains("\"modify\"", diffJson);
+    }
+
+    [Fact]
+    public void DS286_GetDiff_AfterReplaceText_ShowsModifyOp()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var firstP = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p");
+        session.ReplaceText(firstP.Anchor.Id, "NEW TEXT");
+
+        var diffJson = session.GetDiff();
+        Assert.Contains("\"modify\"", diffJson);
+        Assert.Contains("NEW TEXT", diffJson);
+    }
+
+    [Fact]
+    public void DS287_GetDiff_AfterInsertParagraph_ShowsInsertOp()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var firstP = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p");
+        var r = session.InsertParagraph(firstP.Anchor.Id, Position.After, "Inserted text");
+        Assert.True(r.Success);
+
+        var diffJson = session.GetDiff();
+        Assert.Contains("\"insert\"", diffJson);
+        Assert.Contains("Inserted text", diffJson);
+    }
+
+    [Fact]
+    public void DS288_GetDiff_WithoutInitialCapture_Throws()
+    {
+        var settings = new DocxSessionSettings { CaptureInitialProjection = false };
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders(), settings);
+        var ex = Assert.Throws<InvalidOperationException>(() => session.GetDiff());
+        Assert.Contains("CaptureInitialProjection", ex.Message);
+    }
+
+    [Fact]
+    public void DS289_GetDiff_UnifiedFormat_IsDeferredToV2()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        Assert.Throws<NotSupportedException>(() => session.GetDiff(DiffFormat.Unified));
+        Assert.Throws<NotSupportedException>(() => session.GetDiff(DiffFormat.SideBySide));
     }
 
     // ─── Deterministic Unids ──────────────────────────────────────────────
