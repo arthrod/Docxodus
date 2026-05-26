@@ -2858,6 +2858,213 @@ public class DocxSessionTests
         Assert.Contains("para 2.1", afterMd);
     }
 
+    // ─── Tracked-change-aware bulk delete (issue #177 — DS271-DS273) ─────
+
+    [Fact]
+    public void DS271_DeleteRange_TrackedChangeWrapsRunsInDel()
+    {
+        // In RenderInline mode, DeleteRange should wrap every run in every removed
+        // paragraph in w:del AND mark each paragraph-mark deleted via w:pPr/w:rPr/w:del.
+        // The blocks must stay in the document tree so callers can re-address them
+        // before accepting the changes — EditResult.Modified, not Removed.
+        var settings = new DocxSessionSettings
+        {
+            TrackedChanges = TrackedChangeMode.RenderInline,
+            RevisionAuthor = "range-deleter",
+        };
+        using var session = new DocxSession(BuildDocFiveBodyParagraphs(), settings);
+        var body = session.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p")
+            .ToList();
+        // Delete B, C, D (indices 1..3 inclusive).
+        var r = session.DeleteRange(body[1].Anchor.Id, body[4].Anchor.Id);
+        Assert.True(r.Success, r.Error?.Message);
+
+        // Tracked-mode contract: anchors stay live, so Modified is populated and
+        // Removed is empty. Three top-level paragraphs were marked.
+        Assert.Empty(r.Removed);
+        Assert.Equal(3, r.Modified.Count);
+        Assert.Contains(r.Modified, a => a.Id == body[1].Anchor.Id);
+        Assert.Contains(r.Modified, a => a.Id == body[2].Anchor.Id);
+        Assert.Contains(r.Modified, a => a.Id == body[3].Anchor.Id);
+
+        // Round-trip to bytes and inspect the XML directly.
+        var bytes = session.Save();
+        using var ms = new MemoryStream(bytes);
+        using var verify = WordprocessingDocument.Open(ms, isEditable: false);
+        var docXml = verify.MainDocumentPart!.GetXDocument().Root!.ToString();
+
+        // Every run-text from B/C/D should land in w:delText, not w:t.
+        Assert.Contains("Paragraph B", docXml);
+        Assert.Contains("Paragraph C", docXml);
+        Assert.Contains("Paragraph D", docXml);
+        Assert.Contains("w:delText", docXml);
+        Assert.Contains("range-deleter", docXml);
+
+        // Paragraph-mark deletion: each of the three deleted paragraphs must have a
+        // w:pPr/w:rPr/w:del element (counted by DescendantsAndSelf below).
+        var root = verify.MainDocumentPart.GetXDocument().Root!;
+        var paraMarkDels = root
+            .Descendants(W.p)
+            .Where(p => p.Element(W.pPr)?.Element(W.rPr)?.Element(W.del) is not null)
+            .ToList();
+        Assert.Equal(3, paraMarkDels.Count);
+
+        // A (untouched) and E (the exclusive endpoint) still have plain w:t runs.
+        Assert.Contains("<w:t>Paragraph A</w:t>", docXml);
+        Assert.Contains("<w:t>Paragraph E</w:t>", docXml);
+    }
+
+    [Fact]
+    public void DS272_DeleteSection_TrackedChangeWrapsRunsInDel()
+    {
+        // DeleteSection in tracked mode should inherit DeleteRange's behavior via the
+        // shared DeleteSiblingRangeCore helper: heading + every sibling under it through
+        // the next same-or-higher heading get w:del-wrapped, not structurally removed.
+        var settings = new DocxSessionSettings
+        {
+            TrackedChanges = TrackedChangeMode.RenderInline,
+            RevisionAuthor = "section-deleter",
+        };
+        using var session = new DocxSession(BuildDocWithHeadingSections(), settings);
+        var sectionOne = session.Project().AnchorIndex.Values
+            .Single(t => session.GetAnchorInfo(t.Anchor.Id)?.TextPreview == "Section One");
+
+        var r = session.DeleteSection(sectionOne.Anchor.Id);
+        Assert.True(r.Success, r.Error?.Message);
+
+        // Tracked mode: Modified is populated (anchors live), Removed is empty.
+        // Section One spans 4 blocks (heading + 3 followers up to the next Heading1).
+        Assert.Empty(r.Removed);
+        Assert.Equal(4, r.Modified.Count);
+
+        // The projection still sees the heading text (anchors are live) — content is
+        // technically still there, just wrapped in tracked-deletion markup.
+        var afterIndex = session.Project().AnchorIndex;
+        Assert.True(afterIndex.ContainsKey(sectionOne.Anchor.Id));
+
+        // Round-trip and inspect XML. Section One + para 1.1 + Section One.A + para 1.A.1
+        // should all be wrapped; Section Two + para 2.1 must remain untouched.
+        var bytes = session.Save();
+        using var ms = new MemoryStream(bytes);
+        using var verify = WordprocessingDocument.Open(ms, isEditable: false);
+        var root = verify.MainDocumentPart!.GetXDocument().Root!;
+        var docXml = root.ToString();
+
+        Assert.Contains("w:delText", docXml);
+        Assert.Contains("section-deleter", docXml);
+        // Section Two is the boundary marker (exclusive) — its run text must not be in w:delText.
+        Assert.Contains("<w:t>Section Two</w:t>", docXml);
+        Assert.Contains("<w:t>para 2.1</w:t>", docXml);
+
+        // Each of the 4 deleted paragraphs has a paragraph-mark del.
+        var paraMarkDels = root
+            .Descendants(W.p)
+            .Where(p => p.Element(W.pPr)?.Element(W.rPr)?.Element(W.del) is not null)
+            .ToList();
+        Assert.Equal(4, paraMarkDels.Count);
+    }
+
+    [Fact]
+    public void DS273_DeleteRange_TrackedChange_TableRowsMarkedDeleted()
+    {
+        // Tables in the range get w:trPr/w:del on every row plus run-wrapping inside
+        // every cell paragraph — Word's native convention for tracked row deletion.
+        var settings = new DocxSessionSettings
+        {
+            TrackedChanges = TrackedChangeMode.RenderInline,
+            RevisionAuthor = "table-deleter",
+        };
+        using var session = new DocxSession(BuildDocFiveBlocksWithTable(), settings);
+        var blocks = session.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "tbl")
+            .OrderBy(t => t.Anchor.Id)
+            .ToList();
+        // Layout: para0, para1, tbl, para2, para3.
+        // Delete [para1, tbl, para2] — exclusive endpoint = para3.
+        var tbl = session.Project().AnchorIndex.Values
+            .Single(t => t.Anchor.Kind == "tbl");
+        var paras = session.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Kind == "p" && t.Anchor.Scope == "body")
+            .ToList();
+
+        // Resolve by text preview for stability across Unid renumbering.
+        var p0 = paras.Single(t => session.GetAnchorInfo(t.Anchor.Id)!.TextPreview == "Para Zero");
+        var p1 = paras.Single(t => session.GetAnchorInfo(t.Anchor.Id)!.TextPreview == "Para One");
+        var p2 = paras.Single(t => session.GetAnchorInfo(t.Anchor.Id)!.TextPreview == "Para Two");
+        var p3 = paras.Single(t => session.GetAnchorInfo(t.Anchor.Id)!.TextPreview == "Para Three");
+
+        var r = session.DeleteRange(p1.Anchor.Id, p3.Anchor.Id);
+        Assert.True(r.Success, r.Error?.Message);
+
+        // Modified: p1, tbl, p2.
+        Assert.Empty(r.Removed);
+        Assert.Equal(3, r.Modified.Count);
+        Assert.Contains(r.Modified, a => a.Id == p1.Anchor.Id);
+        Assert.Contains(r.Modified, a => a.Id == tbl.Anchor.Id);
+        Assert.Contains(r.Modified, a => a.Id == p2.Anchor.Id);
+
+        var bytes = session.Save();
+        using var ms = new MemoryStream(bytes);
+        using var verify = WordprocessingDocument.Open(ms, isEditable: false);
+        var root = verify.MainDocumentPart!.GetXDocument().Root!;
+        var docXml = root.ToString();
+
+        // Every row gets a trPr/del marker.
+        var rowDels = root
+            .Descendants(W.tr)
+            .Where(tr => tr.Element(W.trPr)?.Element(W.del) is not null)
+            .ToList();
+        Assert.Equal(2, rowDels.Count);  // two rows in BuildDocFiveBlocksWithTable
+
+        // Cell text wrapped in w:delText.
+        Assert.Contains("w:delText", docXml);
+        Assert.Contains("Cell A1", docXml);
+        Assert.Contains("Cell B2", docXml);
+        Assert.Contains("table-deleter", docXml);
+
+        // Untouched paragraphs at the ends remain.
+        Assert.Contains("<w:t>Para Zero</w:t>", docXml);
+        Assert.Contains("<w:t>Para Three</w:t>", docXml);
+    }
+
+    internal static byte[] BuildDocFiveBlocksWithTable()
+    {
+        // para0, para1, table (2x2), para2, para3 — for tracked-delete table coverage.
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Document();
+            var body = new Body();
+            main.Document.Body = body;
+            main.AddNewPart<StyleDefinitionsPart>().Styles = new Styles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            body.Append(new Paragraph(new Run(new Text("Para Zero"))));
+            body.Append(new Paragraph(new Run(new Text("Para One"))));
+
+            var table = new DocumentFormat.OpenXml.Wordprocessing.Table();
+            string[][] cellText = { new[] { "Cell A1", "Cell A2" }, new[] { "Cell B1", "Cell B2" } };
+            foreach (var rowText in cellText)
+            {
+                var tr = new DocumentFormat.OpenXml.Wordprocessing.TableRow();
+                foreach (var cellContent in rowText)
+                {
+                    var tc = new DocumentFormat.OpenXml.Wordprocessing.TableCell();
+                    tc.Append(new Paragraph(new Run(new Text(cellContent))));
+                    tr.Append(tc);
+                }
+                table.Append(tr);
+            }
+            body.Append(table);
+
+            body.Append(new Paragraph(new Run(new Text("Para Two"))));
+            body.Append(new Paragraph(new Run(new Text("Para Three"))));
+        }
+        return ms.ToArray();
+    }
+
     // ─── FindOptions.Scopes + AnchorsByScope ────────────────────────────
 
     /// <summary>

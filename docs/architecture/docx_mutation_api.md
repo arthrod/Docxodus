@@ -174,9 +174,16 @@ Records **one** undo snapshot — `Undo()` after `DeleteRange` restores every
 removed element together. `EditResult.Removed` lists every anchor (including
 descendant anchors of removed blocks) that disappeared.
 
-Tracked-change mode (v1): `DeleteRange` does a structural delete regardless of
-`Settings.TrackedChanges`. Wrapping every run across many blocks in `w:del` is
-deferred until a consumer needs it.
+**Tracked-change mode** (`Settings.TrackedChanges = RenderInline`): `DeleteRange`
+wraps each removed paragraph's runs in `w:del` and marks the paragraph mark
+itself as deleted via `w:pPr/w:rPr/w:del`. Tables get `w:trPr/w:del` on every
+row (Word's row-deletion convention — there is no table-level "delete" markup),
+plus the same run/paragraph-mark wrapping inside every cell. Nested tables
+recurse. Anchors stay live in the document tree, so the top-level block anchors
+land in `EditResult.Modified` instead of `Removed` and callers can re-address
+them before accepting the changes. Block kinds outside `w:p` / `w:tbl` (e.g.
+`w:sdt` content controls in the middle of a range) still fall back to structural
+removal in tracked mode — file a follow-up if a consumer needs them tracked.
 
 ### `DeleteSection` — heading-bounded bulk removal
 
@@ -188,8 +195,10 @@ level. "Level" matches the projection's notion: `Heading1` = 1, `Heading2` = 2,
 If the target heading has no sibling-heading boundary after it, the section
 extends to the end of the parent.
 
-Built on `DeleteRange` semantics: same undo, same EditResult shape, same v1
-tracked-change limitation.
+Built on `DeleteRange` semantics via the shared `DeleteSiblingRangeCore` helper:
+same undo, same EditResult shape, same tracked-change behavior (paragraphs and
+tables get `w:del` markup, anchors stay live, block kinds outside `w:p`/`w:tbl`
+fall back to structural removal).
 
 ## Finding anchors via tagged annotations
 
