@@ -28,6 +28,8 @@ parse + Unid annotation + projection cost every time.
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
 from ._transport import shutdown_host
 from .enums import (
     AnchorIdRendering,
@@ -72,7 +74,14 @@ from .types import (
     WmlToMarkdownConverterSettings,
 )
 
-__version__ = "0.1.0a0"
+try:
+    # Read from the installed wheel's METADATA so __version__ always matches
+    # what was actually published, not a constant that drifts from pyproject.
+    __version__ = _pkg_version("docx-scalpel")
+except PackageNotFoundError:
+    # Unpackaged source checkout (e.g. running tests against `git clone` with
+    # no editable install yet). Leave a sentinel so callers can detect this.
+    __version__ = "0.0.0+source"
 
 __all__ = [
     "__version__",
