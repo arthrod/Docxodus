@@ -1084,6 +1084,46 @@ public class WmlToMarkdownConverterTests
     }
 
     [Fact]
+    public void MD083_AnchorIdRendering_Sequential_NumbersPerScopeKindBucket()
+    {
+        var bytes = DocxSessionTests.BuildDS001_SimpleTwoParagraphs();
+        var wml = new WmlDocument("test.docx", bytes);
+        var settings = new WmlToMarkdownConverterSettings
+        {
+            AnchorIdRendering = AnchorIdRendering.Sequential,
+        };
+        var projection = WmlToMarkdownConverter.Convert(wml, settings);
+
+        // Each (kind, scope) bucket starts at 1 and increments per anchor in document order.
+        // BuildDS001 has 2 body paragraphs → tokens "{#p:body:1}" and "{#p:body:2}".
+        Assert.Contains("{#p:body:1}", projection.Markdown);
+        Assert.Contains("{#p:body:2}", projection.Markdown);
+    }
+
+    [Fact]
+    public void MD084_AnchorIdRendering_Sequential_AnchorIndexHasDualKeys()
+    {
+        var bytes = DocxSessionTests.BuildDS001_SimpleTwoParagraphs();
+        var wml = new WmlDocument("test.docx", bytes);
+        var settings = new WmlToMarkdownConverterSettings
+        {
+            AnchorIdRendering = AnchorIdRendering.Sequential,
+        };
+        var projection = WmlToMarkdownConverter.Convert(wml, settings);
+
+        // The full key still resolves; AND the sequential alias key resolves;
+        // and both point at the SAME AnchorTarget instance — reference identity
+        // is the load-bearing invariant (consistent with MD082's tightening).
+        var firstTarget = projection.AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p");
+        Assert.True(projection.AnchorIndex.ContainsKey(firstTarget.Anchor.Id));
+        Assert.True(projection.AnchorIndex.ContainsKey("p:body:1"));
+        var fromFull = projection.AnchorIndex[firstTarget.Anchor.Id];
+        var fromSequential = projection.AnchorIndex["p:body:1"];
+        Assert.Same(fromFull, fromSequential);
+    }
+
+    [Fact]
     public void MD006_BoilerplateFootnotesNotInAnchorIndex()
     {
         // Every DOCX with a FootnotesPart includes two Word-reserved boilerplate

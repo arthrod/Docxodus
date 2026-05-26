@@ -461,6 +461,21 @@ public static class WmlToMarkdownConverter
                 }
             }
         }
+        else if (settings.AnchorIdRendering == AnchorIdRendering.Sequential)
+        {
+            // Assign 1-based numeric ids per (kind, scope) bucket in document order
+            // (which is the natural order of index.Values since Dictionary preserves
+            // insertion order and BuildAnchorIndex inserts in descendant-walk order).
+            var counters = new Dictionary<(string Kind, string Scope), int>();
+            foreach (var t in index.Values)
+            {
+                var bucket = (t.Anchor.Kind, t.Anchor.Scope);
+                if (!counters.TryGetValue(bucket, out var n)) n = 0;
+                n++;
+                counters[bucket] = n;
+                renderMap.Set(t.Unid, n.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
 
         // Dual-key the index: add alias entries with the rendered id substituted.
         if (settings.AnchorIdRendering != AnchorIdRendering.FullUnid)
