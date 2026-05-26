@@ -1,8 +1,13 @@
 name: python-publish
 
-# Builds + publishes the docx-scalpel PyPI distribution. Mirrors the trigger
-# shape of .github/workflows/publish.yml so a single v* tag releases the .NET
-# package (NuGet), the npm package, and the Python package together.
+# Builds + publishes the docx-scalpel PyPI distribution.
+#
+# Tag scheme: `docx-scalpel-v<PEP440>` (e.g. `docx-scalpel-v0.1.0a1`). This is
+# deliberately decoupled from publish.yml's `v*` trigger so docx-scalpel can
+# ship Python-only point releases without dragging Docxodus core / npm /
+# binaries along, and so a Docxodus core release doesn't force a PyPI version
+# bump for unrelated work. Compatibility is handled by bundling: each wheel
+# embeds a docxodus-pyhost built from the same commit the tag points to.
 #
 # v1 scope: linux-x64 wheel + sdist. Other RIDs (linux-arm64, osx-x64,
 # osx-arm64, win-x64) are mechanical add-ons; see python/RELEASING.md.
@@ -10,7 +15,7 @@ name: python-publish
 on:
   push:
     tags:
-      - 'v*'
+      - 'docx-scalpel-v*'
   workflow_dispatch:
     inputs:
       version:
@@ -51,8 +56,8 @@ jobs:
             ver='${{ inputs.version }}'
             tgt='${{ inputs.target }}'
           else
-            # tag pushes always go to production PyPI, like NuGet + npm do
-            ver="${GITHUB_REF#refs/tags/v}"
+            # docx-scalpel-vX.Y.Z tag → production PyPI
+            ver="${GITHUB_REF#refs/tags/docx-scalpel-v}"
             tgt="pypi"
           fi
           # PEP 440 sanity: reject empty and obvious shell metacharacters.

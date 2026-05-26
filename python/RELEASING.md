@@ -13,7 +13,7 @@ Create two environments in **Settings → Environments**:
 | Name | Purpose | Suggested protection |
 |---|---|---|
 | `testpypi` | Dry-run publishes via `workflow_dispatch` | None — used freely |
-| `pypi` | Production publishes (auto on `v*` tag push) | Required reviewer, restrict to `main` branch |
+| `pypi` | Production publishes (auto on `docx-scalpel-v*` tag push) | Required reviewer, restrict to `main` branch |
 
 The names are case-sensitive and must match the `environment.name` fields in the workflow.
 
@@ -38,12 +38,20 @@ After the first successful publish, the "pending" publisher becomes a regular tr
 
 ## Routine release
 
-The release shape mirrors NuGet + npm: **one `v*` tag publishes all three** via the existing `.github/workflows/publish.yml` (NuGet + npm) plus `python-publish.yml` (PyPI). Version sync is the convention.
+**docx-scalpel ships on its own tag pattern, decoupled from Docxodus core / npm / binaries.**
+
+| Tag pattern | Workflow | Publishes |
+|---|---|---|
+| `v*` (e.g. `v1.2.3`) | `publish.yml` | NuGet (Docxodus + redline + docx2html + docx2oc) + npm (`docxodus`) + GitHub Release binaries |
+| `docx-scalpel-v*` (e.g. `docx-scalpel-v0.1.0a1`) | `python-publish.yml` | PyPI (`docx-scalpel`) |
+
+The two tag namespaces are independent. A docx-scalpel point-release doesn't drag Docxodus core through a version bump, and a Docxodus core release doesn't force unrelated PyPI churn. Each docx-scalpel wheel bundles a `docxodus-pyhost` built from the same commit the tag points to, so there's no runtime version-pinning between the two distributions.
 
 ### Recommended sequence
 
 1. **Dry-run on TestPyPI** (manual)
    - Actions → `python-publish` → Run workflow
+   - Branch: whatever you're cutting from (default branch for stable, feature branch for testing the pipeline itself)
    - `version`: PEP 440 string, e.g. `0.1.0a1`
    - `target`: `testpypi`
    - Confirm the upload by installing in a fresh venv:
@@ -55,18 +63,18 @@ The release shape mirrors NuGet + npm: **one `v*` tag publishes all three** via 
      ```
 
 2. **Real release on PyPI** (tag-driven)
-   - Bump the version. Even though CI overwrites `pyproject.toml`'s `version` field, keeping the in-tree value current is helpful for editable installs.
+   - Bump the version in `python/pyproject.toml`. CI overwrites this at build time, but keeping the in-tree value current is helpful for editable installs and PR readability.
      ```bash
-     # python/pyproject.toml: version = "0.1.0"
-     git commit -am "chore(python): bump docx-scalpel to 0.1.0"
-     git tag v0.1.0
-     git push origin main v0.1.0
+     # python/pyproject.toml: version = "0.1.0a1"
+     git commit -am "chore(python): bump docx-scalpel to 0.1.0a1"
+     git tag docx-scalpel-v0.1.0a1
+     git push origin main docx-scalpel-v0.1.0a1
      ```
-   - Tag push fires every publish workflow. `python-publish.yml` resolves target = `pypi` from the tag trigger.
+   - The tag fires `python-publish.yml`. `resolve` extracts `0.1.0a1` from `${GITHUB_REF#refs/tags/docx-scalpel-v}` and resolves target = `pypi`.
 
 ### Pre-releases
 
-PyPI accepts PEP 440 pre-release identifiers — `0.1.0a1`, `0.1.0b2`, `0.1.0rc1`, `0.1.0.dev3`. Use the tag form `v0.1.0a1` and pip will only install pre-releases when `--pre` is passed.
+PyPI accepts PEP 440 pre-release identifiers — `0.1.0a1`, `0.1.0b2`, `0.1.0rc1`, `0.1.0.dev3`. Use the tag form `docx-scalpel-v0.1.0a1` and pip will only install pre-releases when `--pre` is passed.
 
 ## Wheel scope (v1)
 
