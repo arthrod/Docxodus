@@ -281,6 +281,38 @@ public class DocxSessionTests
         return ms.ToArray();
     }
 
+    /// <summary>
+    /// Builds the NVCA Model COI repro for issue #188 — an optional outer
+    /// wrapper around a name slot that a picker drops by returning <c>""</c>,
+    /// plus a few simpler shapes covering each <c>CoalesceWhitespaceAroundEmptyFill</c>
+    /// case the option promises:
+    ///   <list type="bullet">
+    ///     <item>Para 1: <c>"… on March 14, 2024 [under the name [_______________]]."</c>
+    ///       after the inner name is filled — outer drop should yield <c>"… 2024."</c>.</item>
+    ///     <item>Para 2: <c>"alpha [opt] beta"</c> — both-sides-whitespace case.</item>
+    ///     <item>Para 3: <c>"[[opt]]"</c> — bracket-on-both-sides exact-wrap case.</item>
+    ///     <item>Para 4: <c>"[front]edge"</c> — no neighbor pattern (no coalesce).</item>
+    ///   </list>
+    /// </summary>
+    internal static byte[] BuildDocWithEmptyFillNeighbors()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Document(new Body(
+                new Paragraph(new Run(new Text(
+                    "Filed pursuant to the General Corporation Law on March 14, 2024 [under the name [_______________]]."))),
+                new Paragraph(new Run(new Text(
+                    "alpha [opt] beta"))),
+                new Paragraph(new Run(new Text(
+                    "[[opt]]"))),
+                new Paragraph(new Run(new Text(
+                    "[front]edge"))));
+        }
+        return ms.ToArray();
+    }
+
     // ─── Phase 1: Skeleton tests ─────────────────────────────────────────
 
     [Fact]
@@ -681,6 +713,120 @@ public class DocxSessionTests
             p.Match.Text == "[_____]" ? "FILLED" : null);
         Assert.True(result.Filled >= 1);
         Assert.Equal(1, result.Passes);
+    }
+
+    // ─── Issue #188: CoalesceWhitespaceAroundEmptyFill ───────────────────
+
+    [Fact]
+    public void DS247a_FillPlaceholders_EmptyPickReturn_LeavesArtifactsByDefault()
+    {
+        // Baseline: the current (default) behavior preserves surrounding chars
+        // verbatim, which is what issue #188 reports as a cosmetic problem.
+        using var session = new DocxSession(BuildDocWithEmptyFillNeighbors());
+        var result = session.FillPlaceholders(p => p.Kind switch
+        {
+            PlaceholderKind.BlankFill => "Bluth, Inc.",          // fill inner name slot
+            PlaceholderKind.AlternativeClause => string.Empty,    // drop every bracketed wrapper
+            _ => null,
+        });
+        Assert.True(result.Filled >= 1);
+
+        var md = session.Project().Markdown;
+        // Pass 1 fills [_______________] → "Bluth, Inc."; pass 2 sees the now-innermost
+        // [under the name Bluth, Inc.] and returns "" for it. Without coalescing, the
+        // doubled space before "." survives. Match the cosmetic artifact exactly.
+        Assert.Contains("on March 14, 2024 .", md);
+    }
+
+    [Fact]
+    public void DS247b_FillPlaceholders_CoalesceCollapsesSpaceBeforePunctuation()
+    {
+        // The headline issue #188 case: outer wrapper drops, the leading space
+        // between the prior word and the dropped bracket is absorbed so no stray
+        // space remains before the period.
+        using var session = new DocxSession(BuildDocWithEmptyFillNeighbors());
+        var options = new FillOptions { CoalesceWhitespaceAroundEmptyFill = true };
+        var result = session.FillPlaceholders(p => p.Kind switch
+        {
+            PlaceholderKind.BlankFill => "Bluth, Inc.",
+            PlaceholderKind.AlternativeClause => string.Empty,
+            _ => null,
+        }, options);
+        Assert.True(result.Filled >= 1);
+
+        var md = session.Project().Markdown;
+        Assert.Contains("on March 14, 2024.", md);
+        Assert.DoesNotContain("on March 14, 2024 .", md);
+        Assert.DoesNotContain("on March 14, 2024  .", md);
+    }
+
+    [Fact]
+    public void DS247c_FillPlaceholders_CoalesceCollapsesSurroundingSpaces()
+    {
+        // "alpha [opt] beta" → drop [opt] with coalescing → "alpha beta" (one space).
+        using var session = new DocxSession(BuildDocWithEmptyFillNeighbors());
+        var options = new FillOptions { CoalesceWhitespaceAroundEmptyFill = true };
+        session.FillPlaceholders(p =>
+            p.Kind == PlaceholderKind.AlternativeClause ? string.Empty : null, options);
+
+        var md = session.Project().Markdown;
+        Assert.Contains("alpha beta", md);
+        Assert.DoesNotContain("alpha  beta", md);
+    }
+
+    [Fact]
+    public void DS247d_FillPlaceholders_CoalesceDropsSurroundingBrackets()
+    {
+        // "[[opt]]" — innermost match is "[opt]" at offset 1; the chars at offsets
+        // 0 ("[") and 6 ("]") are an exact bracket wrap. Returning "" with coalescing
+        // should absorb the outer pair too, so the paragraph ends up empty rather
+        // than leaving "[]" stragglers.
+        using var session = new DocxSession(BuildDocWithEmptyFillNeighbors());
+        var options = new FillOptions { CoalesceWhitespaceAroundEmptyFill = true };
+        session.FillPlaceholders(p =>
+            p.Kind == PlaceholderKind.AlternativeClause ? string.Empty : null, options);
+
+        var md = session.Project().Markdown;
+        Assert.DoesNotContain("[opt]", md);
+        Assert.DoesNotContain("[]", md);
+    }
+
+    [Fact]
+    public void DS247e_FillPlaceholders_CoalesceLeavesEdgeMatchesAlone()
+    {
+        // "[front]edge" — placeholder at offset 0 of its paragraph; no left
+        // neighbor. The right neighbor 'e' isn't whitespace/punct/bracket either.
+        // No coalescing pattern applies → literal delete → "edge".
+        using var session = new DocxSession(BuildDocWithEmptyFillNeighbors());
+        var options = new FillOptions { CoalesceWhitespaceAroundEmptyFill = true };
+        session.FillPlaceholders(p =>
+            p.Kind == PlaceholderKind.AlternativeClause ? string.Empty : null, options);
+
+        var md = session.Project().Markdown;
+        Assert.Contains("edge", md);
+        Assert.DoesNotContain("[front]edge", md);
+    }
+
+    [Fact]
+    public void DS247f_FillPlaceholders_CoalesceIsSkippedWhenPreserveDollarPrefixKeepsTheDollar()
+    {
+        // $-prefix preservation runs first: if picker returns "" for "$[xxx]" with
+        // the default PreserveDollarPrefix = true, the replacement becomes "$",
+        // which is no longer empty, so coalescing should not fire. Verify the "$"
+        // stays put (and surrounding chars are untouched).
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Document(new Body(
+                new Paragraph(new Run(new Text("Pay $[___] now.")))));
+        }
+        using var session = new DocxSession(ms.ToArray());
+        var options = new FillOptions { CoalesceWhitespaceAroundEmptyFill = true };
+        session.FillPlaceholders(p => string.Empty, options);
+
+        var md = session.Project().Markdown;
+        Assert.Contains("Pay $ now.", md);   // $ survives, surrounding spaces untouched
     }
 
     // ─── Issue #164: boundary-aware Grep context windows ─────────────────

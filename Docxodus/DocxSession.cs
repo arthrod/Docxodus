@@ -291,6 +291,39 @@ public sealed record FillOptions
     /// Pickers that rely on bracket-bounded context can opt into
     /// <see cref="ContextBoundary.Bracket"/> for unambiguous per-placeholder context.</summary>
     public ContextBoundary Boundary { get; init; } = ContextBoundary.Char;
+
+    /// <summary>When the picker returns an empty string — the canonical "drop
+    /// this optional clause entirely" signal — the placeholder span is deleted
+    /// verbatim, which leaves whitespace and punctuation around the (now-gone)
+    /// brackets untouched. The repro from issue #188:
+    /// <c>"… on [date] [under the name [name]]."</c> with the outer wrapper
+    /// dropped (picker returns <c>""</c>) becomes <c>"… on March 14, 2024 ."</c>
+    /// — note the stray space before the period.
+    /// <para>
+    /// When this flag is <c>true</c>, an empty fill additionally absorbs adjacent
+    /// chars based on the immediate neighbors of the placeholder span in the
+    /// enclosing block's flat text:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item>Whitespace on both sides → consume the trailing space, so
+    ///   <c>"alpha [opt] beta"</c> becomes <c>"alpha beta"</c> (one space) rather
+    ///   than <c>"alpha  beta"</c> (two).</item>
+    ///   <item>Whitespace before + clause-terminating punctuation
+    ///   (<c>. , ; : ! ?</c>) after → drop the leading space, so
+    ///   <c>"… 2024 [opt]."</c> becomes <c>"… 2024."</c>.</item>
+    ///   <item>Open-bracket (<c>( [ {</c>) before + matching close-bracket
+    ///   (<c>) ] }</c>) after → drop both, so an outer wrapper around a now-empty
+    ///   inner (<c>"[[opt]]"</c>) doesn't leave bare brackets.</item>
+    /// </list>
+    /// Default <c>false</c> (preserve the legacy literal-delete behavior).
+    /// $-prefix preservation (<see cref="PreserveDollarPrefix"/>) runs first,
+    /// so a picker returning <c>""</c> for <c>$[xxx]</c> with the default
+    /// <see cref="PreserveDollarPrefix"/> = <c>true</c> ends up replacing with
+    /// <c>"$"</c> (not empty) and coalescing is skipped — that's intentional;
+    /// set <see cref="PreserveDollarPrefix"/> = <c>false</c> when you want
+    /// the <c>$</c> to drop along with the brackets.
+    /// </summary>
+    public bool CoalesceWhitespaceAroundEmptyFill { get; init; }
 }
 
 /// <summary>
@@ -1896,7 +1929,9 @@ public sealed class DocxSession : IDisposable
                 if (opts.PreserveDollarPrefix && p.Match.Text.StartsWith("$") && !pick.StartsWith("$"))
                     pick = "$" + pick;
 
-                var r = ReplaceMatch(p.Match, pick);
+                var r = opts.CoalesceWhitespaceAroundEmptyFill && pick.Length == 0
+                    ? ReplaceMatchCoalescingNeighbors(p.Match)
+                    : ReplaceMatch(p.Match, pick);
                 if (r.Success)
                 {
                     filled++;
@@ -1925,6 +1960,79 @@ public sealed class DocxSession : IDisposable
             Unfilled = unfilled,
             Errors = errors,
         };
+    }
+
+    /// <summary>
+    /// Helper for <see cref="FillPlaceholders"/>'s
+    /// <see cref="FillOptions.CoalesceWhitespaceAroundEmptyFill"/> path: deletes the
+    /// match's span and, based on the chars immediately adjacent in the enclosing
+    /// block's flat text, also absorbs surrounding whitespace / leading-space-before-punctuation
+    /// / matched-brackets. See the option's docs for the exact rules. Falls back
+    /// to a literal <see cref="ReplaceMatch"/> with empty string when no neighbor
+    /// pattern matches.
+    /// </summary>
+    private EditResult ReplaceMatchCoalescingNeighbors(TextMatch match)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+
+        var anchorId = match.EnclosingAnchor.Anchor.Id;
+        var target = FindAnchor(anchorId);
+        if (target is null) return ReplaceMatch(match, string.Empty);
+        var element = target.Resolve(_doc!);
+        if (element is null) return ReplaceMatch(match, string.Empty);
+
+        var flat = Internal.RunTextMap.Build(element).FlatText;
+        int start = match.Span.Start;
+        int end = start + match.Span.Length;
+        if (start < 0 || end > flat.Length) return ReplaceMatch(match, string.Empty);
+
+        char? leftChar = start > 0 ? flat[start - 1] : null;
+        char? rightChar = end < flat.Length ? flat[end] : null;
+
+        // Fold the Unicode whitespace variants Word documents commonly use
+        // (NBSP, narrow NBSP, thin space) to ASCII space for the rules below so
+        // an NBSP-on-either-side still gets coalesced like a regular space.
+        static char? Fold(char? c) => c switch
+        {
+            ' ' or ' ' or ' ' => ' ',
+            _ => c,
+        };
+        char? l = Fold(leftChar);
+        char? r = Fold(rightChar);
+
+        static bool IsAsciiSpace(char? c) => c is ' ' or '\t';
+        static bool IsClauseTerminator(char? c) => c is '.' or ',' or ';' or ':' or '!' or '?';
+        static bool IsOpenBracket(char? c) => c is '(' or '[' or '{';
+        static bool IsCloseBracket(char? c) => c is ')' or ']' or '}';
+
+        int extendLeft = 0;
+        int extendRight = 0;
+
+        if (IsAsciiSpace(l) && IsAsciiSpace(r))
+        {
+            // " [x] " → consume the trailing space, leaving one space.
+            extendRight = 1;
+        }
+        else if (IsAsciiSpace(l) && IsClauseTerminator(r))
+        {
+            // " [x]." / " [x]," → drop the leading space.
+            extendLeft = 1;
+        }
+        else if (IsOpenBracket(l) && IsCloseBracket(r))
+        {
+            // "([x])" / "[[x]]" → drop both surrounding brackets.
+            extendLeft = 1;
+            extendRight = 1;
+        }
+
+        if (extendLeft == 0 && extendRight == 0)
+            return ReplaceMatch(match, string.Empty);
+
+        return ReplaceTextAtSpan(
+            anchorId,
+            start - extendLeft,
+            match.Span.Length + extendLeft + extendRight,
+            string.Empty);
     }
 
     /// <summary>

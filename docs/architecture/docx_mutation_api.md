@@ -310,6 +310,34 @@ The picker is invoked for every kind in `FillOptions.Kinds`, which defaults to `
 
 The picker is invoked once per placeholder per pass; return `null` to skip. `BulkEditResult.Unfilled` lists every placeholder the picker said `null` to (deduplicated across passes). `BulkEditResult.Passes` is the highest iteration pass that actually filled at least one placeholder (so a single-fill convergence reports `Passes = 1`, not 2).
 
+#### `FillOptions.CoalesceWhitespaceAroundEmptyFill`
+
+Returning `""` from the picker is the canonical "drop this optional clause entirely" signal. By default the bracketed match is deleted exactly, which leaves whitespace and punctuation around the (now-gone) brackets untouched. The repro from issue #188:
+
+```
+... pursuant to the General Corporation Law on March 14, 2024 [under the name [_______________]].
+```
+
+For a company that has never been renamed, the picker fills the inner name slot with `"Bluth, Inc."`, then in pass 2 sees the outer wrapper `[under the name Bluth, Inc.]` and returns `""`. The literal-delete result is:
+
+```
+... pursuant to the General Corporation Law on March 14, 2024 .
+```
+
+Note the stray space before the period.
+
+With `FillOptions.CoalesceWhitespaceAroundEmptyFill = true`, an empty fill (after `$`-prefix preservation has been applied) absorbs adjacent chars based on the immediate neighbors of the placeholder span:
+
+| Left neighbor | Right neighbor | Action | Example |
+|---|---|---|---|
+| whitespace (incl. NBSP, narrow NBSP, thin space) | whitespace | consume the trailing space, leaving one | `"alpha [x] beta"` → `"alpha beta"` |
+| whitespace | `.` `,` `;` `:` `!` `?` | drop the leading space | `"… 2024 [x]."` → `"… 2024."` |
+| `(` `[` `{` | matching `)` `]` `}` | drop both surrounding brackets | `"[[x]]"` → `""` |
+
+Default is `false` (preserve the literal-delete behavior). `$`-prefix preservation runs first, so a picker returning `""` for `$[xxx]` with the default `PreserveDollarPrefix = true` ends up replacing with `"$"` (not empty) and coalescing is skipped — set `PreserveDollarPrefix = false` when you want the `$` to drop along with the brackets.
+
+Note the .NET implementation reads the live flat text of the enclosing block to find the immediate neighbors, so the rules work regardless of the `Boundary` setting. The npm TypeScript implementation uses the match's already-populated `contextBefore` / `contextAfter` (zero extra round-trip) — with `boundary: ContextBoundary.Bracket` the outer brackets are not visible to context, so the bracket-coalesce rule won't fire on the JS side. Callers using `CoalesceWhitespaceAroundEmptyFill` should leave `Boundary` at the default `Char`.
+
 ### `ReplaceInner` — strip brackets while preserving prefix/suffix
 
 ```csharp
