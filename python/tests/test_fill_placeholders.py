@@ -106,6 +106,9 @@ def test_fill_placeholders_picker_returning_none_skips(tour_plan_bytes: bytes) -
         # Every unfilled entry is a TemplatePlaceholder, not a stringly-typed shape.
         assert all(isinstance(u, TemplatePlaceholder) for u in result.unfilled)
         assert result.passes == 0  # nothing was filled
+        # Picker said no to everything → every placeholder is still present.
+        # `still_present` should equal the post-loop count.
+        assert result.still_present == result.skipped
 
 
 def test_fill_placeholders_preserves_dollar_prefix(tour_plan_bytes: bytes) -> None:
@@ -169,6 +172,8 @@ def test_fill_placeholders_alternative_clause_multipass(tour_plan_bytes: bytes) 
         )
         # The nested clause needs at least two passes to fully unwrap.
         assert result.passes >= 2
+        # Single-call done-check: no AlternativeClause matches remain.
+        assert result.still_present == 0
         leftover = session.find_placeholders(PlaceholderKinds.ALTERNATIVE_CLAUSE)
         assert leftover == ()
 

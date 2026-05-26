@@ -547,12 +547,18 @@ class BulkEditResult:
     across passes — counted once per placeholder lifetime). ``passes`` is the
     highest iteration pass that actually filled something (``0`` = nothing
     filled, ``1`` = one-shot convergence, higher = multi-pass nested-bracket
-    convergence). ``unfilled`` and ``errors`` mirror the C# shape.
+    convergence). ``still_present`` is a post-loop ``find_placeholders`` count
+    — the trustworthy "is the template done?" check (``skipped > 0 &&
+    still_present == 0`` means "picker said no on first sight but later passes
+    resolved it"; the canonical case from the NVCA Model COI). Mirrors the
+    C# ``BulkEditResult.StillPresent`` added in #191. ``unfilled`` and
+    ``errors`` mirror the C# shape.
     """
 
     filled: int
     skipped: int
     passes: int
+    still_present: int
     unfilled: tuple["TemplatePlaceholder", ...] = ()
     errors: tuple["EditError", ...] = ()
 

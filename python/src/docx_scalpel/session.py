@@ -328,10 +328,17 @@ class DocxSession:
             if pass_changes == 0:
                 break
 
+        # Recompute post-loop so callers can assert `still_present == 0` as the
+        # single-call "is the template done?" check (mirrors C# field added in #191).
+        still_present = len(
+            self.find_placeholders(opts.kinds, opts.scope, opts.context_chars, opts.boundary)
+        )
+
         return BulkEditResult(
             filled=filled,
             skipped=len(unfilled),
             passes=work_passes,
+            still_present=still_present,
             unfilled=tuple(unfilled),
             errors=tuple(errors),
         )
