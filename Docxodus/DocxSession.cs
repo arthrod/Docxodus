@@ -339,6 +339,55 @@ public sealed record TemplatePlaceholder
 
 public sealed record AnchorInfo(string Id, string Kind, string Scope, string TextPreview);
 
+/// <summary>
+/// Snapshot of the high-signal "is this template fillable yet?" state for a
+/// <see cref="DocxSession"/>. Returned by <see cref="DocxSession.GetEditSummary"/>.
+/// Composes existing primitives — <see cref="DocxSession.FindPlaceholders"/>,
+/// <see cref="DocxSession.Grep"/>, and the projection's <c>AnchorIndex</c> — into
+/// a single struct so an agent can ask "what's left to fill in?" without
+/// stitching three separate calls together.
+/// </summary>
+/// <remarks>
+/// All counts are derived from the live document state at the moment the
+/// summary is taken; mutate-then-read is the expected pattern. The placeholder
+/// and underscore lists are disjoint by construction (the underscore regex
+/// excludes runs already enclosed in <c>[…]</c>), so totaling them gives a
+/// true count of remaining slots without double-counting.
+/// </remarks>
+public sealed record EditSummary
+{
+    /// <summary>Total number of anchors in the projection (paragraphs, headings,
+    /// list items, tables, cells, footnotes, comments) — a rough proxy for
+    /// document complexity / addressable surface.</summary>
+    public int TotalAnchors { get; init; }
+
+    /// <summary>Bracketed placeholders still present, as returned by
+    /// <see cref="DocxSession.FindPlaceholders"/> with default scopes (all parts,
+    /// all kinds). Empty when the template is fully filled.</summary>
+    public IReadOnlyList<TemplatePlaceholder> RemainingPlaceholders { get; init; }
+        = Array.Empty<TemplatePlaceholder>();
+
+    /// <summary>Bare <c>___</c> runs of three or more underscores NOT enclosed in
+    /// brackets — the second-class placeholder shape that <see cref="DocxSession.FindPlaceholders"/>
+    /// deliberately skips. Surfaces here so callers see "fillable blanks Word
+    /// authors sometimes leave outside brackets" without a manual <see cref="DocxSession.Grep"/>.</summary>
+    public IReadOnlyList<TextMatch> BareUnderscoreRuns { get; init; }
+        = Array.Empty<TextMatch>();
+
+    /// <summary>Number of user-authored footnotes (excludes the two Word-reserved
+    /// boilerplate notes: <c>w:type="separator"</c> and <c>w:type="continuationSeparator"</c>).</summary>
+    public int FootnoteCount { get; init; }
+
+    /// <summary>Number of inline <c>w:footnoteReference</c> markers in the main body —
+    /// how many times any footnote is cited. May differ from <see cref="FootnoteCount"/>
+    /// if a footnote is referenced multiple times or an orphan footnote exists.</summary>
+    public int InlineFootnoteRefCount { get; init; }
+
+    /// <summary>Number of comment anchors in the projection (excludes the comment
+    /// range markers; counts each distinct comment thread once).</summary>
+    public int CommentCount { get; init; }
+}
+
 public sealed record MarkdownPatch(string ScopeAnchorId, string Markdown);
 
 public sealed record EditError(EditErrorCode Code, string Message, string? AnchorId = null);
@@ -1297,6 +1346,61 @@ public sealed class DocxSession : IDisposable
             _ => 0,
         };
     }
+
+    /// <summary>
+    /// Compose a high-signal snapshot of the session's edit-state — total anchors,
+    /// remaining bracketed placeholders, bare underscore runs, and footnote/comment
+    /// counts. Pure composition of existing primitives (<see cref="Project"/>,
+    /// <see cref="FindPlaceholders"/>, <see cref="Grep"/>) with no new logic, so
+    /// every count is exactly what the caller would compute by hand. Designed as
+    /// the canonical "what's left to fill in?" check after a mutation batch.
+    /// </summary>
+    /// <remarks>
+    /// The bare-underscore regex <c>(?&lt;!\[)_{3,}(?!\])</c> uses lookarounds to
+    /// exclude underscore runs already inside brackets — those are surfaced via
+    /// <see cref="EditSummary.RemainingPlaceholders"/>, so the two collections are
+    /// disjoint by construction.
+    /// </remarks>
+    public EditSummary GetEditSummary()
+    {
+        ThrowIfDisposed();
+
+        var projection = Project();
+        var placeholders = FindPlaceholders(PlaceholderKinds.All, ProjectionScopes.All);
+        var underscoreRuns = Grep(@"(?<!\[)_{3,}(?!\])");
+
+        int footnoteCount = 0;
+        int commentCount = 0;
+        foreach (var t in projection.AnchorIndex.Values)
+        {
+            if (t.Anchor.Kind == "fn" && t.Anchor.Scope == "fn") footnoteCount++;
+            else if (t.Anchor.Kind == "cmt" && t.Anchor.Scope == "cmt") commentCount++;
+        }
+
+        var main = _doc!.MainDocumentPart;
+        int inlineFnRefs = 0;
+        if (main is not null)
+            inlineFnRefs = main.GetXDocument().Root!.Descendants(W.footnoteReference).Count();
+
+        return new EditSummary
+        {
+            TotalAnchors = projection.AnchorIndex.Count,
+            RemainingPlaceholders = placeholders,
+            BareUnderscoreRuns = underscoreRuns,
+            FootnoteCount = footnoteCount,
+            InlineFootnoteRefCount = inlineFnRefs,
+            CommentCount = commentCount,
+        };
+    }
+
+    /// <summary>
+    /// Thin discoverability alias for <see cref="FindPlaceholders"/>. Same return
+    /// shape; the rename exists because "what's remaining?" reads more naturally
+    /// at agent call sites than "find the placeholders."
+    /// </summary>
+    public IReadOnlyList<TemplatePlaceholder> RemainingPlaceholders(
+        PlaceholderKinds kinds = PlaceholderKinds.All) =>
+        FindPlaceholders(kinds);
 
     /// <summary>
     /// Picker-driven template fill. For every placeholder matching

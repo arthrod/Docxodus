@@ -2702,4 +2702,47 @@ public class DocxSessionTests
         Assert.Contains("Section Two", afterMd);
         Assert.Contains("para 2.1", afterMd);
     }
+
+    // ─── GetEditSummary (issue #166 — DS280-DS283) ────────────────────────
+
+    [Fact]
+    public void DS280_GetEditSummary_CountsPlaceholdersOnUneditedDoc()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var summary = session.GetEditSummary();
+        Assert.True(summary.RemainingPlaceholders.Count >= 4);
+        Assert.True(summary.TotalAnchors > 0);
+    }
+
+    [Fact]
+    public void DS281_GetEditSummary_RemainingPlaceholdersShrinksAfterFill()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var before = session.GetEditSummary().RemainingPlaceholders.Count;
+        var result = session.FillPlaceholders(p => "FILLED", new FillOptions
+        {
+            Kinds = PlaceholderKinds.BlankFill,
+        });
+        Assert.True(result.Filled > 0);
+        var after = session.GetEditSummary().RemainingPlaceholders.Count;
+        Assert.True(after < before, $"expected after < before; got after={after} before={before}");
+    }
+
+    [Fact]
+    public void DS282_RemainingPlaceholders_MatchesFindPlaceholders()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var fromAlias = session.RemainingPlaceholders().Count;
+        var fromCanonical = session.FindPlaceholders().Count;
+        Assert.Equal(fromCanonical, fromAlias);
+    }
+
+    [Fact]
+    public void DS283_GetEditSummary_FootnoteCountsExcludeBoilerplate()
+    {
+        using var session = new DocxSession(BuildDocWithFootnotes());
+        var summary = session.GetEditSummary();
+        Assert.Equal(1, summary.FootnoteCount);
+        Assert.Equal(1, summary.InlineFootnoteRefCount);
+    }
 }
