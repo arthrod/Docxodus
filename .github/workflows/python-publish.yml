@@ -1,0 +1,237 @@
+name: python-publish
+
+# Builds + publishes the docx-scalpel PyPI distribution. Mirrors the trigger
+# shape of .github/workflows/publish.yml so a single v* tag releases the .NET
+# package (NuGet), the npm package, and the Python package together.
+#
+# v1 scope: linux-x64 wheel + sdist. Other RIDs (linux-arm64, osx-x64,
+# osx-arm64, win-x64) are mechanical add-ons; see python/RELEASING.md.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (PEP 440, e.g. 0.1.0a1, 1.0.0)'
+        required: true
+        type: string
+      target:
+        description: 'PyPI target — use testpypi to dry-run before a real release'
+        required: true
+        default: testpypi
+        type: choice
+        options:
+          - testpypi
+          - pypi
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  DOTNET_NOLOGO: true
+  # Match the lowest manylinux baseline we're willing to support. .NET 8
+  # self-contained linux-x64 builds depend on glibc 2.27+, so 2_28 is safe.
+  WHEEL_PLATFORM_TAG_LINUX_X64: manylinux_2_28_x86_64
+
+jobs:
+  resolve:
+    name: Resolve version + target
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.out.outputs.version }}
+      target: ${{ steps.out.outputs.target }}
+    steps:
+      - id: out
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ver='${{ inputs.version }}'
+            tgt='${{ inputs.target }}'
+          else
+            # tag pushes always go to production PyPI, like NuGet + npm do
+            ver="${GITHUB_REF#refs/tags/v}"
+            tgt="pypi"
+          fi
+          # PEP 440 sanity: reject empty and obvious shell metacharacters.
+          if [[ -z "$ver" || "$ver" == *[\$\`\"\'\\\;]* ]]; then
+            echo "::error::invalid version: $ver"; exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "target=$tgt"  >> "$GITHUB_OUTPUT"
+          echo "Resolved: version=$ver target=$tgt"
+
+  build-wheel-linux-x64:
+    name: Build wheel (linux-x64)
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Pin pyproject version
+        run: |
+          python - <<'PY'
+          import os, re, pathlib
+          ver = os.environ["VER"]
+          p = pathlib.Path("python/pyproject.toml")
+          src = p.read_text()
+          new = re.sub(r'^version\s*=\s*".*"', f'version = "{ver}"', src, count=1, flags=re.M)
+          p.write_text(new)
+          print("Set pyproject version to", ver)
+          PY
+        env:
+          VER: ${{ needs.resolve.outputs.version }}
+
+      - name: Publish docxodus-pyhost (linux-x64, self-contained, single-file)
+        run: |
+          dotnet publish tools/python-host/pyhost.csproj \
+            -c Release \
+            -r linux-x64 \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:PublishReadyToRun=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -o python/vendor/linux-x64
+
+      - name: Stage binary into wheel layout
+        run: |
+          mkdir -p python/src/docx_scalpel/_bin
+          cp python/vendor/linux-x64/docxodus-pyhost python/src/docx_scalpel/_bin/
+          chmod +x python/src/docx_scalpel/_bin/docxodus-pyhost
+          ls -la python/src/docx_scalpel/_bin/
+
+      - name: Smoke-test the bundled host
+        run: |
+          set -euo pipefail
+          out=$(printf '{"id":1,"op":"ping","args":{}}\n{"id":2,"op":"shutdown","args":{}}\n' \
+              | python/src/docx_scalpel/_bin/docxodus-pyhost)
+          echo "$out"
+          echo "$out" | grep -q '"pong":true' || { echo "ping failed"; exit 1; }
+
+      - name: Build wheel
+        run: |
+          set -euo pipefail
+          cd python
+          python -m pip install --upgrade pip build wheel
+          python -m build --wheel
+          ls -la dist/
+
+      - name: Retag wheel for ${{ env.WHEEL_PLATFORM_TAG_LINUX_X64 }}
+        run: |
+          set -euo pipefail
+          cd python/dist
+          # Use the wheel project's own CLI (PEP 491-aware), not a filename rename.
+          python -m wheel tags --remove --platform-tag="$WHEEL_PLATFORM_TAG_LINUX_X64" \
+            docx_scalpel-${VER}-py3-none-any.whl
+          ls -la
+        env:
+          VER: ${{ needs.resolve.outputs.version }}
+
+      - name: Run lifecycle tests against the built wheel
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/verify-venv
+          /tmp/verify-venv/bin/pip install --upgrade pip
+          /tmp/verify-venv/bin/pip install python/dist/*.whl pytest
+          # Use the wheel's bundled host, not the dev fallback.
+          unset DOCXODUS_HOST
+          /tmp/verify-venv/bin/pytest python/tests/test_lifecycle.py -v
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-x64
+          path: python/dist/*.whl
+          if-no-files-found: error
+
+  build-sdist:
+    name: Build sdist
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Pin pyproject version
+        run: |
+          python - <<'PY'
+          import os, re, pathlib
+          ver = os.environ["VER"]
+          p = pathlib.Path("python/pyproject.toml")
+          src = p.read_text()
+          new = re.sub(r'^version\s*=\s*".*"', f'version = "{ver}"', src, count=1, flags=re.M)
+          p.write_text(new)
+          PY
+        env:
+          VER: ${{ needs.resolve.outputs.version }}
+
+      - name: Build sdist
+        run: |
+          cd python
+          python -m pip install --upgrade pip build
+          python -m build --sdist
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: python/dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish to ${{ needs.resolve.outputs.target }}
+    needs:
+      - resolve
+      - build-wheel-linux-x64
+      - build-sdist
+    runs-on: ubuntu-latest
+    # The environment must be configured in repo Settings → Environments AND
+    # registered as a trusted publisher on PyPI/TestPyPI. See python/RELEASING.md.
+    environment:
+      name: ${{ needs.resolve.outputs.target }}
+      url: ${{ needs.resolve.outputs.target == 'testpypi' && 'https://test.pypi.org/p/docx-scalpel' || 'https://pypi.org/p/docx-scalpel' }}
+    permissions:
+      id-token: write   # OIDC for trusted publishing
+      contents: read
+    steps:
+      - name: Download wheel + sdist
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Inventory artifacts
+        run: |
+          ls -la dist/
+          test -n "$(ls dist/*.whl 2>/dev/null)" || { echo "no wheels found"; exit 1; }
+          test -n "$(ls dist/*.tar.gz 2>/dev/null)" || { echo "no sdist found"; exit 1; }
+
+      - name: Publish to TestPyPI
+        if: needs.resolve.outputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          print-hash: true
+          # Tolerate re-uploads — useful while iterating on the workflow.
+          skip-existing: true
+
+      - name: Publish to PyPI
+        if: needs.resolve.outputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          print-hash: true

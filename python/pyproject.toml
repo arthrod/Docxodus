@@ -39,10 +39,10 @@ Issues = "https://github.com/JSv4/Docxodus/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/docx_scalpel"]
-
-[tool.hatch.build.targets.wheel.shared-data]
-# Per-RID bundled host binary lands here via scripts/build_host.sh at wheel-build time.
-"vendor" = "docx_scalpel/_bin"
+# CI stages the per-RID host binary at src/docx_scalpel/_bin/docxodus-pyhost
+# before building the wheel — see .github/workflows/python-publish.yml and
+# python/RELEASING.md. We deliberately don't auto-pick from vendor/<rid>/
+# here because the wheel must contain exactly one (flat) binary, not all RIDs.
 
 [tool.hatch.build.targets.sdist]
 include = [
