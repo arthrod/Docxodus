@@ -157,6 +157,40 @@ What am I editing?
           session.Undo() restores prior state.
 ```
 
+## Bulk block removal — `DeleteRange` and `DeleteSection`
+
+### `DeleteRange` — bulk sibling removal
+
+`session.DeleteRange(fromAnchorId, toAnchorIdExclusive)` deletes every top-level
+block-level sibling between two anchors. Both endpoints must:
+
+- Be block-level kinds (`p`, `h`, `li`, `tbl`).
+- Live in the same package part (same scope).
+- Share a direct parent (the call refuses to span into nested containers like
+  table cells; use a per-cell `DeleteBlock` loop for those).
+- `from` must precede `to` in document order.
+
+Records **one** undo snapshot — `Undo()` after `DeleteRange` restores every
+removed element together. `EditResult.Removed` lists every anchor (including
+descendant anchors of removed blocks) that disappeared.
+
+Tracked-change mode (v1): `DeleteRange` does a structural delete regardless of
+`Settings.TrackedChanges`. Wrapping every run across many blocks in `w:del` is
+deferred until a consumer needs it.
+
+### `DeleteSection` — heading-bounded bulk removal
+
+`session.DeleteSection(headingAnchorId)` deletes a heading and every sibling
+below it up to (but not including) the next heading at the same or higher
+level. "Level" matches the projection's notion: `Heading1` = 1, `Heading2` = 2,
+…, `Title` = 1, `Subtitle` = 2.
+
+If the target heading has no sibling-heading boundary after it, the section
+extends to the end of the parent.
+
+Built on `DeleteRange` semantics: same undo, same EditResult shape, same v1
+tracked-change limitation.
+
 ## Finding anchors via tagged annotations
 
 The session addresses content by anchor id, but real workflows don't start with anchor ids — they start with intent ("edit the indemnification provision," "tighten the termination clause"). The clean way to bridge intent to anchors is to **annotate the regions ahead of time**, then resolve the annotation to its anchor(s) at edit time.
