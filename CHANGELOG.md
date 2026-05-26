@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **`FillOptions.Kinds` default → `PlaceholderKinds.All`.** The prior default (`BlankFill | Instruction`) silently excluded `AlternativeClause` placeholders, so a picker with `[two]` → `"two"` style bracket-stripping rules would appear to do nothing on those matches — confusing for any caller that wrote a single picker covering every kind it might see. The new default invokes the picker for every kind in the doc; pickers should return `null` for placeholders they don't recognize (the long-standing skip contract). Callers that relied on the prior filter behavior can set `Kinds = PlaceholderKinds.BlankFill | PlaceholderKinds.Instruction` explicitly.
+
 ### Fixed
 - **`tools/python-host/pyhost.csproj` — suppress StyleCop SA1633/SA1636 file-header rules** (issue #173). `dotnet build -c Release tools/python-host/pyhost.csproj` was failing because `Directory.Build.props` sets `TreatWarningsAsErrors=true` for Release and the python-host project inherited the StyleCop ruleset without suppressing the file-header warnings on `Dispatcher.cs` and `Program.cs`. Added `<NoWarn>$(NoWarn);SA1633;SA1636</NoWarn>` to the csproj, matching the existing convention in `wasm/DocxodusWasm/DocxodusWasm.csproj` for tooling/wasm subprojects.
 
