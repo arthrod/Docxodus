@@ -378,7 +378,24 @@ public sealed record TemplatePlaceholder
     public IReadOnlyList<PlaceholderKind> AlternativeKinds { get; init; } = Array.Empty<PlaceholderKind>();
 }
 
-public sealed record AnchorInfo(string Id, string Kind, string Scope, string TextPreview);
+public sealed record AnchorInfo(string Id, string Kind, string Scope, string TextPreview)
+{
+    /// <summary>
+    /// Resolved auto-numbering prefix (e.g. <c>"First"</c>, <c>"1."</c>). <c>null</c>
+    /// when the element has no numbering or the kind doesn't carry it. See
+    /// <see cref="AnchorTarget.AutoNumberPrefix"/> for the full rationale.
+    /// </summary>
+    public string? AutoNumberPrefix { get; init; }
+
+    /// <summary>What a reader sees: <see cref="AutoNumberPrefix"/> + space + <see cref="TextPreview"/>
+    /// when a prefix is present, otherwise just <see cref="TextPreview"/>.</summary>
+    public string FullText =>
+        string.IsNullOrEmpty(AutoNumberPrefix)
+            ? TextPreview
+            : string.IsNullOrEmpty(TextPreview)
+                ? AutoNumberPrefix!
+                : AutoNumberPrefix + " " + TextPreview;
+}
 
 /// <summary>
 /// Snapshot of the high-signal "is this template fillable yet?" state for a
@@ -628,7 +645,10 @@ public sealed class DocxSession : IDisposable
         ThrowIfDisposed();
         var target = FindAnchor(anchorId);
         if (target is null) return null;
-        return new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, target.TextPreview);
+        return new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, target.TextPreview)
+        {
+            AutoNumberPrefix = target.AutoNumberPrefix,
+        };
     }
 
     /// <summary>
@@ -650,7 +670,10 @@ public sealed class DocxSession : IDisposable
             var target = FindAnchor(id);
             result[id] = target is null
                 ? null
-                : new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, target.TextPreview);
+                : new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, target.TextPreview)
+                {
+                    AutoNumberPrefix = target.AutoNumberPrefix,
+                };
         }
         return result;
     }

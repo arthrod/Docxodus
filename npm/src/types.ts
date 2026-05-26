@@ -90,6 +90,12 @@ export interface MarkdownAnchorTarget {
   partUri: string;
   /** First ~80 characters of the element's flat text — for previewing/picking anchors. */
   textPreview: string;
+  /** Resolved auto-numbering prefix (e.g. "1.", "First") for paragraphs/headings/list
+   *  items whose style or `w:numPr` produces numbering. Absent when the element has
+   *  no numbering. The prefix is NOT included in {@link textPreview} because
+   *  textPreview reflects only the run text; this field gives callers the value
+   *  Word actually renders before the element's text. */
+  autoNumberPrefix?: string;
 }
 
 /**
@@ -1071,6 +1077,9 @@ export interface AnchorTargetRef extends AnchorRef {
   partUri: string;
   /** First ~80 characters of the element's flat text — for previewing/picking anchors. */
   textPreview: string;
+  /** Resolved auto-numbering prefix (e.g. "1.", "First") when the element carries
+   *  numbering. Absent otherwise. See {@link MarkdownAnchorTarget.autoNumberPrefix}. */
+  autoNumberPrefix?: string;
 }
 
 /**
@@ -1083,6 +1092,9 @@ export interface AnchorInfo {
   kind: string;
   scope: string;
   textPreview: string;
+  /** Resolved auto-numbering prefix (e.g. "1.", "First") when the element carries
+   *  numbering. Absent for un-numbered paragraphs or non-paragraph kinds. */
+  autoNumberPrefix?: string;
 }
 
 /**
