@@ -361,9 +361,11 @@ public sealed record EditSummary
     /// document complexity / addressable surface.</summary>
     public int TotalAnchors { get; init; }
 
-    /// <summary>Bracketed placeholders still present, as returned by
-    /// <see cref="DocxSession.FindPlaceholders"/> with default scopes (all parts,
-    /// all kinds). Empty when the template is fully filled.</summary>
+    /// <summary>Bracketed placeholders still present. Populated using
+    /// <see cref="ProjectionScopes.All"/> — body + headers/footers/footnotes/endnotes/comments —
+    /// so verification doesn't miss placeholders in non-body parts. Use
+    /// <see cref="DocxSession.FindPlaceholders"/> directly for narrower scope.
+    /// Empty when the template is fully filled.</summary>
     public IReadOnlyList<TemplatePlaceholder> RemainingPlaceholders { get; init; }
         = Array.Empty<TemplatePlaceholder>();
 
@@ -1356,10 +1358,14 @@ public sealed class DocxSession : IDisposable
     /// the canonical "what's left to fill in?" check after a mutation batch.
     /// </summary>
     /// <remarks>
-    /// The bare-underscore regex <c>(?&lt;!\[)_{3,}(?!\])</c> uses lookarounds to
-    /// exclude underscore runs already inside brackets — those are surfaced via
-    /// <see cref="EditSummary.RemainingPlaceholders"/>, so the two collections are
-    /// disjoint by construction.
+    /// The bare-underscore regex <c>(?&lt;![\[_])_{3,}(?![\]_])</c> uses lookarounds
+    /// that exclude both a bracket and an adjacent underscore, so they guard the
+    /// boundaries of the maximal underscore run (not just the regex match) and
+    /// avoid false positives inside <c>[_____]</c>. Bracketed underscore runs are
+    /// surfaced via <see cref="EditSummary.RemainingPlaceholders"/>, so the two
+    /// collections are disjoint by construction. Both queries run against
+    /// <see cref="ProjectionScopes.All"/> so headers/footers/footnotes/endnotes/comments
+    /// are counted symmetrically.
     /// </remarks>
     public EditSummary GetEditSummary()
     {
@@ -1367,7 +1373,7 @@ public sealed class DocxSession : IDisposable
 
         var projection = Project();
         var placeholders = FindPlaceholders(PlaceholderKinds.All, ProjectionScopes.All);
-        var underscoreRuns = Grep(@"(?<!\[)_{3,}(?!\])");
+        var underscoreRuns = Grep(@"(?<![\[_])_{3,}(?![\]_])", scope: ProjectionScopes.All);
 
         int footnoteCount = 0;
         int commentCount = 0;

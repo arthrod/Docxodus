@@ -2715,6 +2715,33 @@ public class DocxSessionTests
     }
 
     [Fact]
+    public void DS280b_GetEditSummary_BareUnderscoresExcludeBracketPlaceholders()
+    {
+        // BuildDocWithBracketPlaceholders contains "[_____]" and "[____________]"
+        // — both are bracketed placeholders, not bare underscore runs.
+        // EditSummary.BareUnderscoreRuns must be empty for this doc.
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var summary = session.GetEditSummary();
+        Assert.Empty(summary.BareUnderscoreRuns);
+    }
+
+    [Fact]
+    public void DS280c_GetEditSummary_BareUnderscoresPositiveCase()
+    {
+        // A doc with both a bare ____ and a bracketed [___] — only the bare run should match.
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Document(new Body(
+                new Paragraph(new Run(new Text("Fill ____ here. Also [___] should not count.")))));
+        }
+        using var session = new DocxSession(ms.ToArray());
+        var summary = session.GetEditSummary();
+        Assert.Single(summary.BareUnderscoreRuns);   // exactly the bare ____
+    }
+
+    [Fact]
     public void DS281_GetEditSummary_RemainingPlaceholdersShrinksAfterFill()
     {
         using var session = new DocxSession(BuildDocWithBracketPlaceholders());
