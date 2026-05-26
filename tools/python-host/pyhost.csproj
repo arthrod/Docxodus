@@ -9,6 +9,9 @@
     <AssemblyName>docxodus-pyhost</AssemblyName>
     <RootNamespace>Docxodus.PyHost</RootNamespace>
 
+    <!-- Suppress StyleCop file-header rules (matches wasm/DocxodusWasm convention for tooling subprojects) -->
+    <NoWarn>$(NoWarn);SA1633;SA1636</NoWarn>
+
     <!-- Self-contained single-file publish so the Python wheel ships zero
          system dependencies. The runtime is bundled inside the binary;
          users do not need to install .NET. Per-RID publish via
