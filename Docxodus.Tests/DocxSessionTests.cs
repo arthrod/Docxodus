@@ -412,6 +412,86 @@ public class DocxSessionTests
         }
     }
 
+    /// <summary>
+    /// Build a one-paragraph doc whose only paragraph has a numbered Heading2 style.
+    /// The numbering renders as "1." so callers can verify AutoNumberPrefix resolution.
+    /// </summary>
+    internal static byte[] BuildNumberedHeadingDoc(string text = "The total number of shares")
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+            mainPart.Document = new Document(new Body());
+            var body = mainPart.Document.Body!;
+
+            var stylesPart = mainPart.AddNewPart<StyleDefinitionsPart>();
+            stylesPart.Styles = new Styles(
+                new Style { Type = StyleValues.Paragraph, StyleId = "Heading2", StyleName = new StyleName { Val = "heading 2" } });
+            mainPart.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            var numPart = mainPart.AddNewPart<NumberingDefinitionsPart>();
+            numPart.Numbering = new Numbering(
+                new AbstractNum(
+                    new Level(
+                        new NumberingFormat { Val = NumberFormatValues.Decimal },
+                        new LevelText { Val = "%1." },
+                        new StartNumberingValue { Val = 1 })
+                    { LevelIndex = 0 })
+                { AbstractNumberId = 1 },
+                new NumberingInstance(new AbstractNumId { Val = 1 }) { NumberID = 1 });
+
+            var pPr = new ParagraphProperties(
+                new ParagraphStyleId { Val = "Heading2" },
+                new NumberingProperties(
+                    new NumberingLevelReference { Val = 0 },
+                    new NumberingId { Val = 1 }));
+            body.Append(new Paragraph(pPr, new Run(new Text(text))));
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void DS222_AnchorTarget_AutoNumberPrefix_ResolvedForNumberedHeading()
+    {
+        using var session = new DocxSession(BuildNumberedHeadingDoc());
+        var projection = session.Project();
+        var target = projection.AnchorIndex.Values
+            .Single(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "h");
+        Assert.Equal("1.", target.AutoNumberPrefix);
+        Assert.Equal("The total number of shares", target.TextPreview);
+        Assert.Equal("1. The total number of shares", target.FullText);
+    }
+
+    [Fact]
+    public void DS222a_AnchorInfo_CarriesAutoNumberPrefix()
+    {
+        // GetAnchorInfo() must surface the resolved prefix all the way to the
+        // public API so callers don't need to walk AnchorIndex themselves.
+        using var session = new DocxSession(BuildNumberedHeadingDoc("My heading"));
+        var projection = session.Project();
+        var target = projection.AnchorIndex.Values
+            .Single(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "h");
+        var info = session.GetAnchorInfo(target.Anchor.Id);
+        Assert.NotNull(info);
+        Assert.Equal("1.", info!.AutoNumberPrefix);
+        Assert.Equal("1. My heading", info.FullText);
+    }
+
+    [Fact]
+    public void DS222b_AnchorTarget_AutoNumberPrefix_NullForUnnumberedParagraph()
+    {
+        // A plain paragraph without w:numPr has no prefix and FullText == TextPreview.
+        using var session = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var projection = session.Project();
+        foreach (var t in projection.AnchorIndex.Values
+                      .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p"))
+        {
+            Assert.Null(t.AutoNumberPrefix);
+            Assert.Equal(t.TextPreview, t.FullText);
+        }
+    }
+
     [Fact]
     public void DS230_ReplaceInner_StripsBracketsKeepsPrefix()
     {

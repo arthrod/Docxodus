@@ -356,8 +356,10 @@ internal static class DocxSessionJson
               .Append(",\"unid\":").Append(JsonString(kv.Value.Unid))
               .Append(",\"kind\":").Append(JsonString(kv.Value.Anchor.Kind))
               .Append(",\"scope\":").Append(JsonString(kv.Value.Anchor.Scope))
-              .Append(",\"textPreview\":").Append(JsonString(kv.Value.TextPreview))
-              .Append('}');
+              .Append(",\"textPreview\":").Append(JsonString(kv.Value.TextPreview));
+            if (kv.Value.AutoNumberPrefix is { } prefix)
+                sb.Append(",\"autoNumberPrefix\":").Append(JsonString(prefix));
+            sb.Append('}');
         }
         sb.Append("}}");
         return sb.ToString();
@@ -437,8 +439,10 @@ internal static class DocxSessionJson
           .Append(",\"scope\":").Append(JsonString(t.Anchor.Scope))
           .Append(",\"unid\":").Append(JsonString(t.Unid))
           .Append(",\"partUri\":").Append(JsonString(t.PartUri))
-          .Append(",\"textPreview\":").Append(JsonString(t.TextPreview))
-          .Append('}');
+          .Append(",\"textPreview\":").Append(JsonString(t.TextPreview));
+        if (t.AutoNumberPrefix is { } prefix)
+            sb.Append(",\"autoNumberPrefix\":").Append(JsonString(prefix));
+        sb.Append('}');
     }
 
     public static string SerializeAnchorTargetOrNull(AnchorTarget? target)
@@ -472,8 +476,10 @@ internal static class DocxSessionJson
         sb.Append("{\"id\":").Append(JsonString(info.Id))
           .Append(",\"kind\":").Append(JsonString(info.Kind))
           .Append(",\"scope\":").Append(JsonString(info.Scope))
-          .Append(",\"textPreview\":").Append(JsonString(info.TextPreview))
-          .Append('}');
+          .Append(",\"textPreview\":").Append(JsonString(info.TextPreview));
+        if (info.AutoNumberPrefix is { } prefix)
+            sb.Append(",\"autoNumberPrefix\":").Append(JsonString(prefix));
+        sb.Append('}');
         return sb.ToString();
     }
 

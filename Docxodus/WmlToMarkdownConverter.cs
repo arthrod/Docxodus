@@ -168,6 +168,34 @@ public sealed class AnchorTarget
     public string TextPreview { get; init; } = string.Empty;
 
     /// <summary>
+    /// Resolved auto-numbering prefix Word would render for this element — e.g.
+    /// <c>"First"</c>, <c>"1."</c>, <c>"1.1"</c>. <c>null</c> when the element has
+    /// no <c>w:numPr</c>, when its style doesn't contribute numbering, or when
+    /// the kind doesn't carry numbering (everything except <c>p</c>/<c>h</c>/<c>li</c>).
+    /// <para>
+    /// This bridges a foot-gun: the markdown projection emits the resolved prefix
+    /// inline (so <c>"# First The total number…"</c> in the rendered markdown),
+    /// but the underlying run text contains only <c>"The total number…"</c>. A
+    /// caller searching the doc via <see cref="DocxSession.Grep"/> for what they
+    /// see in the projection won't find <c>"First"</c> on its own — it lives here.
+    /// </para>
+    /// </summary>
+    public string? AutoNumberPrefix { get; init; }
+
+    /// <summary>
+    /// The element's text as a reader would see it: <see cref="AutoNumberPrefix"/>
+    /// joined with <see cref="TextPreview"/> by a single space when a prefix is
+    /// present, otherwise just <see cref="TextPreview"/>. Convenience for UI / log
+    /// surfaces that want "what does this block say?" without re-resolving numbering.
+    /// </summary>
+    public string FullText =>
+        string.IsNullOrEmpty(AutoNumberPrefix)
+            ? TextPreview
+            : string.IsNullOrEmpty(TextPreview)
+                ? AutoNumberPrefix!
+                : AutoNumberPrefix + " " + TextPreview;
+
+    /// <summary>
     /// Resolves this anchor to its current <see cref="XElement"/> inside the given document.
     /// Returns null if the element has been removed since projection.
     /// </summary>
@@ -368,6 +396,9 @@ public static class WmlToMarkdownConverter
                     PartUri = scope.Part.Uri.ToString(),
                     Unid = unid,
                     TextPreview = ComputeTextPreview(el),
+                    AutoNumberPrefix = kind is "p" or "h" or "li" && scope.Name == "body"
+                        ? Internal.ListNumberResolver.Resolve(el, doc)
+                        : null,
                 };
             }
             scope.Part.PutXDocument();

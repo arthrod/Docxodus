@@ -167,6 +167,15 @@ of the element's flat text — computed during projection. Agents iterating
 `AnchorIndex` for a UI list or LLM context window can read previews directly
 without re-walking each element via `session.GetAnchorInfo`.
 
+For paragraphs / headings / list items in the body that carry numbering
+(inline `w:numPr` or numbering inherited from a style), `AnchorTarget` also
+exposes `AutoNumberPrefix` — the resolved label Word renders before the
+element (e.g. `"1."`, `"1.1"`, `"First"`). The prefix is *not* part of the
+flat run text, so it doesn't appear in `TextPreview` and isn't searchable via
+`Grep`. The convenience `AnchorTarget.FullText` joins `AutoNumberPrefix` and
+`TextPreview` for callers that want "what does a reader see?" without
+re-resolving numbering. `AnchorInfo` carries the same two fields.
+
 Word-reserved footnote/endnote separators (`type="separator"` /
 `type="continuationSeparator"`) are excluded from `AnchorIndex` — they're
 structural plumbing for Word's separator-line rendering, have no editorial
