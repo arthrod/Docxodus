@@ -2576,4 +2576,17 @@ public class DocxSessionTests
         Assert.Contains("Paragraph D", afterMd);
         Assert.Contains("Paragraph E", afterMd);
     }
+
+    [Fact]
+    public void DS266_HeadingLevelHelpersExposedAsInternal()
+    {
+        // Regression guard: DocxSession.DeleteSection (Task 5) needs to consume these
+        // helpers from WmlToMarkdownConverter. If a future refactor demotes them back
+        // to private, the build of DeleteSection breaks — this test fails to build.
+        var p = new XElement(W.p,
+            new XElement(W.pPr,
+                new XElement(W.pStyle, new XAttribute(W.val, "Heading2"))));
+        Assert.True(WmlToMarkdownConverter.IsHeading(p));
+        Assert.Equal(2, WmlToMarkdownConverter.HeadingLevel(p));
+    }
 }

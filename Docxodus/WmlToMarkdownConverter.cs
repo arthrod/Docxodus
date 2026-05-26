@@ -394,7 +394,7 @@ public static class WmlToMarkdownConverter
         return null;
     }
 
-    private static bool IsHeading(XElement p)
+    internal static bool IsHeading(XElement p)
     {
         var styleId = (string?)p.Element(W.pPr)?.Element(W.pStyle)?.Attribute(W.val);
         if (string.IsNullOrEmpty(styleId)) return false;
@@ -741,7 +741,7 @@ public static class WmlToMarkdownConverter
         return $"{{#{kind}:{ctx.Scope}:{unid}}} ";
     }
 
-    private static int HeadingLevel(XElement p)
+    internal static int HeadingLevel(XElement p)
     {
         var styleId = (string?)p.Element(W.pPr)?.Element(W.pStyle)?.Attribute(W.val) ?? string.Empty;
         if (styleId.Equals("Title", StringComparison.OrdinalIgnoreCase)) return 1;
