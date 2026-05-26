@@ -172,6 +172,106 @@ Word-reserved footnote/endnote separators (`type="separator"` /
 structural plumbing for Word's separator-line rendering, have no editorial
 content, and cannot be deleted. They do not appear in the projection text either.
 
+## Anchor id rendering modes
+
+`WmlToMarkdownConverterSettings.AnchorIdRendering` controls how anchor ids
+appear in the rendered markdown. The underlying anchor **identity** (the `Unid`
+attribute on the XML element, exposed as `AnchorTarget.Unid` and as the `unid`
+portion of `Anchor.Id`) is unchanged — only the **display** of the id changes.
+This is purely a token-budget optimization for LLM-facing pipelines; the
+canonical lookup key remains the full Unid.
+
+### `FullUnid` (default)
+
+Anchor tokens use the full 32-hex-char Unid:
+
+```markdown
+{#p:body:a1b2c3d4e5f60718293a4b5c6d7e8f90}
+First paragraph text.
+
+{#p:body:c0a5e891b234567890abcdef01234567}
+Second paragraph text.
+```
+
+Stable across reorderings and edits. Best when anchor ids cross process
+boundaries or get persisted (caches, audit logs, undo histories).
+
+### `Abbreviated`
+
+Unids are shortened to the shortest unique prefix per `(kind, scope)` bucket,
+with a 4-char floor:
+
+```markdown
+{#p:body:a1b2}
+First paragraph text.
+
+{#p:body:c0a5}
+Second paragraph text.
+```
+
+LLM-friendly: tokens shrink from 32 hex chars to ~4-5, freeing context budget
+in long documents. Saves ~5-10% of the projection's total token count on a
+typical contract. Within a single projection these ids are unambiguous (the
+trim algorithm guarantees uniqueness per bucket); across projections they're
+not stable, so don't persist them.
+
+### `Sequential`
+
+Unids are replaced with 1-based per-bucket counters in document order:
+
+```markdown
+{#p:body:1}
+First paragraph text.
+
+{#p:body:2}
+Second paragraph text.
+
+{#h:body:1}
+A Heading.
+```
+
+Maximally token-efficient. Best for one-shot LLM contexts and replay logs
+where stability across edits doesn't matter and the numbering itself carries
+useful ordering information. These ids are **not** stable across `Project()`
+calls — a single insert anywhere in the document can renumber everything
+below it — so they must not be persisted or held across mutations.
+
+### Dual-keyed `AnchorIndex`
+
+In non-`FullUnid` modes, the `AnchorIndex` is **dual-keyed**: both the full
+Unid AND the rendered (abbreviated / sequential) id resolve to the same
+`AnchorTarget` entry. A caller that reads an abbreviated or sequential id out
+of the markdown can hand it straight back to `DocxSession.ProjectAnchor` (or
+any other anchor-addressed method like `ReplaceText`, `DeleteBlock`,
+`ApplyFormat`, …) without an explicit translation step. Internally,
+`DocxSession.FindAnchor` first tries the exact key, then falls back to a
+Unid-only scan — so even if the prefix metadata has shifted (e.g., a kind
+flip from `p` → `h` after `SetParagraphStyle`), the rendered id still
+resolves.
+
+`Anchor.Token` always returns the canonical full-Unid form regardless of the
+rendering mode in use — it's the authoritative identifier. The rendered id is
+purely a display optimization in the markdown text; downstream code that
+wants a stable cross-session handle should read from `AnchorTarget.Unid` or
+`Anchor.Token`.
+
+### Worked example
+
+Given a body with two paragraphs and one heading, the projection under each
+mode (same document, same Unids underneath):
+
+| Mode | Rendered token (first paragraph) |
+|---|---|
+| `FullUnid` | `{#p:body:a1b2c3d4e5f60718293a4b5c6d7e8f90}` |
+| `Abbreviated` | `{#p:body:a1b2}` |
+| `Sequential` | `{#p:body:1}` |
+
+All three of `projection.AnchorIndex["p:body:a1b2c3d4e5f60718293a4b5c6d7e8f90"]`,
+`projection.AnchorIndex["p:body:a1b2"]`, and (under `Sequential`)
+`projection.AnchorIndex["p:body:1"]` return the same `AnchorTarget` whose
+`Unid` is `a1b2c3d4e5f60718293a4b5c6d7e8f90` and whose `Anchor.Token` is
+`{#p:body:a1b2c3d4e5f60718293a4b5c6d7e8f90}`.
+
 ## Settings (Planned)
 
 ```csharp

@@ -371,6 +371,49 @@ and costs ~200ms at construction. Turn it off if you don't plan to diff.
 `DiffFormat.Unified` and `DiffFormat.SideBySide` are reserved for v2 (line-based diff)
 — they throw `NotSupportedException` in v1. See issue #178.
 
+## Sliced projection — `ProjectAnchor`
+
+`session.Project()` returns the full document — usually overkill when an agent
+only needs to read or edit one section. `session.ProjectAnchor(anchorId, depth?)`
+returns a `MarkdownProjection` whose `Markdown` contains only the blocks in
+scope and whose `AnchorIndex` is filtered to those blocks plus their
+descendants:
+
+```csharp
+// Just the heading paragraph itself
+var self = session.ProjectAnchor(headingAnchor, ProjectionDepth.SelfOnly);
+
+// A table and all its rows/cells
+var table = session.ProjectAnchor(tblAnchor, ProjectionDepth.Subtree);
+
+// A heading + everything under it up to the next same-or-higher heading
+// (the default — the "give me this section" case)
+var section = session.ProjectAnchor(headingAnchor);
+```
+
+`ProjectionDepth` values:
+
+| Value | Behavior |
+|---|---|
+| `SelfOnly` | Just the addressed block — its anchor and its own text. For headings, returns only the heading paragraph, not the section underneath. |
+| `Subtree` | Self + descendants. Most useful for `tbl` anchors (returns the whole table). For paragraph-like anchors, equivalent to `SelfOnly` since they have no descendants. |
+| `SubtreeAndFollowingSiblings` (default) | Self + descendants + following siblings up to (but not including) the next sibling at the same or higher heading level. For non-heading anchors, equivalent to `Subtree`. |
+
+Useful for showing an LLM one section at a time without paying the ~1 s
+full-projection cost per turn — the agent reads, decides, edits, and
+re-projects only the slice it touched.
+
+The `anchorId` argument accepts whatever rendering form the projection's
+`AnchorIdRendering` setting emits — the dual-keyed `AnchorIndex` resolves
+full Unids, abbreviated ids, and sequential ids interchangeably. See
+[`markdown_projection.md`](markdown_projection.md#anchor-id-rendering-modes)
+for the rendering modes.
+
+Returns the same `MarkdownProjection` shape as `Project()` — caller code that
+already consumes the full projection (e.g., reading `AnchorIndex` to find
+follow-up edit targets) works unchanged on a slice. Throws
+`InvalidOperationException` if the anchor isn't in the current `AnchorIndex`.
+
 ## ReplaceTextRange — surgical text edits
 
 `session.ReplaceTextRange(anchorId, find, replace, options?)` finds every literal occurrence of `find` in one paragraph/heading/list-item's flat text and substitutes `replace` for each, returning an `EditResult` per attempted match. Built on `Grep` — same fragment walker, opposite direction.
