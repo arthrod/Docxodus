@@ -4,7 +4,21 @@
 
 `docx-scalpel` exposes Docxodus' stateful DOCX editor over a long-running .NET subprocess (`docxodus-pyhost`). The session lives in the host's memory until you explicitly release it, so an LLM agent can issue dozens of small edits against one document without paying the OOXML parse + Unid annotation + projection cost on every call.
 
-> **Status:** `0.1.0a0` — scaffold complete, smoke + lifecycle tests passing against a dev binary. Wheel packaging (`cibuildwheel` per-RID, bundled self-contained host) is a follow-up branch.
+> **Status:** Alpha. linux-x64 wheels ship with a bundled `docxodus-pyhost`; other RIDs require a dev clone of Docxodus until the wheel matrix is extended (tracked in `RELEASING.md`).
+
+## Installation
+
+```bash
+pip install docx-scalpel
+```
+
+linux-x64 today; pre-release tags ship as `0.1.0a*`, so use `--pre` if you want to opt in:
+
+```bash
+pip install --pre docx-scalpel
+```
+
+Source installs (`pip install` of the sdist, or `pip install -e .` from a dev clone) don't include a bundled host. Set `DOCXODUS_HOST=/path/to/docxodus-pyhost` to point at one you built, or run `dotnet build tools/python-host/pyhost.csproj` inside a Docxodus monorepo clone — the locator auto-discovers it.
 
 ## Quick start
 
@@ -15,9 +29,12 @@ with open("contract.docx", "rb") as f:
     docx_bytes = f.read()
 
 with open_session(docx_bytes) as session:
-    # Walk template placeholders and fill them.
-    for placeholder in session.find_placeholders():
-        session.replace_match(placeholder.match, "filled value")
+    # Walk template placeholders and fill them. The picker returns a string to
+    # replace, or None to skip. fill_placeholders handles reverse-offset
+    # ordering, $-prefix preservation, and multi-pass nested-bracket convergence
+    # in one call.
+    result = session.fill_placeholders(lambda p: "filled value")
+    print(f"filled {result.filled} placeholders in {result.passes} passes")
 
     # Add a heading after the first body paragraph.
     proj = session.project()

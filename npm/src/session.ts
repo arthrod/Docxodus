@@ -405,9 +405,12 @@ export class DocxSession {
       if (passChanges === 0) break;
     }
 
+    const stillPresent = this.findPlaceholders(kinds, scope).length;
+
     return {
       filled,
       skipped: unfilled.length,
+      stillPresent,
       passes: workPasses,
       unfilled,
       errors,

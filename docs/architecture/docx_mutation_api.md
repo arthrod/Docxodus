@@ -174,9 +174,16 @@ Records **one** undo snapshot — `Undo()` after `DeleteRange` restores every
 removed element together. `EditResult.Removed` lists every anchor (including
 descendant anchors of removed blocks) that disappeared.
 
-Tracked-change mode (v1): `DeleteRange` does a structural delete regardless of
-`Settings.TrackedChanges`. Wrapping every run across many blocks in `w:del` is
-deferred until a consumer needs it.
+**Tracked-change mode** (`Settings.TrackedChanges = RenderInline`): `DeleteRange`
+wraps each removed paragraph's runs in `w:del` and marks the paragraph mark
+itself as deleted via `w:pPr/w:rPr/w:del`. Tables get `w:trPr/w:del` on every
+row (Word's row-deletion convention — there is no table-level "delete" markup),
+plus the same run/paragraph-mark wrapping inside every cell. Nested tables
+recurse. Anchors stay live in the document tree, so the top-level block anchors
+land in `EditResult.Modified` instead of `Removed` and callers can re-address
+them before accepting the changes. Block kinds outside `w:p` / `w:tbl` (e.g.
+`w:sdt` content controls in the middle of a range) still fall back to structural
+removal in tracked mode — file a follow-up if a consumer needs them tracked.
 
 ### `DeleteSection` — heading-bounded bulk removal
 
@@ -188,8 +195,10 @@ level. "Level" matches the projection's notion: `Heading1` = 1, `Heading2` = 2,
 If the target heading has no sibling-heading boundary after it, the section
 extends to the end of the parent.
 
-Built on `DeleteRange` semantics: same undo, same EditResult shape, same v1
-tracked-change limitation.
+Built on `DeleteRange` semantics via the shared `DeleteSiblingRangeCore` helper:
+same undo, same EditResult shape, same tracked-change behavior (paragraphs and
+tables get `w:del` markup, anchors stay live, block kinds outside `w:p`/`w:tbl`
+fall back to structural removal).
 
 ## Finding anchors via tagged annotations
 
@@ -297,7 +306,7 @@ var summary = session.FillPlaceholders(p => p.Kind switch
     PlaceholderKind.BlankFill when p.Match.ContextBefore.TrimEnd().EndsWith("name is") => "ACME, INC.",
     _ => null
 });
-// summary.Filled / .Skipped / .Passes / .Unfilled / .Errors
+// summary.Filled / .Skipped / .StillPresent / .Passes / .Unfilled / .Errors
 ```
 
 What `FillPlaceholders` does internally that the recipe doesn't:
@@ -309,6 +318,8 @@ What `FillPlaceholders` does internally that the recipe doesn't:
 The picker is invoked for every kind in `FillOptions.Kinds`, which defaults to `PlaceholderKinds.All` — so a picker that wants to ignore alternative-clause brackets should return `null` for them rather than relying on the option to filter them out. Set `Kinds = BlankFill | Instruction` if you want the prior behavior of leaving alternative clauses untouched.
 
 The picker is invoked once per placeholder per pass; return `null` to skip. `BulkEditResult.Unfilled` lists every placeholder the picker said `null` to (deduplicated across passes). `BulkEditResult.Passes` is the highest iteration pass that actually filled at least one placeholder (so a single-fill convergence reports `Passes = 1`, not 2).
+
+`BulkEditResult.Skipped` is the *first-pass-null* count and is **not** a reliable "is the template done?" signal — a placeholder the picker said `null` to in pass 1 may be fully resolved by pass 2 (a nested-outer wrapper becomes fillable once its inner is stripped, or a structural delete removes the placeholder entirely). Assert on `BulkEditResult.StillPresent == 0` for the trustworthy single-call check: it's a post-loop `FindPlaceholders(opts.Kinds, opts.Scope).Count`, so `Skipped > 0 && StillPresent == 0` correctly reads as "picker skipped on the first pass but later passes finished the job."
 
 #### `FillOptions.CoalesceWhitespaceAroundEmptyFill`
 

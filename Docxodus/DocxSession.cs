@@ -335,8 +335,28 @@ public sealed record BulkEditResult
     public int Filled { get; init; }
 
     /// <summary>Number of placeholders for which the picker returned <c>null</c>
-    /// (counted once per placeholder, in the first pass that saw it).</summary>
+    /// (counted once per placeholder, in the first pass that saw it). This is
+    /// <em>not</em> a trustworthy "did the fill leave anything undone?" signal —
+    /// a placeholder the picker said <c>null</c> to in pass 1 may be fully
+    /// resolved by pass 2 (e.g. a nested-outer wrapper becomes fillable once
+    /// its inner is stripped, or a structural delete removes the placeholder
+    /// entirely). Use <see cref="StillPresent"/> for the "is the template
+    /// done?" check, and consult <see cref="Unfilled"/> for the per-placeholder
+    /// detail.</summary>
     public int Skipped { get; init; }
+
+    /// <summary>Number of placeholders matching <see cref="FillOptions.Kinds"/>
+    /// in <see cref="FillOptions.Scope"/> that remain in the document after the
+    /// final pass. This is the metric to assert on when you want to know
+    /// whether the template is fully filled — <c>0</c> means every placeholder
+    /// the loop visited is now gone (filled, stripped, or removed by a
+    /// structural edit). Unlike <see cref="Skipped"/>, this is taken from the
+    /// post-loop document state, so multi-pass convergence is reflected
+    /// correctly: <c>Skipped &gt; 0</c> together with <c>StillPresent = 0</c> means
+    /// "picker said no the first time but later passes finished the job."
+    /// Computed via a single <see cref="DocxSession.FindPlaceholders"/> call
+    /// scoped to the same kinds/scope the loop was operating on.</summary>
+    public int StillPresent { get; init; }
 
     /// <summary>The highest iteration pass that actually filled at least one
     /// placeholder matching <see cref="FillOptions.Kinds"/>. <c>1</c> means a
@@ -1733,11 +1753,14 @@ public sealed class DocxSession : IDisposable
 
     /// <summary>
     /// Diffs the projection captured at session construction against the current projection
-    /// and returns an anchor-keyed change list. Keyed by <see cref="AnchorTarget.Unid"/>
-    /// (stable across mutations) rather than the anchor id (which can flip kind prefix
-    /// when a paragraph is promoted to a heading, etc.). Requires
-    /// <see cref="DocxSessionSettings.CaptureInitialProjection"/> to have been <c>true</c>
-    /// at construction time.
+    /// and returns an anchor-keyed change list. Keyed by <c>(scope, Unid)</c> — the Unid
+    /// is stable across mutations and kind flips (a paragraph promoted to a heading keeps
+    /// its Unid while its anchor kind goes from "p" to "h"), and the scope qualifier guards
+    /// against cross-part Unid collisions (the deterministic Unid scheme seeds each scope's
+    /// root with the root element's local name, so two header parts whose first paragraph
+    /// has identical structure end up with the same raw Unid in different scopes — see
+    /// issue #187). Requires <see cref="DocxSessionSettings.CaptureInitialProjection"/>
+    /// to have been <c>true</c> at construction time.
     /// </summary>
     /// <param name="format">Output shape. Only <see cref="DiffFormat.Json"/> is supported
     /// in v1; <see cref="DiffFormat.Unified"/> and <see cref="DiffFormat.SideBySide"/>
@@ -1769,15 +1792,30 @@ public sealed class DocxSession : IDisposable
 
     private static List<DiffEntry> ComputeDiff(MarkdownProjection initial, MarkdownProjection current)
     {
-        var initialByUnid = initial.AnchorIndex.Values.ToDictionary(t => t.Unid, t => t);
-        var currentByUnid = current.AnchorIndex.Values.ToDictionary(t => t.Unid, t => t);
+        // Key by (scope, Unid). Two reasons we cannot use Unid alone:
+        //   1. AnchorIndex is dual-keyed under non-FullUnid rendering (the same
+        //      AnchorTarget is reachable via its full Unid key and its rendered
+        //      alias key), so AnchorIndex.Values enumerates the same target twice.
+        //   2. The deterministic Unid scheme seeds each scope's root with the root
+        //      element's local name ("hdr" for every header part, "ftr" for every
+        //      footer part), so two header parts whose first paragraph has the
+        //      same content + position end up with identical raw Unids in
+        //      different scopes (reproduced on the NVCA Model COI — issue #187).
+        // DistinctBy collapses duplicates from case (1); the composite key
+        // separates legitimately distinct targets from case (2).
+        var initialByKey = initial.AnchorIndex.Values
+            .DistinctBy(t => (t.Anchor.Scope, t.Unid))
+            .ToDictionary(t => (t.Anchor.Scope, t.Unid));
+        var currentByKey = current.AnchorIndex.Values
+            .DistinctBy(t => (t.Anchor.Scope, t.Unid))
+            .ToDictionary(t => (t.Anchor.Scope, t.Unid));
 
         var entries = new List<DiffEntry>();
 
         // Deletes: in initial, missing from current.
-        foreach (var (unid, target) in initialByUnid)
+        foreach (var (key, target) in initialByKey)
         {
-            if (currentByUnid.ContainsKey(unid)) continue;
+            if (currentByKey.ContainsKey(key)) continue;
             entries.Add(new DiffEntry
             {
                 Op = "delete",
@@ -1790,9 +1828,9 @@ public sealed class DocxSession : IDisposable
         // Kind can flip without a text change (e.g., SetParagraphStyle promoting
         // a paragraph to a heading flips Anchor.Kind from "p" to "h" while
         // preserving the Unid and TextPreview).
-        foreach (var (unid, initialTarget) in initialByUnid)
+        foreach (var (key, initialTarget) in initialByKey)
         {
-            if (!currentByUnid.TryGetValue(unid, out var currentTarget)) continue;
+            if (!currentByKey.TryGetValue(key, out var currentTarget)) continue;
             if (initialTarget.TextPreview == currentTarget.TextPreview
                 && initialTarget.Anchor.Kind == currentTarget.Anchor.Kind) continue;
             entries.Add(new DiffEntry
@@ -1805,9 +1843,9 @@ public sealed class DocxSession : IDisposable
         }
 
         // Inserts: in current, missing from initial.
-        foreach (var (unid, target) in currentByUnid)
+        foreach (var (key, target) in currentByKey)
         {
-            if (initialByUnid.ContainsKey(unid)) continue;
+            if (initialByKey.ContainsKey(key)) continue;
             entries.Add(new DiffEntry
             {
                 Op = "insert",
@@ -1952,10 +1990,13 @@ public sealed class DocxSession : IDisposable
             if (passChanges == 0) break;
         }
 
+        int stillPresent = FindPlaceholders(opts.Kinds, opts.Scope).Count;
+
         return new BulkEditResult
         {
             Filled = filled,
             Skipped = unfilled.Count,
+            StillPresent = stillPresent,
             Passes = workPasses,
             Unfilled = unfilled,
             Errors = errors,
@@ -2430,9 +2471,14 @@ public sealed class DocxSession : IDisposable
     /// <see cref="Undo"/> restores the entire range together.
     /// </summary>
     /// <remarks>
-    /// In <see cref="TrackedChangeMode.RenderInline"/>, v1 still does a structural delete
-    /// (does not wrap runs in <c>w:del</c>). Track-changes wrapping for bulk deletes is
-    /// deferred — open a follow-up issue if a consumer needs it.
+    /// In <see cref="TrackedChangeMode.RenderInline"/>, each paragraph in the range has
+    /// its runs wrapped in <c>w:del</c> and its paragraph-mark marked deleted via
+    /// <c>w:pPr/w:rPr/w:del</c>; each table row gets a <c>w:trPr/w:del</c> marker with
+    /// its cell paragraphs wrapped recursively. Anchors stay live (<see cref="EditResult.Modified"/>
+    /// instead of <see cref="EditResult.Removed"/>) so callers can re-address the same
+    /// blocks before changes are accepted. Block-level elements other than <c>w:p</c>
+    /// and <c>w:tbl</c> (e.g. <c>w:sdt</c>) are still structurally removed in this mode
+    /// — issue #177 follow-up if a consumer needs them tracked.
     /// </remarks>
     public EditResult DeleteRange(string fromAnchorId, string toAnchorIdExclusive)
     {
@@ -2480,8 +2526,9 @@ public sealed class DocxSession : IDisposable
     /// <remarks>
     /// "Level" is the same notion <see cref="WmlToMarkdownConverter"/> uses for the projection:
     /// <c>Heading1</c> = 1, <c>Heading2</c> = 2, etc.; <c>Title</c> = 1, <c>Subtitle</c> = 2.
-    /// Tracked-change mode applies the same v1 limitation as <see cref="DeleteRange"/>:
-    /// structural delete regardless of <see cref="DocxSessionSettings.TrackedChanges"/>.
+    /// Tracked-change mode inherits <see cref="DeleteRange"/>'s behavior via the shared
+    /// <c>DeleteSiblingRangeCore</c> helper: paragraphs and tables are wrapped in
+    /// <c>w:del</c> markup rather than removed.
     /// </remarks>
     public EditResult DeleteSection(string headingAnchorId)
     {
@@ -2545,6 +2592,44 @@ public sealed class DocxSession : IDisposable
         try
         {
             var index = Project().AnchorIndex;
+            bool trackedChanges = _settings.TrackedChanges == TrackedChangeMode.RenderInline;
+
+            if (trackedChanges)
+            {
+                // Tracked-change path: mark each block with w:del markup rather than
+                // removing it. Anchors stay live in the document tree so callers can
+                // re-address the same blocks before changes are accepted. Only the
+                // top-level block anchors are reported as Modified — descendants stay
+                // resolvable too, but enumerating them all would be noise (matches
+                // DeleteBlock's single-anchor contract in tracked mode).
+                var modified = new List<Anchor>();
+                foreach (var el in toRemove)
+                {
+                    var elUnid = (string?)el.Attribute(PtOpenXml.Unid);
+                    if (elUnid is not null)
+                    {
+                        foreach (var kv in index)
+                            if (kv.Value.Unid == elUnid)
+                                modified.Add(kv.Value.Anchor);
+                    }
+                    if (el.Name == W.p)
+                        MarkParagraphAsTrackedDeleted(el);
+                    else if (el.Name == W.tbl)
+                        MarkTableAsTrackedDeleted(el);
+                    else
+                        // Block kinds beyond w:p/w:tbl (e.g. w:sdt) — v1 falls back
+                        // to structural removal for these, per the issue-#177 docstring.
+                        el.Remove();
+                }
+                InvalidateProjectionCache();
+                return new EditResult
+                {
+                    Success = true,
+                    Modified = modified,
+                    Patch = ProjectScope(anchorForPatchScope),
+                };
+            }
+
             var removed = new List<Anchor>();
             foreach (var el in toRemove)
             {
@@ -3579,6 +3664,81 @@ public sealed class DocxSession : IDisposable
                 new XAttribute(W.date, date),
                 run);
             element.Add(del);
+        }
+    }
+
+    /// <summary>
+    /// Marks a whole paragraph as a tracked deletion: wraps every direct-child run in
+    /// <c>w:del</c> (via <see cref="WrapRunsInDel"/>) AND marks the paragraph mark
+    /// itself by adding <c>w:del</c> inside <c>w:pPr/w:rPr</c>. The combination tells
+    /// Word the entire paragraph — content plus paragraph break — is a tracked deletion,
+    /// so accepting the change actually removes the paragraph (instead of leaving an
+    /// empty paragraph behind, which is what <see cref="WrapRunsInDel"/> alone produces).
+    /// </summary>
+    private void MarkParagraphAsTrackedDeleted(XElement paragraph)
+    {
+        WrapRunsInDel(paragraph);
+
+        var pPr = paragraph.Element(W.pPr);
+        if (pPr is null)
+        {
+            pPr = new XElement(W.pPr);
+            paragraph.AddFirst(pPr);
+        }
+        var rPr = pPr.Element(W.rPr);
+        if (rPr is null)
+        {
+            rPr = new XElement(W.rPr);
+            pPr.AddFirst(rPr);
+        }
+        if (rPr.Element(W.del) is null)
+        {
+            var author = _settings.RevisionAuthor ?? "docxodus";
+            var date = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            rPr.Add(new XElement(W.del,
+                new XAttribute(W.id, NextRevisionId()),
+                new XAttribute(W.author, author),
+                new XAttribute(W.date, date)));
+        }
+    }
+
+    /// <summary>
+    /// Marks a whole table as a tracked deletion: every row gets a <c>w:trPr/w:del</c>
+    /// marker (Word's row-deletion convention — there is no table-level "delete" markup),
+    /// and every paragraph inside every cell is treated like
+    /// <see cref="MarkParagraphAsTrackedDeleted"/>. Nested tables recurse.
+    /// </summary>
+    private void MarkTableAsTrackedDeleted(XElement table)
+    {
+        var author = _settings.RevisionAuthor ?? "docxodus";
+        var date = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+        foreach (var row in table.Elements(W.tr))
+        {
+            var trPr = row.Element(W.trPr);
+            if (trPr is null)
+            {
+                trPr = new XElement(W.trPr);
+                row.AddFirst(trPr);
+            }
+            if (trPr.Element(W.del) is null)
+            {
+                trPr.Add(new XElement(W.del,
+                    new XAttribute(W.id, NextRevisionId()),
+                    new XAttribute(W.author, author),
+                    new XAttribute(W.date, date)));
+            }
+
+            foreach (var cell in row.Elements(W.tc))
+            {
+                foreach (var child in cell.Elements().ToList())
+                {
+                    if (child.Name == W.p)
+                        MarkParagraphAsTrackedDeleted(child);
+                    else if (child.Name == W.tbl)
+                        MarkTableAsTrackedDeleted(child);
+                }
+            }
         }
     }
 
