@@ -1,0 +1,573 @@
+"""Frozen dataclasses mirroring the C# value types in ``Docxodus``.
+
+Wire keys are camelCase (matching the WASM bridge so the JSON shapes are
+interchangeable between TypeScript and Python clients). Decoders translate to
+snake_case Python fields.
+
+Each type exposes a ``from_wire(d)`` classmethod that takes the parsed JSON
+dict and returns an instance. Encoders are simple dict-builders on the
+encode side (``to_wire()``) and live where they're used in ``session.py``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Sequence
+
+from .enums import (
+    AnchorIdRendering,
+    AnchorRenderMode,
+    ContextBoundary,
+    EditErrorCode,
+    EmptyParagraphMode,
+    PlaceholderKind,
+    ProjectionScopes,
+    TableRenderMode,
+    TrackedChangeMode,
+    WhitespaceMode,
+)
+
+__all__ = [
+    "Anchor",
+    "CharSpan",
+    "FormatOp",
+    "EditError",
+    "EditResult",
+    "MarkdownPatch",
+    "AnchorTarget",
+    "AnchorInfo",
+    "RunFormatting",
+    "RunFragment",
+    "TextMatch",
+    "BlockSlice",
+    "CrossBlockMatch",
+    "TemplatePlaceholder",
+    "MarkdownProjection",
+    "DocxSessionSettings",
+    "WmlToMarkdownConverterSettings",
+    "DocumentAnnotation",
+    "EditSummary",
+    "FindOptions",
+    "ReplaceOptions",
+]
+
+
+# ---------------------------------------------------------------------------
+# Anchors
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Anchor:
+    """A block-level address into a Docxodus session.
+
+    The ``id`` is the canonical wire form (e.g. ``"p:body:abcd1234..."``) and
+    is what every mutation op consumes. ``kind`` / ``scope`` / ``unid`` are the
+    decomposed parts.
+    """
+
+    id: str
+    kind: str
+    scope: str
+    unid: str
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "Anchor":
+        return cls(id=d["id"], kind=d["kind"], scope=d["scope"], unid=d["unid"])
+
+
+@dataclass(frozen=True, slots=True)
+class AnchorTarget:
+    """Search-result anchor with extra metadata (``partUri``, ``textPreview``)."""
+
+    id: str
+    kind: str
+    scope: str
+    unid: str
+    part_uri: str
+    text_preview: str
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "AnchorTarget":
+        return cls(
+            id=d["id"],
+            kind=d["kind"],
+            scope=d["scope"],
+            unid=d["unid"],
+            part_uri=d.get("partUri", ""),
+            text_preview=d.get("textPreview", ""),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AnchorInfo:
+    """Minimal anchor metadata returned by ``get_anchor_info`` / ``get_anchor_infos``."""
+
+    id: str
+    kind: str
+    scope: str
+    text_preview: str
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "AnchorInfo":
+        return cls(
+            id=d["id"],
+            kind=d["kind"],
+            scope=d["scope"],
+            text_preview=d.get("textPreview", ""),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Spans + formatting
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CharSpan:
+    """Half-open character range within an anchor's plain-text projection."""
+
+    start: int
+    length: int
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "CharSpan":
+        return cls(start=int(d["start"]), length=int(d["length"]))
+
+    def to_wire(self) -> dict[str, int]:
+        return {"start": self.start, "length": self.length}
+
+
+@dataclass(frozen=True, slots=True)
+class FormatOp:
+    """Set of formatting changes to apply.
+
+    Each field is tri-state: ``True`` to turn on, ``False`` to turn off, ``None``
+    to leave unchanged. Strings (``color``, ``run_style``) are passed through;
+    ``None`` means "don't change", empty string means "clear".
+    """
+
+    bold: bool | None = None
+    italic: bool | None = None
+    underline: bool | None = None
+    strike: bool | None = None
+    code: bool | None = None
+    color: str | None = None
+    run_style: str | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.bold is not None: out["bold"] = self.bold
+        if self.italic is not None: out["italic"] = self.italic
+        if self.underline is not None: out["underline"] = self.underline
+        if self.strike is not None: out["strike"] = self.strike
+        if self.code is not None: out["code"] = self.code
+        if self.color is not None: out["color"] = self.color
+        if self.run_style is not None: out["runStyle"] = self.run_style
+        return out
+
+
+@dataclass(frozen=True, slots=True)
+class RunFormatting:
+    """Resolved run-level formatting for a ``RunFragment``."""
+
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
+    strike: bool = False
+    code: bool = False
+    color: str | None = None
+    hyperlink_url: str | None = None
+    run_style: str | None = None
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "RunFormatting":
+        return cls(
+            bold=bool(d.get("bold", False)),
+            italic=bool(d.get("italic", False)),
+            underline=bool(d.get("underline", False)),
+            strike=bool(d.get("strike", False)),
+            code=bool(d.get("code", False)),
+            color=d.get("color"),
+            hyperlink_url=d.get("hyperlinkUrl"),
+            run_style=d.get("runStyle"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RunFragment:
+    """A single contiguous run inside a ``TextMatch`` slice."""
+
+    unid: str
+    text: str
+    span_in_element: CharSpan
+    formatting: RunFormatting
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "RunFragment":
+        return cls(
+            unid=d["unid"],
+            text=d["text"],
+            span_in_element=CharSpan.from_wire(d["spanInElement"]),
+            formatting=RunFormatting.from_wire(d["formatting"]),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Search / Grep results
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TextMatch:
+    """A single grep / find-by-text match."""
+
+    text: str
+    enclosing_anchor: Anchor
+    span: CharSpan
+    fragments: tuple[RunFragment, ...] = ()
+    context_before: str = ""
+    context_after: str = ""
+    groups: tuple[str, ...] = ()
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "TextMatch":
+        return cls(
+            text=d["text"],
+            enclosing_anchor=Anchor.from_wire(d["enclosingAnchor"]),
+            span=CharSpan.from_wire(d["span"]),
+            fragments=tuple(RunFragment.from_wire(f) for f in d.get("fragments", ())),
+            context_before=d.get("contextBefore", ""),
+            context_after=d.get("contextAfter", ""),
+            groups=tuple(d.get("groups", ())),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BlockSlice:
+    """One block's contribution to a ``CrossBlockMatch``."""
+
+    anchor: Anchor
+    span_in_block: CharSpan
+    fragments: tuple[RunFragment, ...] = ()
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "BlockSlice":
+        return cls(
+            anchor=Anchor.from_wire(d["anchor"]),
+            span_in_block=CharSpan.from_wire(d["spanInBlock"]),
+            fragments=tuple(RunFragment.from_wire(f) for f in d.get("fragments", ())),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CrossBlockMatch:
+    """A grep match that spans multiple adjacent blocks."""
+
+    text: str
+    enclosing_anchors: tuple[Anchor, ...]
+    slices: tuple[BlockSlice, ...]
+    context_before: str = ""
+    context_after: str = ""
+    groups: tuple[str, ...] = ()
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "CrossBlockMatch":
+        return cls(
+            text=d["text"],
+            enclosing_anchors=tuple(Anchor.from_wire(a) for a in d.get("enclosingAnchors", ())),
+            slices=tuple(BlockSlice.from_wire(s) for s in d.get("slices", ())),
+            context_before=d.get("contextBefore", ""),
+            context_after=d.get("contextAfter", ""),
+            groups=tuple(d.get("groups", ())),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Placeholders
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TemplatePlaceholder:
+    """A classified bracketed region from ``find_placeholders``."""
+
+    kind: PlaceholderKind
+    match: TextMatch
+    alternative_kinds: tuple[PlaceholderKind, ...] = ()
+    hint: str | None = None
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "TemplatePlaceholder":
+        return cls(
+            kind=PlaceholderKind(d["kind"]),
+            match=TextMatch.from_wire(d["match"]),
+            alternative_kinds=tuple(
+                PlaceholderKind(k) for k in d.get("alternativeKinds", ())
+            ),
+            hint=d.get("hint"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Mutation results
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EditError:
+    """Business-level mutation failure inside a successful ``EditResult`` envelope."""
+
+    code: EditErrorCode
+    message: str
+    anchor_id: str | None = None
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "EditError":
+        return cls(
+            code=EditErrorCode(d["code"]),
+            message=d.get("message", ""),
+            anchor_id=d.get("anchorId"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MarkdownPatch:
+    """A scoped markdown re-projection produced by a successful mutation."""
+
+    scope_anchor_id: str
+    markdown: str
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "MarkdownPatch":
+        return cls(
+            scope_anchor_id=d["scopeAnchorId"],
+            markdown=d.get("markdown", ""),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EditResult:
+    """The typed envelope returned by every mutation op.
+
+    ``success=False`` here is a *normal business outcome* (anchor not found,
+    malformed markdown, etc.). Transport failures raise ``DocxodusTransportError``
+    instead of returning an ``EditResult``.
+    """
+
+    success: bool
+    created: tuple[Anchor, ...] = ()
+    removed: tuple[Anchor, ...] = ()
+    modified: tuple[Anchor, ...] = ()
+    patch: MarkdownPatch | None = None
+    error: EditError | None = None
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "EditResult":
+        patch_d = d.get("patch")
+        err_d = d.get("error")
+        return cls(
+            success=bool(d.get("success", False)),
+            created=tuple(Anchor.from_wire(a) for a in d.get("created", ())),
+            removed=tuple(Anchor.from_wire(a) for a in d.get("removed", ())),
+            modified=tuple(Anchor.from_wire(a) for a in d.get("modified", ())),
+            patch=MarkdownPatch.from_wire(patch_d) if patch_d else None,
+            error=EditError.from_wire(err_d) if err_d else None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Projection
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class MarkdownProjection:
+    """The markdown + anchor-index pair returned by ``project`` / ``project_anchor``."""
+
+    markdown: str
+    anchor_index: Mapping[str, AnchorTarget]
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "MarkdownProjection":
+        idx = d.get("anchorIndex", {}) or {}
+        # The wire entries don't repeat the id key (it's the dict key); rebuild
+        # the AnchorTarget by injecting the id from the surrounding key.
+        decoded: dict[str, AnchorTarget] = {}
+        for anchor_id, entry in idx.items():
+            decoded[anchor_id] = AnchorTarget(
+                id=anchor_id,
+                kind=entry.get("kind", ""),
+                scope=entry.get("scope", ""),
+                unid=entry.get("unid", ""),
+                part_uri=entry.get("partUri", ""),
+                text_preview=entry.get("textPreview", ""),
+            )
+        return cls(markdown=d.get("markdown", ""), anchor_index=decoded)
+
+
+# ---------------------------------------------------------------------------
+# Annotations
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentAnnotation:
+    """One stored ``DocumentAnnotation`` returned by ``list_annotations``."""
+
+    id: str
+    label_id: str
+    label: str
+    color: str
+    bookmark_name: str
+    author: str | None = None
+    created: str | None = None  # ISO-8601, kept as a string in v1.
+    annotated_text: str | None = None
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "DocumentAnnotation":
+        return cls(
+            id=d["id"],
+            label_id=d.get("labelId", ""),
+            label=d.get("label", ""),
+            color=d.get("color", ""),
+            bookmark_name=d.get("bookmarkName", ""),
+            author=d.get("author"),
+            created=d.get("created"),
+            annotated_text=d.get("annotatedText"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Edit summary
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EditSummary:
+    """Aggregate snapshot returned by ``get_edit_summary``.
+
+    The shape of the embedded ``remaining_placeholders`` list mirrors
+    ``find_placeholders``; ``bare_underscore_runs`` is a list of
+    ``{anchor_id, run_unid, text}`` triples.
+    """
+
+    total_anchors: int
+    remaining_placeholders: tuple[TemplatePlaceholder, ...] = ()
+    bare_underscore_runs: tuple[Mapping[str, Any], ...] = ()
+    footnote_count: int = 0
+    inline_footnote_ref_count: int = 0
+    comment_count: int = 0
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "EditSummary":
+        return cls(
+            total_anchors=int(d.get("totalAnchors", 0)),
+            remaining_placeholders=tuple(
+                TemplatePlaceholder.from_wire(p) for p in d.get("remainingPlaceholders", ())
+            ),
+            bare_underscore_runs=tuple(d.get("bareUnderscoreRuns", ())),
+            footnote_count=int(d.get("footnoteCount", 0)),
+            inline_footnote_ref_count=int(d.get("inlineFootnoteRefCount", 0)),
+            comment_count=int(d.get("commentCount", 0)),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Option bundles for find / replace
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class FindOptions:
+    """Optional filters for ``find_by_text`` / ``find_all_by_text`` / ``find_by_regex``."""
+
+    ignore_case: bool = False
+    ignore_whitespace: bool = False
+    kind_filter: str | None = None
+    scope_filter: ProjectionScopes | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.ignore_case: out["ignoreCase"] = True
+        if self.ignore_whitespace: out["ignoreWhitespace"] = True
+        if self.kind_filter is not None: out["kindFilter"] = self.kind_filter
+        if self.scope_filter is not None: out["scopeFilter"] = int(self.scope_filter)
+        return out
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaceOptions:
+    """Options for ``replace_text_range``."""
+
+    ignore_case: bool = False
+    max_replacements: int | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.ignore_case: out["ignoreCase"] = True
+        if self.max_replacements is not None: out["maxReplacements"] = self.max_replacements
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Session settings (nested projection settings are exposed but not yet
+# round-tripped by the bridges per the design doc)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class WmlToMarkdownConverterSettings:
+    """Mirror of the C# converter settings, included on ``DocxSessionSettings``."""
+
+    scopes: ProjectionScopes = ProjectionScopes.ALL
+    heading_level_offset: int = 0
+    anchor_mode: AnchorRenderMode = AnchorRenderMode.BLOCK
+    table_mode: TableRenderMode = TableRenderMode.GFM_WITH_OPAQUE_FALLBACK
+    table_inline_cell_max: int = 80
+    tracked_changes: TrackedChangeMode = TrackedChangeMode.ACCEPT
+    resolve_numbering: bool = True
+    empty_paragraphs: EmptyParagraphMode = EmptyParagraphMode.ANCHOR_ONLY
+    anchor_id_rendering: AnchorIdRendering = AnchorIdRendering.FULL_UNID
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "scopes": int(self.scopes),
+            "headingLevelOffset": self.heading_level_offset,
+            "anchorMode": int(self.anchor_mode),
+            "tableMode": int(self.table_mode),
+            "tableInlineCellMax": self.table_inline_cell_max,
+            "trackedChanges": self.tracked_changes.value,
+            "resolveNumbering": self.resolve_numbering,
+            "emptyParagraphs": int(self.empty_paragraphs),
+            "anchorIdRendering": int(self.anchor_id_rendering),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DocxSessionSettings:
+    """Constructor settings passed to ``open_session(bytes, settings=...)``."""
+
+    undo_depth: int = 50
+    validate_raw_ops: bool = False
+    tracked_changes: TrackedChangeMode = TrackedChangeMode.ACCEPT
+    revision_author: str | None = None
+    persist_anchor_ids: bool = False
+    smart_quotes: bool = False
+    capture_initial_projection: bool = True
+    projection_settings: WmlToMarkdownConverterSettings | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "undoDepth": self.undo_depth,
+            "validateRawOps": self.validate_raw_ops,
+            "trackedChanges": self.tracked_changes.value,
+            "persistAnchorIds": self.persist_anchor_ids,
+            "smartQuotes": self.smart_quotes,
+            "captureInitialProjection": self.capture_initial_projection,
+        }
+        if self.revision_author is not None:
+            out["revisionAuthor"] = self.revision_author
+        if self.projection_settings is not None:
+            out["projectionSettings"] = self.projection_settings.to_wire()
+        return out

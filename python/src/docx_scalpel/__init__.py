@@ -1,0 +1,122 @@
+"""docx-scalpel — LLM-friendly Python wrapper for Docxodus' ``DocxSession``.
+
+Quick start::
+
+    from docx_scalpel import open_session
+
+    with open(\"contract.docx\", \"rb\") as f:
+        docx_bytes = f.read()
+
+    with open_session(docx_bytes) as session:
+        for placeholder in session.find_placeholders():
+            session.replace_match(placeholder.match, \"filled value\")
+        new_bytes = session.save()
+
+    with open(\"filled.docx\", \"wb\") as f:
+        f.write(new_bytes)
+
+The session lives inside a long-running ``docxodus-pyhost`` subprocess and
+persists across Python calls until you close it (or exit the ``with`` block).
+That persistence is the whole point of this wrapper: LLM agents issue dozens
+of small edits to one document, and recreating the session would pay the
+parse + Unid annotation + projection cost every time.
+"""
+
+from __future__ import annotations
+
+from ._transport import shutdown_host
+from .enums import (
+    AnchorIdRendering,
+    AnchorRenderMode,
+    ContextBoundary,
+    DiffFormat,
+    EditErrorCode,
+    EmptyParagraphMode,
+    PlaceholderKind,
+    PlaceholderKinds,
+    Position,
+    ProjectionDepth,
+    ProjectionScopes,
+    RegexOptions,
+    TableRenderMode,
+    TrackedChangeMode,
+    WhitespaceMode,
+)
+from .errors import DocxodusHostNotFoundError, DocxodusTransportError, DocxScalpelError
+from .session import DocxSession, open_session, ping
+from .types import (
+    Anchor,
+    AnchorInfo,
+    AnchorTarget,
+    BlockSlice,
+    CharSpan,
+    CrossBlockMatch,
+    DocumentAnnotation,
+    DocxSessionSettings,
+    EditError,
+    EditResult,
+    EditSummary,
+    FindOptions,
+    FormatOp,
+    MarkdownPatch,
+    MarkdownProjection,
+    ReplaceOptions,
+    RunFormatting,
+    RunFragment,
+    TemplatePlaceholder,
+    TextMatch,
+    WmlToMarkdownConverterSettings,
+)
+
+__version__ = "0.1.0a0"
+
+__all__ = [
+    "__version__",
+    # entry points
+    "DocxSession",
+    "open_session",
+    "ping",
+    "shutdown_host",
+    # value types
+    "Anchor",
+    "AnchorInfo",
+    "AnchorTarget",
+    "BlockSlice",
+    "CharSpan",
+    "CrossBlockMatch",
+    "DocumentAnnotation",
+    "DocxSessionSettings",
+    "EditError",
+    "EditResult",
+    "EditSummary",
+    "FindOptions",
+    "FormatOp",
+    "MarkdownPatch",
+    "MarkdownProjection",
+    "ReplaceOptions",
+    "RunFormatting",
+    "RunFragment",
+    "TemplatePlaceholder",
+    "TextMatch",
+    "WmlToMarkdownConverterSettings",
+    # enums
+    "AnchorIdRendering",
+    "AnchorRenderMode",
+    "ContextBoundary",
+    "DiffFormat",
+    "EditErrorCode",
+    "EmptyParagraphMode",
+    "PlaceholderKind",
+    "PlaceholderKinds",
+    "Position",
+    "ProjectionDepth",
+    "ProjectionScopes",
+    "RegexOptions",
+    "TableRenderMode",
+    "TrackedChangeMode",
+    "WhitespaceMode",
+    # errors
+    "DocxScalpelError",
+    "DocxodusHostNotFoundError",
+    "DocxodusTransportError",
+]

@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "docx-scalpel"
+version = "0.1.0a0"
+description = "LLM-friendly Python wrapper for Docxodus' DocxSession — anchor-addressed DOCX editing for agentic pipelines."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Docxodus contributors" }]
+keywords = ["docx", "ooxml", "llm", "agent", "document-editing", "redline"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business",
+    "Topic :: Text Processing :: Markup",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.4"]
+
+[project.urls]
+Homepage = "https://github.com/JSv4/Docxodus"
+Repository = "https://github.com/JSv4/Docxodus"
+Issues = "https://github.com/JSv4/Docxodus/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/docx_scalpel"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+# Per-RID bundled host binary lands here via scripts/build_host.sh at wheel-build time.
+"vendor" = "docx_scalpel/_bin"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/scripts",
+    "/README.md",
+    "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: tests that take more than a few seconds",
+]
