@@ -1078,6 +1078,22 @@ export interface FillOptions {
   /** Where to stop walking outward when computing context. Numeric layout
    *  matching {@link ContextBoundary}. Default `Char` (0). */
   boundary?: number;
+  /** When the picker returns an empty string (and after `$`-prefix preservation
+   *  has been applied), look at the chars immediately adjacent to the placeholder
+   *  span and absorb surrounding whitespace / leading-space-before-punctuation /
+   *  matched-brackets so the dropped placeholder doesn't leave cosmetic
+   *  artifacts. Default `false` (preserve the literal-delete behavior).
+   *
+   *  Rules: whitespace on both sides collapses to one space; whitespace before
+   *  and clause-terminating punctuation (`. , ; : ! ?`) after drops the leading
+   *  space; matched open/close brackets (`()` `[]` `{}`) on either side drop
+   *  both. NBSP / narrow NBSP / thin space are treated as whitespace.
+   *
+   *  Caveat: `$`-prefix preservation runs first, so a picker returning `""` for
+   *  `$[xxx]` with `preserveDollarPrefix: true` (default) ends up replacing with
+   *  `"$"` and coalescing is skipped. Set `preserveDollarPrefix: false` when you
+   *  want the `$` to drop along with the brackets. */
+  coalesceWhitespaceAroundEmptyFill?: boolean;
 }
 
 /**

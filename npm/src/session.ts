@@ -248,6 +248,61 @@ export class DocxSession {
   }
 
   /**
+   * Helper for {@link fillPlaceholders} `coalesceWhitespaceAroundEmptyFill` path —
+   * mirrors the .NET `ReplaceMatchCoalescingNeighbors` rules. Inspects the chars
+   * immediately surrounding the match via `match.contextBefore` / `contextAfter`
+   * (so the option requires `contextChars >= 1`, the default) and expands the
+   * deletion span to absorb whitespace / leading-space-before-punctuation /
+   * matched-brackets where the patterns match. Falls back to literal-delete
+   * when no neighbor pattern applies.
+   *
+   * Note: with `boundary: ContextBoundary.Bracket`, neighbor brackets are not
+   * captured in context, so the bracket-coalesce rule won't fire on the JS side.
+   * The .NET implementation reads flat text directly and handles that case;
+   * callers who care should leave `boundary` at the default `Char`.
+   */
+  private replaceMatchCoalescingNeighbors(match: TextMatch): EditResult {
+    // Fold NBSP / narrow NBSP / thin space to ASCII space so e.g. an NBSP on
+    // either side still gets treated as whitespace by the rules below.
+    const fold = (c: string | undefined): string | undefined => {
+      if (c === " " || c === " " || c === " ") return " ";
+      return c;
+    };
+    const l = fold(match.contextBefore.length > 0 ? match.contextBefore[match.contextBefore.length - 1] : undefined);
+    const r = fold(match.contextAfter.length > 0 ? match.contextAfter[0] : undefined);
+
+    const isSpace = (c: string | undefined) => c === " " || c === "\t";
+    const isClauseTerm = (c: string | undefined) => c === "." || c === "," || c === ";" || c === ":" || c === "!" || c === "?";
+    const isOpen = (c: string | undefined) => c === "(" || c === "[" || c === "{";
+    const isClose = (c: string | undefined) => c === ")" || c === "]" || c === "}";
+
+    let extendLeft = 0;
+    let extendRight = 0;
+    if (isSpace(l) && isSpace(r)) {
+      extendRight = 1;
+    } else if (isSpace(l) && isClauseTerm(r)) {
+      extendLeft = 1;
+    } else if (isOpen(l) && isClose(r)) {
+      extendLeft = 1;
+      extendRight = 1;
+    }
+
+    if (extendLeft === 0 && extendRight === 0) {
+      return this.replaceMatch(match, "");
+    }
+
+    return JSON.parse(
+      this.wasm.ReplaceTextAtSpan(
+        this.handle,
+        match.enclosingAnchor.id,
+        match.span.start - extendLeft,
+        match.span.length + extendLeft + extendRight,
+        "",
+      ),
+    ) as EditResult;
+  }
+
+  /**
    * Replace the bracketed portion of a `TextMatch` with `newInner`, preserving any
    * prefix or suffix outside the brackets. Designed for `findPlaceholders` matches
    * like `$[___]` where the regex `\$?\[…\]` captures a leading `$`:
@@ -297,6 +352,7 @@ export class DocxSession {
     const preserveDollarPrefix = opts.preserveDollarPrefix ?? true;
     const contextChars = opts.contextChars ?? 80;
     const boundary = opts.boundary ?? ContextBoundary.Char;
+    const coalesceEmpty = opts.coalesceWhitespaceAroundEmptyFill ?? false;
 
     if (maxPasses <= 0) {
       throw new RangeError("FillOptions.maxPasses must be > 0");
@@ -334,7 +390,9 @@ export class DocxSession {
           replacement = "$" + replacement;
         }
 
-        const r = this.replaceMatch(p.match, replacement);
+        const r = coalesceEmpty && replacement.length === 0
+          ? this.replaceMatchCoalescingNeighbors(p.match)
+          : this.replaceMatch(p.match, replacement);
         if (r.success) {
           filled++;
           passChanges++;
