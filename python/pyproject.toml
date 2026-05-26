@@ -43,6 +43,11 @@ packages = ["src/docx_scalpel"]
 # before building the wheel — see .github/workflows/python-publish.yml and
 # python/RELEASING.md. We deliberately don't auto-pick from vendor/<rid>/
 # here because the wheel must contain exactly one (flat) binary, not all RIDs.
+# .gitignore excludes src/docx_scalpel/_bin/ so a 100+ MB binary never reaches
+# git; this `artifacts` override tells hatchling to include the staged file
+# in the built wheel anyway. Glob is intentionally permissive so the same
+# pyproject works for unix (docxodus-pyhost) and win (docxodus-pyhost.exe).
+artifacts = ["src/docx_scalpel/_bin/*"]
 
 [tool.hatch.build.targets.sdist]
 include = [
