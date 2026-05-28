@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>A powerful .NET library for manipulating Open XML documents (DOCX, XLSX, PPTX).</strong>
+  <strong>A powerful Typescript, Python and .NET library for manipulating Open XML documents (DOCX, XLSX, PPTX).</strong>
 </p>
 
 <p align="center">
