@@ -341,6 +341,43 @@ public static partial class DocxSessionBridge
     }
 
     /// <summary>
+    /// Bridge for <see cref="DocxSession.GetBlockMetadata"/>. Returns a JSON
+    /// object with style id/name, outline level, list membership (when present),
+    /// and a hasInlineFormatting flag — or <c>"null"</c> if the anchor doesn't exist.
+    /// </summary>
+    [JSExport]
+    public static string GetBlockMetadata(int h, string anchorId) =>
+        DocxSessionOps.GetBlockMetadata(h, anchorId);
+
+    /// <summary>
+    /// Bulk variant of <see cref="GetBlockMetadata"/>. Takes a JSON array of anchor
+    /// ids, returns a JSON object mapping each id to its metadata (or null).
+    /// </summary>
+    [JSExport]
+    public static string GetBlockMetadatas(int h, string anchorIdsJson)
+    {
+        var ids = System.Text.Json.JsonSerializer.Deserialize<string[]>(anchorIdsJson)
+            ?? System.Array.Empty<string>();
+        return DocxSessionOps.GetBlockMetadatas(h, ids);
+    }
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.GetListMembership"/>. Returns a JSON
+    /// object with numId/abstractNumId/level/format/etc., or <c>"null"</c>.
+    /// </summary>
+    [JSExport]
+    public static string GetListMembership(int h, string anchorId) =>
+        DocxSessionOps.GetListMembership(h, anchorId);
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.GetSectionInfo"/>. Returns a JSON object
+    /// describing the governing <c>w:sectPr</c>, or <c>"null"</c> for non-body anchors.
+    /// </summary>
+    [JSExport]
+    public static string GetSectionInfo(int h, string anchorId) =>
+        DocxSessionOps.GetSectionInfo(h, anchorId);
+
+    /// <summary>
     /// Bridge for <see cref="DocxSession.FindByText"/>. Returns a single AnchorTarget
     /// JSON object (first match in document order) or the literal <c>null</c> if no
     /// anchor contains the needle. <paramref name="optionsJson"/> accepts
