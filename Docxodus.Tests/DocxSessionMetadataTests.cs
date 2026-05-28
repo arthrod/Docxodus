@@ -103,4 +103,17 @@ public class DocxSessionMetadataTests
         using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
         Assert.Null(session.GetSectionInfo("p:body:does-not-exist"));
     }
+
+    [Fact]
+    public void BM007_GetSectionInfo_NonBodyAnchor_ReturnsNull()
+    {
+        // The landscape-section fixture has a HeaderPart with one paragraph.
+        // That paragraph's anchor lives in scope "hdr1", not "body".
+        using var session = new DocxSession(DocxSessionTests.BuildBM_LandscapeSection());
+        var hdrAnchor = session.Project().AnchorIndex.Values
+            .FirstOrDefault(t => t.Anchor.Scope.StartsWith("hdr", System.StringComparison.Ordinal));
+        Assert.NotNull(hdrAnchor);
+
+        Assert.Null(session.GetSectionInfo(hdrAnchor!.Anchor.Id));
+    }
 }
