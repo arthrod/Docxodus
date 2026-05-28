@@ -766,6 +766,25 @@ export interface DocxodusWasmExports {
     GetAnchorInfo: (handle: number, anchorId: string) => string;
     GetAnchorInfos: (handle: number, anchorIdsJson: string) => string;
     ListAnnotations: (handle: number) => string;
+    // Session annotation write surface
+    AddAnnotation: (
+      handle: number,
+      anchorId: string,
+      spanJson: string,
+      annotationJson: string
+    ) => string;
+    SessionRemoveAnnotation: (handle: number, annotationId: string) => string;
+    UpdateAnnotation: (
+      handle: number,
+      annotationId: string,
+      updateJson: string
+    ) => string;
+    MoveAnnotation: (
+      handle: number,
+      annotationId: string,
+      newAnchorId: string,
+      newSpanJson: string
+    ) => string;
     Undo: (handle: number) => boolean;
     Redo: (handle: number) => boolean;
     Save: (handle: number) => Uint8Array;
@@ -1180,9 +1199,10 @@ export interface AnchorInfo {
 /**
  * A custom annotation persisted in the document via Docxodus' annotation system.
  * Returned by {@link DocxSession.listAnnotations}; mirrors the wire-relevant
- * fields of the .NET `DocumentAnnotation` type. Stale page caches and arbitrary
- * metadata are omitted to keep the JSON payload compact — callers that need them
- * can use the .NET API directly.
+ * fields of the .NET `DocumentAnnotation` type. The page-info cache fields
+ * (`startPage`/`endPage`/`pageInfoStale`/`pageInfoComputedAt`) are omitted to
+ * keep the JSON payload compact — callers that need them can use the .NET API
+ * directly. The `metadata` bag is emitted only when non-empty.
  *
  * See `docs/architecture/custom_annotations.md` for the persistence design.
  */
@@ -1203,6 +1223,22 @@ export interface DocumentAnnotation {
   created?: string;
   /** The text content covered by the annotation's bookmark, populated when reading. */
   annotatedText?: string;
+  /** Arbitrary string→string metadata bag persisted with the annotation. */
+  metadata?: Record<string, string>;
+}
+
+/**
+ * Partial-update payload for {@link DocxSession.updateAnnotation}.
+ * Null/missing fields leave the existing value unchanged. `metadataPatch`
+ * is a per-key merge: a non-null value sets the key, an explicit `null`
+ * removes it, a missing key leaves it unchanged.
+ */
+export interface AnnotationUpdate {
+  labelId?: string;
+  label?: string;
+  color?: string;
+  author?: string;
+  metadataPatch?: Record<string, string | null>;
 }
 
 /**
@@ -1906,7 +1942,13 @@ export type WorkerRequestType =
   | "compareDocumentsToHtml"
   | "getRevisions"
   | "getDocumentMetadata"
-  | "getVersion";
+  | "getVersion"
+  | "sessionOpen"
+  | "sessionClose"
+  | "sessionAddAnnotation"
+  | "sessionRemoveAnnotation"
+  | "sessionUpdateAnnotation"
+  | "sessionMoveAnnotation";
 
 /**
  * Base structure for worker requests.
@@ -1992,6 +2034,69 @@ export interface WorkerGetVersionRequest extends WorkerRequestBase {
 }
 
 /**
+ * Open a DocxSession in the worker.
+ */
+export interface WorkerSessionOpenRequest extends WorkerRequestBase {
+  type: "sessionOpen";
+  /** Document bytes transferred to the worker */
+  documentBytes: Uint8Array;
+  /** Session settings as JSON */
+  settingsJson?: string;
+}
+
+/**
+ * Close a worker DocxSession.
+ */
+export interface WorkerSessionCloseRequest extends WorkerRequestBase {
+  type: "sessionClose";
+  /** Session handle returned by sessionOpen */
+  handle: number;
+}
+
+/**
+ * Add an annotation via a worker DocxSession.
+ */
+export interface WorkerSessionAddAnnotationRequest extends WorkerRequestBase {
+  type: "sessionAddAnnotation";
+  handle: number;
+  anchorId: string;
+  /** CharSpan as JSON, or empty string for block-level */
+  spanJson: string;
+  annotationJson: string;
+}
+
+/**
+ * Remove an annotation via a worker DocxSession.
+ */
+export interface WorkerSessionRemoveAnnotationRequest extends WorkerRequestBase {
+  type: "sessionRemoveAnnotation";
+  handle: number;
+  annotationId: string;
+}
+
+/**
+ * Update an annotation via a worker DocxSession.
+ */
+export interface WorkerSessionUpdateAnnotationRequest extends WorkerRequestBase {
+  type: "sessionUpdateAnnotation";
+  handle: number;
+  annotationId: string;
+  updateJson: string;
+}
+
+/**
+ * Move an annotation via a worker DocxSession.
+ */
+export interface WorkerSessionMoveAnnotationRequest extends WorkerRequestBase {
+  type: "sessionMoveAnnotation";
+  handle: number;
+  annotationId: string;
+  newAnchorId: string;
+  /** CharSpan as JSON, or empty string for block-level */
+  newSpanJson: string;
+}
+
+/**
  * Union type of all possible worker requests.
  */
 export type WorkerRequest =
@@ -2001,7 +2106,13 @@ export type WorkerRequest =
   | WorkerCompareToHtmlRequest
   | WorkerGetRevisionsRequest
   | WorkerGetDocumentMetadataRequest
-  | WorkerGetVersionRequest;
+  | WorkerGetVersionRequest
+  | WorkerSessionOpenRequest
+  | WorkerSessionCloseRequest
+  | WorkerSessionAddAnnotationRequest
+  | WorkerSessionRemoveAnnotationRequest
+  | WorkerSessionUpdateAnnotationRequest
+  | WorkerSessionMoveAnnotationRequest;
 
 /**
  * Base structure for worker responses.
@@ -2077,6 +2188,36 @@ export interface WorkerGetVersionResponse extends WorkerResponseBase {
 }
 
 /**
+ * Response from sessionOpen request.
+ */
+export interface WorkerSessionOpenResponse extends WorkerResponseBase {
+  type: "sessionOpen";
+  /** Integer handle identifying the session in the worker */
+  handle?: number;
+}
+
+/**
+ * Response from sessionClose request.
+ */
+export interface WorkerSessionCloseResponse extends WorkerResponseBase {
+  type: "sessionClose";
+}
+
+/**
+ * Response from session annotation write operations.
+ * The `result` field is the serialised EditResult from the WASM bridge.
+ */
+export interface WorkerSessionEditResponse extends WorkerResponseBase {
+  type:
+    | "sessionAddAnnotation"
+    | "sessionRemoveAnnotation"
+    | "sessionUpdateAnnotation"
+    | "sessionMoveAnnotation";
+  /** EditResult returned by the session operation */
+  result?: EditResult;
+}
+
+/**
  * Union type of all possible worker responses.
  */
 export type WorkerResponse =
@@ -2086,7 +2227,10 @@ export type WorkerResponse =
   | WorkerCompareToHtmlResponse
   | WorkerGetRevisionsResponse
   | WorkerGetDocumentMetadataResponse
-  | WorkerGetVersionResponse;
+  | WorkerGetVersionResponse
+  | WorkerSessionOpenResponse
+  | WorkerSessionCloseResponse
+  | WorkerSessionEditResponse;
 
 /**
  * Options for creating a worker-based Docxodus instance.

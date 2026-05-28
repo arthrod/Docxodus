@@ -605,6 +605,10 @@ public enum EditErrorCode
     NothingToUndo,
     NothingToRedo,
 
+    DuplicateAnnotationId,
+    AnnotationNotFound,
+    EmptyAnnotationSpan,
+
     InternalError,
 }
 
@@ -617,8 +621,29 @@ public sealed class EditResult
     public IReadOnlyList<Anchor> Modified { get; init; } = Array.Empty<Anchor>();
     public MarkdownPatch? Patch { get; init; }
 
+    /// <summary>
+    /// Populated by AddAnnotation/RemoveAnnotation/UpdateAnnotation/MoveAnnotation
+    /// with the affected annotation id. Null for every other op.
+    /// </summary>
+    public string? AnnotationId { get; init; }
+
     internal static EditResult Fail(EditErrorCode code, string message, string? anchorId = null) =>
         new() { Success = false, Error = new EditError(code, message, anchorId) };
+}
+
+/// <summary>
+/// Partial-update payload for <see cref="DocxSession.UpdateAnnotation"/>.
+/// Null fields leave the existing value unchanged. <see cref="MetadataPatch"/>
+/// is a per-key merge: a non-null value sets the key, an explicit null removes
+/// it, a missing key leaves it unchanged.
+/// </summary>
+public sealed record AnnotationUpdate
+{
+    public string? LabelId { get; init; }
+    public string? Label { get; init; }
+    public string? Color { get; init; }
+    public string? Author { get; init; }
+    public IReadOnlyDictionary<string, string?>? MetadataPatch { get; init; }
 }
 
 public sealed class DocxSessionSettings
@@ -2540,6 +2565,13 @@ public sealed class DocxSession : IDisposable
     /// Enumerates every OOXML part the projector walks. Kept centralized so
     /// <see cref="Save"/> (Unid stripping) and any future part-level pass don't drift.
     /// </summary>
+    /// <remarks>
+    /// Includes every <see cref="CustomXmlPart"/> on the main document because
+    /// callers like <see cref="ResolvePart"/> need to be able to look up any
+    /// CustomXmlPart by URI. The snapshot/restore path uses
+    /// <see cref="EnumerateProjectedPartsForSnapshot"/> instead, which narrows
+    /// CustomXmlParts to the annotations part only — see that method for why.
+    /// </remarks>
     private IEnumerable<OpenXmlPart> EnumerateProjectedParts()
     {
         var main = _doc!.MainDocumentPart;
@@ -2550,6 +2582,41 @@ public sealed class DocxSession : IDisposable
         if (main.FootnotesPart is not null) yield return main.FootnotesPart;
         if (main.EndnotesPart is not null) yield return main.EndnotesPart;
         if (main.WordprocessingCommentsPart is not null) yield return main.WordprocessingCommentsPart;
+        // Custom XML parts hold annotation metadata; include them so callers that
+        // need to look up parts by URI (e.g. ResolvePart) can find them.
+        foreach (var cx in main.CustomXmlParts) yield return cx;
+    }
+
+    /// <summary>
+    /// Snapshot-scoped projected-part enumeration. Same as
+    /// <see cref="EnumerateProjectedParts"/> for the structural parts, but narrows
+    /// <see cref="OpenXmlPackaging.CustomXmlPart"/> enumeration to the Docxodus
+    /// <em>annotations</em> CustomXmlPart only (identified by its root namespace
+    /// via <see cref="Internal.AnnotationsCustomXml.Find"/>).
+    /// </summary>
+    /// <remarks>
+    /// Why narrow here: <see cref="RestoreSnapshot"/> handles undo-time create/delete
+    /// of CustomXmlParts via <c>AddCustomXmlPart(CustomXmlPartType.CustomXml)</c>,
+    /// which hard-codes the content type and creates no
+    /// <c>CustomXmlPropertiesPart</c> partner. That is correct for the annotations
+    /// part but would silently corrupt other CustomXmlParts that Word/SharePoint
+    /// rely on (SharePoint metadata, content-type-bound SDT data-binding parts,
+    /// inkml, etc.) by re-creating them with the wrong content type and missing
+    /// properties partner. Today no session op deletes non-annotation CustomXmlParts
+    /// — narrowing here pre-empts the footgun before such an op is added.
+    /// </remarks>
+    private IEnumerable<OpenXmlPart> EnumerateProjectedPartsForSnapshot()
+    {
+        var main = _doc!.MainDocumentPart;
+        if (main is null) yield break;
+        yield return main;
+        foreach (var h in main.HeaderParts) yield return h;
+        foreach (var f in main.FooterParts) yield return f;
+        if (main.FootnotesPart is not null) yield return main.FootnotesPart;
+        if (main.EndnotesPart is not null) yield return main.EndnotesPart;
+        if (main.WordprocessingCommentsPart is not null) yield return main.WordprocessingCommentsPart;
+        var annotationsPart = Internal.AnnotationsCustomXml.Find(_doc);
+        if (annotationsPart is not null) yield return annotationsPart;
     }
 
     // ─── Tier A: text CRUD ────────────────────────────────────────────────
@@ -3622,6 +3689,127 @@ public sealed class DocxSession : IDisposable
         };
     }
 
+    // ─── Tier E: annotations ────────────────────────────────────────────
+
+    /// <summary>
+    /// Annotate the range <paramref name="span"/> inside the block addressed by
+    /// <paramref name="anchorId"/>. When <paramref name="span"/> is null, the
+    /// annotation wraps every inline run of the block. When
+    /// <paramref name="annotation"/>.Id is null/empty, a 16-char hex id is
+    /// generated. The bookmark name, AnnotatedText, Created, and PageInfoStale
+    /// fields of the annotation are always set by this method.
+    /// </summary>
+    public EditResult AddAnnotation(string anchorId, CharSpan? span, DocumentAnnotation annotation)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (annotation is null)
+            return EditResult.Fail(EditErrorCode.MalformedMarkdown, "annotation is null", anchorId);
+
+        var anchor = FindAnchor(anchorId);
+        if (anchor is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var result = Internal.AnnotationOps.Add(_doc!, anchor, span, annotation);
+            if (result.Success) InvalidateProjectionCache();
+            else _ = _history.PopForUndo();
+            return result;
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            var preOp = _history.PopForUndo();
+            if (preOp.ok) RestoreSnapshot(preOp.snapshot);
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId);
+        }
+    }
+
+    /// <summary>Removes an annotation (its bookmark and custom-XML entry) by id.</summary>
+    public EditResult RemoveAnnotation(string annotationId)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var result = Internal.AnnotationOps.Remove(_doc!, annotationId, CanonicalizeAnchorByUnid);
+            if (result.Success) InvalidateProjectionCache();
+            else _ = _history.PopForUndo();
+            return result;
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            var preOp = _history.PopForUndo();
+            if (preOp.ok) RestoreSnapshot(preOp.snapshot);
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message);
+        }
+    }
+
+    /// <summary>Mutates label/color/author/metadata of an annotation without re-targeting.</summary>
+    public EditResult UpdateAnnotation(string annotationId, AnnotationUpdate update)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (update is null)
+            return EditResult.Fail(EditErrorCode.MalformedMarkdown, "update is null");
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var result = Internal.AnnotationOps.Update(_doc!, annotationId, update);
+            if (!result.Success) _ = _history.PopForUndo();
+            return result;
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            var preOp = _history.PopForUndo();
+            if (preOp.ok) RestoreSnapshot(preOp.snapshot);
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message);
+        }
+    }
+
+    /// <summary>Re-targets an existing annotation to a new anchor + span.</summary>
+    public EditResult MoveAnnotation(string annotationId, string newAnchorId, CharSpan? newSpan)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        var anchor = FindAnchor(newAnchorId);
+        if (anchor is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound,
+                $"anchor not found: {newAnchorId}", newAnchorId);
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var result = Internal.AnnotationOps.Move(
+                _doc!, annotationId, anchor, newSpan, CanonicalizeAnchorByUnid);
+            if (result.Success) InvalidateProjectionCache();
+            else _ = _history.PopForUndo();
+            return result;
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            var preOp = _history.PopForUndo();
+            if (preOp.ok) RestoreSnapshot(preOp.snapshot);
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, newAnchorId);
+        }
+    }
+
+    /// <summary>
+    /// Looks up the canonical <see cref="Anchor"/> for a Unid in the current
+    /// projection. Used by annotation ops so that the <see cref="EditResult.Modified"/>
+    /// anchor matches what <see cref="Project"/>'s AnchorIndex will return on the
+    /// next tick — bypasses the local kind/scope classifier in <c>AnnotationOps</c>
+    /// drifting from the projector.
+    /// </summary>
+    private Anchor? CanonicalizeAnchorByUnid(string unid)
+    {
+        var idx = Project().AnchorIndex;
+        return idx.Values.FirstOrDefault(t => t.Unid == unid)?.Anchor;
+    }
+
     // ─── Maintenance / cleanup ───────────────────────────────────────────
 
     /// <summary>
@@ -3743,7 +3931,7 @@ public sealed class DocxSession : IDisposable
     internal DocumentSnapshot TakeSnapshot()
     {
         var parts = new System.Collections.Generic.List<(string, XDocument)>();
-        foreach (var part in EnumerateProjectedParts())
+        foreach (var part in EnumerateProjectedPartsForSnapshot())
             parts.Add((part.Uri.ToString(), new XDocument(part.GetXDocument())));
         return new DocumentSnapshot(parts);
     }
@@ -3751,11 +3939,54 @@ public sealed class DocxSession : IDisposable
     internal void RestoreSnapshot(DocumentSnapshot snapshot)
     {
         var byUri = snapshot.Parts.ToDictionary(p => p.PartUri, p => p.Xml);
-        foreach (var part in EnumerateProjectedParts())
+
+        // Restore content for all parts that exist in both snapshot and document.
+        // Scoped via EnumerateProjectedPartsForSnapshot — only the annotations
+        // CustomXmlPart participates here; other CustomXmlParts (SharePoint
+        // metadata, SDT data-binding parts, inkml, …) are intentionally outside
+        // the snapshot scope.
+        foreach (var part in EnumerateProjectedPartsForSnapshot())
         {
             if (!byUri.TryGetValue(part.Uri.ToString(), out var xml)) continue;
             part.PutXDocument(new XDocument(xml));
         }
+
+        // TODO: Asymmetric scope, intentional. The undo-time create/delete logic
+        // below only handles the annotations CustomXmlPart — see
+        // EnumerateProjectedPartsForSnapshot for why AddCustomXmlPart(CustomXml)
+        // is unsafe for non-annotation custom-xml parts (wrong content type, no
+        // CustomXmlPropertiesPart partner). The same hazard would exist for
+        // HeaderParts / FooterParts / FootnotesPart / etc. — but no session op
+        // creates or deletes those today, so they're not yet snapshot-scoped here.
+        // If a future op starts adding/removing those parts, expand this block
+        // (and the snapshot enumeration) to cover them with the correct factory.
+        var main = _doc!.MainDocumentPart;
+        if (main is not null)
+        {
+            var annotationsPart = Internal.AnnotationsCustomXml.Find(_doc);
+            var snapshotAnnotationsUri = snapshot.Parts
+                .FirstOrDefault(p => p.PartUri.StartsWith("/customXml/", StringComparison.OrdinalIgnoreCase))
+                .PartUri;
+
+            // Undo direction: snapshot has no annotations part but the live doc
+            // does → forward-op created it, roll it back by deleting.
+            if (annotationsPart is not null
+                && !byUri.ContainsKey(annotationsPart.Uri.ToString()))
+            {
+                main.DeletePart(annotationsPart);
+                annotationsPart = null;
+            }
+
+            // Redo direction: snapshot has an annotations part but the live doc
+            // doesn't → undo previously removed it, restore by re-adding.
+            if (annotationsPart is null && snapshotAnnotationsUri is not null
+                && byUri.TryGetValue(snapshotAnnotationsUri, out var annXml))
+            {
+                var newPart = main.AddCustomXmlPart(CustomXmlPartType.CustomXml);
+                newPart.PutXDocument(new XDocument(annXml));
+            }
+        }
+
         InvalidateProjectionCache();
     }
 
@@ -4115,6 +4346,21 @@ public sealed class DocxSession : IDisposable
                 || styleId.Equals("Subtitle", StringComparison.OrdinalIgnoreCase)))
             return "h";
         if (pPr?.Element(W.numPr) is not null) return "li";
+        return "p";
+    }
+
+    /// <summary>
+    /// Classify any block-level XElement to the kind used in anchor ids. Mirrors
+    /// the kinds the projector emits — paragraphs go through
+    /// <see cref="ClassifyParagraphKind"/>; tables/rows/cells map to their fixed kinds.
+    /// Falls back to "p" for unknown shapes.
+    /// </summary>
+    internal static string ClassifyBlockKind(XElement element)
+    {
+        if (element.Name == W.p) return ClassifyParagraphKind(element);
+        if (element.Name == W.tbl) return "tbl";
+        if (element.Name == W.tr) return "tr";
+        if (element.Name == W.tc) return "tc";
         return "p";
     }
 

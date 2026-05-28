@@ -420,212 +420,31 @@ namespace Docxodus
 
         private static List<DocumentAnnotation> GetAnnotationsInternal(WordprocessingDocument wordDoc)
         {
-            var annotations = new List<DocumentAnnotation>();
-
-            var customXmlPart = FindAnnotationsCustomXmlPart(wordDoc);
-            if (customXmlPart == null) return annotations;
-
-            var xdoc = customXmlPart.GetXDocument();
-            var root = xdoc.Root;
-            if (root == null) return annotations;
-
-            foreach (var element in root.Elements(Ann + "annotation"))
-            {
-                var annotation = ParseAnnotationElement(element);
-                if (annotation != null)
-                {
-                    // Optionally populate annotated text
-                    annotation.AnnotatedText = GetTextInBookmark(wordDoc, annotation.BookmarkName);
-                    annotations.Add(annotation);
-                }
-            }
-
+            var annotations = Docxodus.Internal.AnnotationsCustomXml.ReadAll(wordDoc).ToList();
+            foreach (var a in annotations)
+                a.AnnotatedText = GetTextInBookmark(wordDoc, a.BookmarkName);
             return annotations;
         }
 
         private static DocumentAnnotation GetAnnotationInternal(WordprocessingDocument wordDoc, string annotationId)
         {
-            var customXmlPart = FindAnnotationsCustomXmlPart(wordDoc);
-            if (customXmlPart == null) return null;
-
-            var xdoc = customXmlPart.GetXDocument();
-            var element = xdoc.Root?.Elements(Ann + "annotation")
-                .FirstOrDefault(a => (string)a.Attribute("id") == annotationId);
-
-            if (element == null) return null;
-
-            var annotation = ParseAnnotationElement(element);
-            if (annotation != null)
-            {
+            var annotation = Docxodus.Internal.AnnotationsCustomXml.FindById(wordDoc, annotationId);
+            if (annotation is not null)
                 annotation.AnnotatedText = GetTextInBookmark(wordDoc, annotation.BookmarkName);
-            }
-
-            return annotation;
-        }
-
-        private static DocumentAnnotation ParseAnnotationElement(XElement element)
-        {
-            var id = (string)element.Attribute("id");
-            if (string.IsNullOrEmpty(id)) return null;
-
-            var annotation = new DocumentAnnotation
-            {
-                Id = id,
-                LabelId = (string)element.Attribute("labelId"),
-                Label = (string)element.Attribute("label"),
-                Color = (string)element.Attribute("color"),
-                Author = (string)element.Attribute("author"),
-            };
-
-            var createdStr = (string)element.Attribute("created");
-            if (DateTime.TryParse(createdStr, out var created))
-            {
-                annotation.Created = created;
-            }
-
-            var rangeElement = element.Element(Ann + "range");
-            if (rangeElement != null)
-            {
-                annotation.BookmarkName = (string)rangeElement.Attribute("bookmarkName");
-            }
-
-            var pageSpanElement = element.Element(Ann + "pageSpan");
-            if (pageSpanElement != null)
-            {
-                var startPageStr = (string)pageSpanElement.Attribute("startPage");
-                var endPageStr = (string)pageSpanElement.Attribute("endPage");
-                var staleStr = (string)pageSpanElement.Attribute("stale");
-                var computedAtStr = (string)pageSpanElement.Attribute("computedAt");
-
-                if (int.TryParse(startPageStr, out var startPage))
-                    annotation.StartPage = startPage;
-                if (int.TryParse(endPageStr, out var endPage))
-                    annotation.EndPage = endPage;
-
-                annotation.PageInfoStale = staleStr?.ToLowerInvariant() == "true";
-
-                if (DateTime.TryParse(computedAtStr, out var computedAt))
-                    annotation.PageInfoComputedAt = computedAt;
-            }
-
-            var metadataElement = element.Element(Ann + "metadata");
-            if (metadataElement != null)
-            {
-                foreach (var item in metadataElement.Elements(Ann + "item"))
-                {
-                    var key = (string)item.Attribute("key");
-                    var value = item.Value;
-                    if (!string.IsNullOrEmpty(key))
-                    {
-                        annotation.Metadata[key] = value;
-                    }
-                }
-            }
-
             return annotation;
         }
 
         private static void AddAnnotationToCustomXml(WordprocessingDocument wordDoc, DocumentAnnotation annotation)
-        {
-            var customXmlPart = GetOrCreateAnnotationsCustomXmlPart(wordDoc);
-            var xdoc = customXmlPart.GetXDocument();
-
-            var annotationElement = new XElement(Ann + "annotation",
-                new XAttribute("id", annotation.Id),
-                new XAttribute("labelId", annotation.LabelId ?? ""),
-                new XAttribute("label", annotation.Label ?? ""),
-                new XAttribute("color", annotation.Color ?? "#FFFF00"));
-
-            if (!string.IsNullOrEmpty(annotation.Author))
-                annotationElement.Add(new XAttribute("author", annotation.Author));
-
-            if (annotation.Created.HasValue)
-                annotationElement.Add(new XAttribute("created", annotation.Created.Value.ToString("o")));
-
-            // Range element
-            annotationElement.Add(new XElement(Ann + "range",
-                new XAttribute("bookmarkName", annotation.BookmarkName ?? "")));
-
-            // Page span (if available)
-            if (annotation.StartPage.HasValue && annotation.EndPage.HasValue)
-            {
-                annotationElement.Add(new XElement(Ann + "pageSpan",
-                    new XAttribute("startPage", annotation.StartPage.Value),
-                    new XAttribute("endPage", annotation.EndPage.Value),
-                    new XAttribute("stale", annotation.PageInfoStale ? "true" : "false")));
-            }
-
-            // Metadata
-            if (annotation.Metadata?.Count > 0)
-            {
-                var metadataElement = new XElement(Ann + "metadata");
-                foreach (var (key, value) in annotation.Metadata)
-                {
-                    metadataElement.Add(new XElement(Ann + "item",
-                        new XAttribute("key", key),
-                        value ?? ""));
-                }
-                annotationElement.Add(metadataElement);
-            }
-
-            xdoc.Root.Add(annotationElement);
-            customXmlPart.PutXDocument();
-        }
+            => Docxodus.Internal.AnnotationsCustomXml.Write(wordDoc, annotation);
 
         private static void RemoveAnnotationFromCustomXml(WordprocessingDocument wordDoc, string annotationId)
-        {
-            var customXmlPart = FindAnnotationsCustomXmlPart(wordDoc);
-            if (customXmlPart == null) return;
-
-            var xdoc = customXmlPart.GetXDocument();
-            var element = xdoc.Root?.Elements(Ann + "annotation")
-                .FirstOrDefault(a => (string)a.Attribute("id") == annotationId);
-
-            if (element != null)
-            {
-                element.Remove();
-                customXmlPart.PutXDocument();
-            }
-        }
+            => Docxodus.Internal.AnnotationsCustomXml.Remove(wordDoc, annotationId);
 
         private static CustomXmlPart FindAnnotationsCustomXmlPart(WordprocessingDocument wordDoc)
-        {
-            foreach (var customXmlPart in wordDoc.MainDocumentPart.CustomXmlParts)
-            {
-                try
-                {
-                    var xdoc = customXmlPart.GetXDocument();
-                    if (xdoc.Root?.Name.Namespace == Ann && xdoc.Root.Name.LocalName == "annotations")
-                    {
-                        return customXmlPart;
-                    }
-                }
-                catch
-                {
-                    // Skip parts that can't be parsed as XML
-                }
-            }
-
-            return null;
-        }
+            => Docxodus.Internal.AnnotationsCustomXml.Find(wordDoc);
 
         private static CustomXmlPart GetOrCreateAnnotationsCustomXmlPart(WordprocessingDocument wordDoc)
-        {
-            var existing = FindAnnotationsCustomXmlPart(wordDoc);
-            if (existing != null) return existing;
-
-            // Create new custom XML part
-            var customXmlPart = wordDoc.MainDocumentPart.AddCustomXmlPart(CustomXmlPartType.CustomXml);
-
-            var xdoc = new XDocument(
-                new XDeclaration("1.0", "UTF-8", "yes"),
-                new XElement(Ann + "annotations",
-                    new XAttribute("version", "1.0")));
-
-            customXmlPart.PutXDocument(xdoc);
-
-            return customXmlPart;
-        }
+            => Docxodus.Internal.AnnotationsCustomXml.GetOrCreate(wordDoc);
 
         private static void CreateBookmarkFromSearch(
             WordprocessingDocument wordDoc,
