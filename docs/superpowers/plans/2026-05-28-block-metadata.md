@@ -153,13 +153,13 @@ public sealed record SectionInfo
     /// <summary>The Unid of the <c>w:sectPr</c> element this info describes. Stable across mutations.</summary>
     required public string SectionUnid { get; init; }
 
-    required public double PageWidthTwips { get; init; }
-    required public double PageHeightTwips { get; init; }
+    required public int PageWidthTwips { get; init; }
+    required public int PageHeightTwips { get; init; }
     required public bool Landscape { get; init; }
-    required public double MarginTopTwips { get; init; }
-    required public double MarginBottomTwips { get; init; }
-    required public double MarginLeftTwips { get; init; }
-    required public double MarginRightTwips { get; init; }
+    required public int MarginTopTwips { get; init; }
+    required public int MarginBottomTwips { get; init; }
+    required public int MarginLeftTwips { get; init; }
+    required public int MarginRightTwips { get; init; }
 
     /// <summary>Number of text columns. Defaults to 1 if no <c>w:cols</c> is set.</summary>
     required public int Columns { get; init; }
@@ -873,15 +873,18 @@ Replace the stub `GetSectionInfo` with:
         // The width attribute is `w:w` — exposed in the W class as `W._w` to avoid
         // collision with the namespace alias `W.w`. Height is just `W.h`. See
         // WmlToHtmlConverter for the same usage pattern.
-        double width = ParseDouble((string?)pgSz?.Attribute(W._w)) ?? 12240;   // 8.5"
-        double height = ParseDouble((string?)pgSz?.Attribute(W.h)) ?? 15840;  // 11"
+        // The width attribute is `w:w` — exposed in the W class as `W._w` to avoid
+        // collision with the namespace alias `W.w`. Height is just `W.h`. See
+        // WmlToHtmlConverter for the same usage pattern. Twips are integer-valued.
+        int width = ParseInt((string?)pgSz?.Attribute(W._w)) ?? 12240;   // 8.5"
+        int height = ParseInt((string?)pgSz?.Attribute(W.h)) ?? 15840;  // 11"
         bool landscape = string.Equals((string?)pgSz?.Attribute(W.orient), "landscape",
             System.StringComparison.Ordinal);
 
-        double top = ParseDouble((string?)pgMar?.Attribute(W.top)) ?? 1440;
-        double bottom = ParseDouble((string?)pgMar?.Attribute(W.bottom)) ?? 1440;
-        double left = ParseDouble((string?)pgMar?.Attribute(W.left)) ?? 1440;
-        double right = ParseDouble((string?)pgMar?.Attribute(W.right)) ?? 1440;
+        int top = ParseInt((string?)pgMar?.Attribute(W.top)) ?? 1440;
+        int bottom = ParseInt((string?)pgMar?.Attribute(W.bottom)) ?? 1440;
+        int left = ParseInt((string?)pgMar?.Attribute(W.left)) ?? 1440;
+        int right = ParseInt((string?)pgMar?.Attribute(W.right)) ?? 1440;
 
         int colCount = 1;
         if (cols is not null && int.TryParse((string?)cols.Attribute(W.num), out var parsedCols))
@@ -961,8 +964,8 @@ Replace the stub `GetSectionInfo` with:
         return (headers, footers);
     }
 
-    private static double? ParseDouble(string? raw)
-        => double.TryParse(raw, System.Globalization.NumberStyles.Any,
+    private static int? ParseInt(string? raw)
+        => int.TryParse(raw, System.Globalization.NumberStyles.Any,
             System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
 ```
 
@@ -1206,13 +1209,13 @@ Insert in the "Serializers" region (after `SerializeAnchorInfoOrNull` around lin
         if (info is null) return "null";
         var sb = new StringBuilder(256);
         sb.Append("{\"sectionUnid\":").Append(JsonString(info.SectionUnid))
-          .Append(",\"pageWidthTwips\":").Append(info.PageWidthTwips.ToString(System.Globalization.CultureInfo.InvariantCulture))
-          .Append(",\"pageHeightTwips\":").Append(info.PageHeightTwips.ToString(System.Globalization.CultureInfo.InvariantCulture))
+          .Append(",\"pageWidthTwips\":").Append(info.PageWidthTwips)
+          .Append(",\"pageHeightTwips\":").Append(info.PageHeightTwips)
           .Append(",\"landscape\":").Append(info.Landscape ? "true" : "false")
-          .Append(",\"marginTopTwips\":").Append(info.MarginTopTwips.ToString(System.Globalization.CultureInfo.InvariantCulture))
-          .Append(",\"marginBottomTwips\":").Append(info.MarginBottomTwips.ToString(System.Globalization.CultureInfo.InvariantCulture))
-          .Append(",\"marginLeftTwips\":").Append(info.MarginLeftTwips.ToString(System.Globalization.CultureInfo.InvariantCulture))
-          .Append(",\"marginRightTwips\":").Append(info.MarginRightTwips.ToString(System.Globalization.CultureInfo.InvariantCulture))
+          .Append(",\"marginTopTwips\":").Append(info.MarginTopTwips)
+          .Append(",\"marginBottomTwips\":").Append(info.MarginBottomTwips)
+          .Append(",\"marginLeftTwips\":").Append(info.MarginLeftTwips)
+          .Append(",\"marginRightTwips\":").Append(info.MarginRightTwips)
           .Append(",\"columns\":").Append(info.Columns)
           .Append(",\"headerPartUris\":[");
         for (int i = 0; i < info.HeaderPartUris.Count; i++)
@@ -1806,13 +1809,13 @@ class SectionInfo:
     """Page-layout snapshot for the w:sectPr that governs an anchor."""
 
     section_unid: str
-    page_width_twips: float
-    page_height_twips: float
+    page_width_twips: int
+    page_height_twips: int
     landscape: bool
-    margin_top_twips: float
-    margin_bottom_twips: float
-    margin_left_twips: float
-    margin_right_twips: float
+    margin_top_twips: int
+    margin_bottom_twips: int
+    margin_left_twips: int
+    margin_right_twips: int
     columns: int
     header_part_uris: tuple[str, ...]
     footer_part_uris: tuple[str, ...]
@@ -1821,13 +1824,13 @@ class SectionInfo:
     def _from_wire(cls, d: Mapping[str, Any]) -> "SectionInfo":
         return cls(
             section_unid=d["sectionUnid"],
-            page_width_twips=float(d["pageWidthTwips"]),
-            page_height_twips=float(d["pageHeightTwips"]),
+            page_width_twips=int(d["pageWidthTwips"]),
+            page_height_twips=int(d["pageHeightTwips"]),
             landscape=bool(d["landscape"]),
-            margin_top_twips=float(d["marginTopTwips"]),
-            margin_bottom_twips=float(d["marginBottomTwips"]),
-            margin_left_twips=float(d["marginLeftTwips"]),
-            margin_right_twips=float(d["marginRightTwips"]),
+            margin_top_twips=int(d["marginTopTwips"]),
+            margin_bottom_twips=int(d["marginBottomTwips"]),
+            margin_left_twips=int(d["marginLeftTwips"]),
+            margin_right_twips=int(d["marginRightTwips"]),
             columns=int(d["columns"]),
             header_part_uris=tuple(d["headerPartUris"]),
             footer_part_uris=tuple(d["footerPartUris"]),
