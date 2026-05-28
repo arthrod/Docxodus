@@ -33,4 +33,31 @@ public class DocxSessionMetadataTests
         Assert.Null(meta.List);
         Assert.False(meta.HasInlineFormatting);
     }
+
+    [Fact]
+    public void BM002_GetListMembership_InlineNumPr_BulletList_ReturnsListFacts()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS002_BulletedList());
+        var anchor = session.Project().AnchorIndex.Values.First(t => t.Anchor.Kind == "li");
+
+        var list = session.GetListMembership(anchor.Anchor.Id);
+
+        Assert.NotNull(list);
+        Assert.Equal(1, list!.NumId);
+        Assert.Equal(0, list.AbstractNumId);
+        Assert.Equal(0, list.Level);
+        Assert.Equal(NumberFormat.Bullet, list.Format);
+        Assert.True(list.IsAutoNumbered);
+        Assert.False(list.FromStyle);
+        Assert.Null(list.StartOverride);
+    }
+
+    [Fact]
+    public void BM003_GetListMembership_NotAList_ReturnsNull()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = session.Project().AnchorIndex.Values.First(t => t.Anchor.Kind == "p");
+
+        Assert.Null(session.GetListMembership(anchor.Anchor.Id));
+    }
 }
