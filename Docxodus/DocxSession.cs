@@ -511,8 +511,13 @@ public sealed record ListMembership
 /// </summary>
 public sealed record BlockMetadata
 {
+    /// <summary>Same as <see cref="AnchorInfo.Id"/> — the markdown-projection anchor id.</summary>
     required public string AnchorId { get; init; }
+
+    /// <summary>Same as <see cref="AnchorInfo.Kind"/> — e.g. <c>"p"</c>, <c>"h"</c>, <c>"li"</c>, <c>"tc"</c>, <c>"tbl"</c>.</summary>
     required public string Kind { get; init; }
+
+    /// <summary>Same as <see cref="AnchorInfo.Scope"/> — e.g. <c>"body"</c>, <c>"hdr1"</c>, <c>"fn"</c>.</summary>
     required public string Scope { get; init; }
 
     /// <summary>The <c>w:pStyle/@w:val</c> for paragraph kinds, or <c>w:tblStyle</c> for tables.
@@ -547,13 +552,13 @@ public sealed record SectionInfo
     /// <summary>The Unid of the <c>w:sectPr</c> element this info describes. Stable across mutations.</summary>
     required public string SectionUnid { get; init; }
 
-    required public double PageWidthTwips { get; init; }
-    required public double PageHeightTwips { get; init; }
+    required public int PageWidthTwips { get; init; }
+    required public int PageHeightTwips { get; init; }
     required public bool Landscape { get; init; }
-    required public double MarginTopTwips { get; init; }
-    required public double MarginBottomTwips { get; init; }
-    required public double MarginLeftTwips { get; init; }
-    required public double MarginRightTwips { get; init; }
+    required public int MarginTopTwips { get; init; }
+    required public int MarginBottomTwips { get; init; }
+    required public int MarginLeftTwips { get; init; }
+    required public int MarginRightTwips { get; init; }
 
     /// <summary>Number of text columns. Defaults to 1 if no <c>w:cols</c> is set.</summary>
     required public int Columns { get; init; }
