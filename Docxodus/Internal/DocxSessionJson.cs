@@ -523,6 +523,100 @@ internal static class DocxSessionJson
         return sb.ToString();
     }
 
+    public static string SerializeBlockMetadataOrNull(BlockMetadata? meta)
+    {
+        if (meta is null) return "null";
+        var sb = new StringBuilder(256);
+        sb.Append("{\"anchorId\":").Append(JsonString(meta.AnchorId))
+          .Append(",\"kind\":").Append(JsonString(meta.Kind))
+          .Append(",\"scope\":").Append(JsonString(meta.Scope));
+        if (meta.StyleId is not null)
+            sb.Append(",\"styleId\":").Append(JsonString(meta.StyleId));
+        if (meta.StyleName is not null)
+            sb.Append(",\"styleName\":").Append(JsonString(meta.StyleName));
+        if (meta.OutlineLevel.HasValue)
+            sb.Append(",\"outlineLevel\":").Append(meta.OutlineLevel.Value);
+        if (meta.List is not null)
+            sb.Append(",\"list\":").Append(SerializeListMembershipOrNull(meta.List));
+        sb.Append(",\"hasInlineFormatting\":").Append(meta.HasInlineFormatting ? "true" : "false");
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    public static string SerializeBlockMetadataMap(System.Collections.Generic.IReadOnlyDictionary<string, BlockMetadata?> map)
+    {
+        var sb = new StringBuilder(map.Count * 200 + 2);
+        sb.Append('{');
+        bool first = true;
+        foreach (var kv in map)
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append(JsonString(kv.Key)).Append(':');
+            sb.Append(SerializeBlockMetadataOrNull(kv.Value));
+        }
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    public static string SerializeListMembershipOrNull(ListMembership? list)
+    {
+        if (list is null) return "null";
+        var sb = new StringBuilder(128);
+        sb.Append("{\"numId\":").Append(list.NumId)
+          .Append(",\"abstractNumId\":").Append(list.AbstractNumId)
+          .Append(",\"level\":").Append(list.Level)
+          .Append(",\"format\":").Append(JsonString(NumberFormatToString(list.Format)))
+          .Append(",\"isAutoNumbered\":").Append(list.IsAutoNumbered ? "true" : "false")
+          .Append(",\"fromStyle\":").Append(list.FromStyle ? "true" : "false");
+        if (list.StartOverride.HasValue)
+            sb.Append(",\"startOverride\":").Append(list.StartOverride.Value);
+        if (list.GeneratedLabel is not null)
+            sb.Append(",\"generatedLabel\":").Append(JsonString(list.GeneratedLabel));
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    public static string SerializeSectionInfoOrNull(SectionInfo? info)
+    {
+        if (info is null) return "null";
+        var sb = new StringBuilder(256);
+        sb.Append("{\"sectionUnid\":").Append(JsonString(info.SectionUnid))
+          .Append(",\"pageWidthTwips\":").Append(info.PageWidthTwips)
+          .Append(",\"pageHeightTwips\":").Append(info.PageHeightTwips)
+          .Append(",\"landscape\":").Append(info.Landscape ? "true" : "false")
+          .Append(",\"marginTopTwips\":").Append(info.MarginTopTwips)
+          .Append(",\"marginBottomTwips\":").Append(info.MarginBottomTwips)
+          .Append(",\"marginLeftTwips\":").Append(info.MarginLeftTwips)
+          .Append(",\"marginRightTwips\":").Append(info.MarginRightTwips)
+          .Append(",\"columns\":").Append(info.Columns)
+          .Append(",\"headerPartUris\":[");
+        for (int i = 0; i < info.HeaderPartUris.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append(JsonString(info.HeaderPartUris[i]));
+        }
+        sb.Append("],\"footerPartUris\":[");
+        for (int i = 0; i < info.FooterPartUris.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append(JsonString(info.FooterPartUris[i]));
+        }
+        sb.Append("]}");
+        return sb.ToString();
+    }
+
+    private static string NumberFormatToString(NumberFormat f) => f switch
+    {
+        NumberFormat.Decimal => "decimal",
+        NumberFormat.UpperLetter => "upperLetter",
+        NumberFormat.LowerLetter => "lowerLetter",
+        NumberFormat.UpperRoman => "upperRoman",
+        NumberFormat.LowerRoman => "lowerRoman",
+        NumberFormat.Bullet => "bullet",
+        _ => "decimal",
+    };
+
     public static string SerializeAnnotations(IReadOnlyList<DocumentAnnotation> anns)
     {
         var sb = new StringBuilder(anns.Count * 200 + 2);

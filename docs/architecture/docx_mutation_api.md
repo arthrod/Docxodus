@@ -827,3 +827,69 @@ These are aspirations. Microbenchmarks aren't in CI by default — flag in PR if
 - [`docx_converter.md`](docx_converter.md) — `WmlToHtmlConverter` internals (sibling write-side converter with very different goals)
 - [`tracked_changes.md`](tracked_changes.md) — informs the `TrackedChangeMode` setting
 - [`incremental_annotation_overlay.md`](incremental_annotation_overlay.md) — anchor-based overlay pattern; the read-side analog of this write-side API
+
+## Inspection: block metadata
+
+`GetBlockMetadata` / `GetBlockMetadatas` / `GetListMembership` /
+`GetSectionInfo` are pure reads — no mutation, no undo snapshot, no
+projection invalidation. Each returns an immutable record (or null when
+the anchor doesn't exist).
+
+### `BlockMetadata`
+
+For every block-level anchor, exposes:
+
+- `AnchorId`, `Kind`, `Scope` — duplicated from `AnchorInfo` so the
+  record is self-contained.
+- `StyleId` / `StyleName` — `pStyle/@val` for paragraph kinds,
+  `tblStyle/@val` for tables. `StyleName` resolves through the styles
+  part's `w:name/@val`.
+- `OutlineLevel` — `pPr/outlineLvl` when present; otherwise inferred
+  from a `HeadingN` style (level 0..8). 0-based per Word convention.
+- `List` — populated for list-item paragraphs (`null` otherwise).
+- `HasInlineFormatting` — true when any descendant `w:r` carries a
+  non-empty `w:rPr`. Coarse "does this paragraph have any character
+  formatting at all" probe.
+
+### `ListMembership`
+
+For list-item paragraphs (and also surfaced as `BlockMetadata.List`):
+
+- `NumId` / `AbstractNumId` / `Level` / `Format` — the standard
+  numbering identity quadruple.
+- `StartOverride` — non-null when the paragraph's `w:num` has a
+  `w:lvlOverride/w:startOverride` at this level. Useful for predicting
+  what `RestartNumberedList` will produce.
+- `IsAutoNumbered` — always true (a paragraph without numbering returns
+  `null` from `GetListMembership`).
+- `FromStyle` — true when `w:numPr` is inherited from the paragraph's
+  style chain (style → basedOn → basedOn → ...) rather than set inline.
+  Lets callers reason about whether modifying the paragraph in place
+  versus modifying the underlying style is appropriate.
+- `GeneratedLabel` — same string as `AnchorInfo.AutoNumberPrefix`,
+  duplicated here so callers don't take two round-trips.
+
+### `SectionInfo`
+
+For anchors in the body part:
+
+- `SectionUnid` — stable id for the governing `w:sectPr`.
+- `PageWidthTwips` / `PageHeightTwips` — raw twips (1 inch = 1440 twips).
+- `Landscape` — true when `pgSz/@orient = "landscape"`.
+- `MarginTopTwips` / `MarginBottomTwips` / `MarginLeftTwips` /
+  `MarginRightTwips` — `pgMar` attribute values; defaults to 1440
+  (1 inch) when missing.
+- `Columns` — `cols/@num`, defaults to 1.
+- `HeaderPartUris` / `FooterPartUris` — package-part URIs of the
+  header/footer parts referenced via `headerReference` / `footerReference`,
+  in declaration order. Empty when no headers/footers are referenced.
+
+Returns `null` for anchors in non-body parts (footnotes, endnotes,
+headers, footers, comments) — sectPr is body-only.
+
+### `NumberFormat` enum
+
+Closed enum used by `ListMembership.Format` (read) and by the list
+write surface (when it ships). Values: `Decimal`, `UpperLetter`,
+`LowerLetter`, `UpperRoman`, `LowerRoman`, `Bullet`. Any OOXML
+`numFmt` value outside this set maps to `Decimal` (safest fallback).

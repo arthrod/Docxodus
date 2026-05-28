@@ -15,6 +15,7 @@ where they're used in ``session.py``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Mapping, Sequence
 
 from .enums import (
@@ -40,8 +41,12 @@ __all__ = [
     "MarkdownPatch",
     "AnchorTarget",
     "AnchorInfo",
+    "BlockMetadata",
+    "ListMembership",
+    "NumberFormat",
     "RunFormatting",
     "RunFragment",
+    "SectionInfo",
     "TextMatch",
     "BlockSlice",
     "CrossBlockMatch",
@@ -122,6 +127,113 @@ class AnchorInfo:
             kind=d["kind"],
             scope=d["scope"],
             text_preview=d.get("textPreview", ""),
+        )
+
+
+class NumberFormat(str, Enum):
+    """Six list formats supported by the list write surface and surfaced
+    on ``ListMembership.format``. String-valued so the wire JSON round-trips
+    transparently."""
+
+    DECIMAL = "decimal"
+    UPPER_LETTER = "upperLetter"
+    LOWER_LETTER = "lowerLetter"
+    UPPER_ROMAN = "upperRoman"
+    LOWER_ROMAN = "lowerRoman"
+    BULLET = "bullet"
+
+    @classmethod
+    def _from_wire(cls, raw: str) -> "NumberFormat":
+        try:
+            return cls(raw)
+        except ValueError:
+            return cls.DECIMAL
+
+
+@dataclass(frozen=True, slots=True)
+class ListMembership:
+    """Numbering facts for a list-item paragraph."""
+
+    num_id: int
+    abstract_num_id: int
+    level: int
+    format: NumberFormat
+    is_auto_numbered: bool
+    from_style: bool
+    start_override: int | None = None
+    generated_label: str | None = None
+
+    @classmethod
+    def _from_wire(cls, d: Mapping[str, Any]) -> "ListMembership":
+        return cls(
+            num_id=int(d["numId"]),
+            abstract_num_id=int(d["abstractNumId"]),
+            level=int(d["level"]),
+            format=NumberFormat._from_wire(d["format"]),
+            is_auto_numbered=bool(d["isAutoNumbered"]),
+            from_style=bool(d["fromStyle"]),
+            start_override=int(d["startOverride"]) if "startOverride" in d else None,
+            generated_label=d.get("generatedLabel"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BlockMetadata:
+    """Block-level structural metadata."""
+
+    anchor_id: str
+    kind: str
+    scope: str
+    has_inline_formatting: bool
+    style_id: str | None = None
+    style_name: str | None = None
+    outline_level: int | None = None
+    list: ListMembership | None = None
+
+    @classmethod
+    def _from_wire(cls, d: Mapping[str, Any]) -> "BlockMetadata":
+        return cls(
+            anchor_id=d["anchorId"],
+            kind=d["kind"],
+            scope=d["scope"],
+            has_inline_formatting=bool(d["hasInlineFormatting"]),
+            style_id=d.get("styleId"),
+            style_name=d.get("styleName"),
+            outline_level=int(d["outlineLevel"]) if "outlineLevel" in d else None,
+            list=ListMembership._from_wire(d["list"]) if "list" in d else None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SectionInfo:
+    """Page-layout snapshot for the w:sectPr that governs an anchor."""
+
+    section_unid: str
+    page_width_twips: int
+    page_height_twips: int
+    landscape: bool
+    margin_top_twips: int
+    margin_bottom_twips: int
+    margin_left_twips: int
+    margin_right_twips: int
+    columns: int
+    header_part_uris: tuple[str, ...]
+    footer_part_uris: tuple[str, ...]
+
+    @classmethod
+    def _from_wire(cls, d: Mapping[str, Any]) -> "SectionInfo":
+        return cls(
+            section_unid=d["sectionUnid"],
+            page_width_twips=int(d["pageWidthTwips"]),
+            page_height_twips=int(d["pageHeightTwips"]),
+            landscape=bool(d["landscape"]),
+            margin_top_twips=int(d["marginTopTwips"]),
+            margin_bottom_twips=int(d["marginBottomTwips"]),
+            margin_left_twips=int(d["marginLeftTwips"]),
+            margin_right_twips=int(d["marginRightTwips"]),
+            columns=int(d["columns"]),
+            header_part_uris=tuple(d["headerPartUris"]),
+            footer_part_uris=tuple(d["footerPartUris"]),
         )
 
 

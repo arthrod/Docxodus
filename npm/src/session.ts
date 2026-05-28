@@ -6,6 +6,7 @@ import type {
   AnchorRef,
   AnchorTargetRef,
   AnnotationUpdate,
+  BlockMetadata,
   BulkEditResult,
   CharSpan,
   CrossBlockMatch,
@@ -20,7 +21,9 @@ import type {
   FillOptions,
   FormatOp,
   GrepOptions,
+  ListMembership,
   ReplaceOptions,
+  SectionInfo,
   TemplatePlaceholder,
   TextMatch,
 } from "./types.js";
@@ -541,6 +544,42 @@ export class DocxSession {
   getAnchorInfos(anchorIds: readonly string[]): Record<string, AnchorInfo | null> {
     const raw = this.wasm.GetAnchorInfos(this.handle, JSON.stringify(anchorIds));
     return JSON.parse(raw) as Record<string, AnchorInfo | null>;
+  }
+
+  /**
+   * Resolve block-level metadata (style id+name, outline level, list membership,
+   * formatting probe) for an anchor. Returns null when the anchor doesn't exist.
+   */
+  getBlockMetadata(anchorId: string): BlockMetadata | null {
+    const raw = this.wasm.GetBlockMetadata(this.handle, anchorId);
+    return JSON.parse(raw) as BlockMetadata | null;
+  }
+
+  /**
+   * Bulk variant of {@link getBlockMetadata}. Unknown ids map to null;
+   * duplicates are deduped.
+   */
+  getBlockMetadatas(anchorIds: readonly string[]): Record<string, BlockMetadata | null> {
+    const raw = this.wasm.GetBlockMetadatas(this.handle, JSON.stringify(anchorIds));
+    return JSON.parse(raw) as Record<string, BlockMetadata | null>;
+  }
+
+  /**
+   * Resolve the numbering facts for a list-item paragraph; returns null when
+   * the anchor has no w:numPr.
+   */
+  getListMembership(anchorId: string): ListMembership | null {
+    const raw = this.wasm.GetListMembership(this.handle, anchorId);
+    return JSON.parse(raw) as ListMembership | null;
+  }
+
+  /**
+   * Resolve page-layout info for the w:sectPr that governs an anchor.
+   * Returns null for anchors outside the body part.
+   */
+  getSectionInfo(anchorId: string): SectionInfo | null {
+    const raw = this.wasm.GetSectionInfo(this.handle, anchorId);
+    return JSON.parse(raw) as SectionInfo | null;
   }
 
   /**

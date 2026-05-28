@@ -260,6 +260,11 @@ See `docs/architecture/comment_rendering.md` for detailed comment rendering docu
   `MoveAnnotation(id, newAnchorId, newSpan)` — anchor-addressed annotation
   CRUD that mutates the live session document. `EditResult.AnnotationId`
   carries the affected id on success.
+- Inspection: `GetBlockMetadata(anchor)`, `GetBlockMetadatas(anchors)`,
+  `GetListMembership(anchor)`, `GetSectionInfo(anchor)` — read-only
+  block-level metadata (style id/name, outline level, list facts:
+  numId/abstractNumId/ilvl/format/start-override/from-style,
+  sectPr page setup). Returns null for unknown anchors.
 - Raw OOXML escape hatch: `session.Raw.GetXml(anchor)`, `Raw.InsertXml(anchor, Position, xml)`, `Raw.ReplaceXml(anchor, xml)` for content the markdown subset can't express
 - Bounded snapshot `Undo()`/`Redo()` (configurable depth via `Settings.UndoDepth`)
 - Every mutation returns a typed `EditResult` envelope: `Success`, `EditError(EditErrorCode, message, anchorId)`, `Created`/`Removed`/`Modified` anchor lists, and a `MarkdownPatch` for the affected scope

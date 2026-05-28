@@ -66,6 +66,18 @@ internal static class DocxSessionOps
     public static string GetAnchorInfos(int handle, System.Collections.Generic.IEnumerable<string> anchorIds) =>
         DocxSessionJson.SerializeAnchorInfoMap(SessionRegistry.Get(handle).GetAnchorInfos(anchorIds));
 
+    public static string GetBlockMetadata(int handle, string anchorId) =>
+        DocxSessionJson.SerializeBlockMetadataOrNull(SessionRegistry.Get(handle).GetBlockMetadata(anchorId));
+
+    public static string GetBlockMetadatas(int handle, System.Collections.Generic.IEnumerable<string> anchorIds) =>
+        DocxSessionJson.SerializeBlockMetadataMap(SessionRegistry.Get(handle).GetBlockMetadatas(anchorIds));
+
+    public static string GetListMembership(int handle, string anchorId) =>
+        DocxSessionJson.SerializeListMembershipOrNull(SessionRegistry.Get(handle).GetListMembership(anchorId));
+
+    public static string GetSectionInfo(int handle, string anchorId) =>
+        DocxSessionJson.SerializeSectionInfoOrNull(SessionRegistry.Get(handle).GetSectionInfo(anchorId));
+
     public static string FindByText(int handle, string needle, FindOptions? options) =>
         DocxSessionJson.SerializeAnchorTargetOrNull(SessionRegistry.Get(handle).FindByText(needle, options));
 

@@ -119,6 +119,89 @@ public class DocxSessionTests
         return ms.ToArray();
     }
 
+    /// <summary>
+    /// Single-item list where the paragraph carries only a <c>pStyle</c> pointing
+    /// at a custom style that contributes the <c>numPr</c>. Used to verify
+    /// <c>FromStyle = true</c> resolution.
+    /// </summary>
+    internal static byte[] BuildBM_StyleInheritedList()
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.Document = new Document();
+            var body = new Body();
+            main.Document.Body = body;
+
+            var stylesPart = main.AddNewPart<StyleDefinitionsPart>();
+            var styles = BuildHeadingStyles();
+            // Add a paragraph style "MyListStyle" that carries numPr → numId=1, ilvl=0.
+            var styleNumPr = new ParagraphProperties(
+                new NumberingProperties(
+                    new NumberingLevelReference { Val = 0 },
+                    new NumberingId { Val = 1 }));
+            styles.Append(new Style(
+                new StyleName { Val = "My List Style" },
+                styleNumPr)
+            {
+                Type = StyleValues.Paragraph,
+                StyleId = "MyListStyle",
+            });
+            stylesPart.Styles = styles;
+
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            var numberingPart = main.AddNewPart<NumberingDefinitionsPart>();
+            numberingPart.Numbering = BuildBulletNumbering();
+
+            // Paragraph carries only the pStyle — no inline numPr.
+            var pPr = new ParagraphProperties(new ParagraphStyleId { Val = "MyListStyle" });
+            body.Append(new Paragraph(pPr, new Run(new Text("Style-inherited list item"))));
+
+            main.Document.Save();
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Single paragraph in a landscape A4 section with non-default margins,
+    /// two columns, and a header part reference. Used to verify
+    /// <c>GetSectionInfo</c> against a richly-configured sectPr.
+    /// </summary>
+    internal static byte[] BuildBM_LandscapeSection()
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.Document = new Document();
+            var body = new Body();
+            main.Document.Body = body;
+
+            main.AddNewPart<StyleDefinitionsPart>().Styles = BuildHeadingStyles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            // Add a header part so we can verify HeaderPartUris is populated.
+            var headerPart = main.AddNewPart<HeaderPart>("rIdH1");
+            headerPart.Header = new Header(new Paragraph(new Run(new Text("Header text"))));
+
+            body.Append(new Paragraph(new Run(new Text("Page body"))));
+
+            // Section properties: A4 landscape (16838 x 11906 twips), columns=2, margins set.
+            var sectPr = new SectionProperties(
+                new HeaderReference { Type = HeaderFooterValues.Default, Id = "rIdH1" },
+                new PageSize { Width = 16838u, Height = 11906u, Orient = PageOrientationValues.Landscape },
+                new PageMargin { Top = 720, Bottom = 720, Left = 1080, Right = 1080,
+                    Header = 0, Footer = 0, Gutter = 0 },
+                new Columns { ColumnCount = 2 });
+            body.Append(sectPr);
+
+            main.Document.Save();
+        }
+        return ms.ToArray();
+    }
+
     private static Paragraph MakeListItem(string text, int level, int numId)
     {
         var pPr = new ParagraphProperties(

@@ -56,6 +56,7 @@ export type {
   AnchorInfo,
   AnchorRef,
   AnchorTargetRef,
+  BlockMetadata,
   CharSpan,
   DocumentAnnotation,
   DocxSessionProjection,
@@ -64,7 +65,10 @@ export type {
   EditErrorCode,
   EditResult,
   FormatOp,
+  ListMembership,
   MarkdownPatch,
+  NumberFormat,
+  SectionInfo,
 } from "./types.js";
 export type { FillOptions, BulkEditResult } from "./types.js";
 export { PlaceholderKinds, ContextBoundary } from "./types.js";

@@ -110,6 +110,10 @@ internal static class Dispatcher
         "exists" => DocxSessionOps.Exists(Handle(args), Str(args, "anchorId")) ? "true" : "false",
         "get_anchor_info" => DocxSessionOps.GetAnchorInfo(Handle(args), Str(args, "anchorId")),
         "get_anchor_infos" => DocxSessionOps.GetAnchorInfos(Handle(args), ParseAnchorIdArray(args)),
+        "get_block_metadata" => DocxSessionOps.GetBlockMetadata(Handle(args), Str(args, "anchorId")),
+        "get_block_metadatas" => DocxSessionOps.GetBlockMetadatas(Handle(args), ParseAnchorIdArray(args)),
+        "get_list_membership" => DocxSessionOps.GetListMembership(Handle(args), Str(args, "anchorId")),
+        "get_section_info" => DocxSessionOps.GetSectionInfo(Handle(args), Str(args, "anchorId")),
         "find_by_text" => DocxSessionOps.FindByText(Handle(args), Str(args, "needle"), ParseFindOptions(args)),
         "find_all_by_text" => DocxSessionOps.FindAllByText(Handle(args), Str(args, "needle"), ParseFindOptions(args)),
         "find_by_regex" => DocxSessionOps.FindByRegex(

@@ -765,6 +765,10 @@ export interface DocxodusWasmExports {
     FindByBookmark: (handle: number, bookmarkName: string) => string;
     GetAnchorInfo: (handle: number, anchorId: string) => string;
     GetAnchorInfos: (handle: number, anchorIdsJson: string) => string;
+    GetBlockMetadata: (handle: number, anchorId: string) => string;
+    GetBlockMetadatas: (handle: number, anchorIdsJson: string) => string;
+    GetListMembership: (handle: number, anchorId: string) => string;
+    GetSectionInfo: (handle: number, anchorId: string) => string;
     ListAnnotations: (handle: number) => string;
     // Session annotation write surface
     AddAnnotation: (
@@ -1194,6 +1198,68 @@ export interface AnchorInfo {
   /** Resolved auto-numbering prefix (e.g. "1.", "First") when the element carries
    *  numbering. Absent for un-numbered paragraphs or non-paragraph kinds. */
   autoNumberPrefix?: string;
+}
+
+/** Six list formats supported by the list write surface (decimal, upperLetter,
+ *  lowerLetter, upperRoman, lowerRoman, bullet). Surfaced on
+ *  {@link ListMembership.format} as a string union (mirrors the JSON wire format). */
+export type NumberFormat =
+  | "decimal"
+  | "upperLetter"
+  | "lowerLetter"
+  | "upperRoman"
+  | "lowerRoman"
+  | "bullet";
+
+/** Numbering facts for a list-item paragraph. Returned by
+ *  {@link DocxSession.getListMembership} and surfaced as {@link BlockMetadata.list}. */
+export interface ListMembership {
+  /** The w:numId the paragraph belongs to (the w:num instance). */
+  numId: number;
+  /** The w:abstractNumId the paragraph's w:num points at. */
+  abstractNumId: number;
+  /** The paragraph's level (w:ilvl), 0-8. */
+  level: number;
+  /** Resolved format for this level. */
+  format: NumberFormat;
+  /** Always true for a paragraph carrying w:numPr (inline or via style). */
+  isAutoNumbered: boolean;
+  /** True when the w:numPr is inherited from the paragraph's style chain. */
+  fromStyle: boolean;
+  /** Start-override from w:lvlOverride/w:startOverride for this level, if any. */
+  startOverride?: number;
+  /** Resolved label (e.g. "1.", "(a)") — same value surfaced via AnchorInfo.autoNumberPrefix. */
+  generatedLabel?: string;
+}
+
+/** Block-level structural metadata. Returned by {@link DocxSession.getBlockMetadata}. */
+export interface BlockMetadata {
+  anchorId: string;
+  kind: string;
+  scope: string;
+  styleId?: string;
+  styleName?: string;
+  /** 0-based outline level (Word convention). */
+  outlineLevel?: number;
+  list?: ListMembership;
+  /** True when any descendant w:r carries a non-empty w:rPr. */
+  hasInlineFormatting: boolean;
+}
+
+/** Page-layout snapshot for the w:sectPr that governs an anchor.
+ *  Returned by {@link DocxSession.getSectionInfo}. */
+export interface SectionInfo {
+  sectionUnid: string;
+  pageWidthTwips: number;
+  pageHeightTwips: number;
+  landscape: boolean;
+  marginTopTwips: number;
+  marginBottomTwips: number;
+  marginLeftTwips: number;
+  marginRightTwips: number;
+  columns: number;
+  headerPartUris: string[];
+  footerPartUris: string[];
 }
 
 /**

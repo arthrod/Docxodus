@@ -8,6 +8,24 @@ All notable changes to this project will be documented in this file.
 - **`DocxSession.DeleteRange` / `DeleteSection` honor `TrackedChangeMode.RenderInline`** (issue #177). The bulk-delete primitives now produce native Word tracked-deletion markup instead of silently performing a structural delete in tracked mode. Each removed paragraph has every direct-child run wrapped in `w:del` (reusing `WrapRunsInDel`) and the paragraph-mark marked deleted via `w:pPr/w:rPr/w:del` — the combination Word interprets as "this entire paragraph is a tracked deletion", so accepting the change actually removes the block (the old `DeleteBlock`-tracked path left empty paragraphs behind). Tables get `w:trPr/w:del` on every row (Word's row-deletion convention — there is no table-level "delete" markup) plus the same run/paragraph-mark wrapping inside every cell; nested tables recurse. Anchors stay live in the document tree, so the top-level block anchors are reported via `EditResult.Modified` instead of `Removed` — matching `DeleteBlock`'s existing tracked-mode contract. Block kinds outside `w:p`/`w:tbl` (e.g. `w:sdt` content controls appearing mid-range) still fall back to structural removal in tracked mode. No wire-shape changes — the WASM bridge, npm wrapper, and Python stdio host pick up the new behavior automatically through `DocxSessionOps`. Tests: `DS271`–`DS273`.
 
 ### Added
+- **`DocxSession` block-metadata read surface.** New methods
+  `GetBlockMetadata` / `GetBlockMetadatas` / `GetListMembership` /
+  `GetSectionInfo` expose paragraph style id+name, outline level, list
+  membership (`numId`/`abstractNumId`/`ilvl`/format/start-override/
+  inherited-from-style flag), and the enclosing `w:sectPr` (page
+  size/orientation/margins/columns/header/footer parts). New types
+  `BlockMetadata`, `ListMembership`, `SectionInfo`, and the
+  `NumberFormat` enum (`Decimal`/`UpperLetter`/`LowerLetter`/
+  `UpperRoman`/`LowerRoman`/`Bullet`). Surfaced in WASM
+  (`DocxSessionBridge`), npm (`DocxSession.getBlockMetadata` etc.), and
+  Python (`docx_scalpel.session.DocxSession.get_block_metadata` etc.).
+- **Markdown projection: list-item classification now follows `pStyle`
+  chain.** `WmlToMarkdownConverter` previously labeled a paragraph as
+  a list item only when it carried inline `w:numPr`. Now it also walks
+  the `pStyle → basedOn` chain (16-level cycle guard) and labels the
+  paragraph as a list item if any ancestor style contributes `w:numPr`.
+  Brings the projector into agreement with `GetListMembership` for
+  style-inherited list items.
 - Annotation write surface on `DocxSession` (`AddAnnotation`,
   `RemoveAnnotation`, `UpdateAnnotation`, `MoveAnnotation`) exposed across
   .NET, WASM (`@docxodus/wasm`), and Python (`docx-scalpel`). New

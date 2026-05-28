@@ -38,6 +38,7 @@ from .types import (
     AnchorInfo,
     AnchorTarget,
     AnnotationUpdate,
+    BlockMetadata,
     BulkEditResult,
     CharSpan,
     CrossBlockMatch,
@@ -49,8 +50,10 @@ from .types import (
     FillOptions,
     FindOptions,
     FormatOp,
+    ListMembership,
     MarkdownProjection,
     ReplaceOptions,
+    SectionInfo,
     TemplatePlaceholder,
     TextMatch,
 )
@@ -468,6 +471,34 @@ class DocxSession:
             aid: AnchorInfo._from_wire(info) if info else None
             for aid, info in result.items()
         }
+
+    def get_block_metadata(self, anchor_id: str) -> BlockMetadata | None:
+        """Resolve block-level metadata (style id+name, outline level, list
+        membership, formatting probe) for an anchor. Returns None for unknown anchors."""
+        result = self._call("get_block_metadata", {"anchorId": anchor_id})
+        return BlockMetadata._from_wire(result) if result else None
+
+    def get_block_metadatas(
+        self, anchor_ids: Iterable[str]
+    ) -> dict[str, BlockMetadata | None]:
+        """Bulk variant of :meth:`get_block_metadata`."""
+        result = self._call("get_block_metadatas", {"anchorIds": list(anchor_ids)})
+        return {
+            aid: BlockMetadata._from_wire(meta) if meta else None
+            for aid, meta in result.items()
+        }
+
+    def get_list_membership(self, anchor_id: str) -> ListMembership | None:
+        """Resolve the numbering facts for a list-item paragraph. Returns None
+        when the anchor has no w:numPr."""
+        result = self._call("get_list_membership", {"anchorId": anchor_id})
+        return ListMembership._from_wire(result) if result else None
+
+    def get_section_info(self, anchor_id: str) -> SectionInfo | None:
+        """Resolve page-layout info for the w:sectPr that governs an anchor.
+        Returns None for anchors outside the body part."""
+        result = self._call("get_section_info", {"anchorId": anchor_id})
+        return SectionInfo._from_wire(result) if result else None
 
     # -- discovery: summaries ---------------------------------------------
 
