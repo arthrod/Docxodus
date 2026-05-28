@@ -53,9 +53,113 @@ internal static class BlockMetadataOps
     /// <summary>Resolve <see cref="SectionInfo"/> for the given target, or null for non-body anchors.</summary>
     public static SectionInfo? GetSectionInfo(WordprocessingDocument doc, AnchorTarget target)
     {
-        // Implemented in Task 7.
-        return null;
+        // Only body anchors have a sectPr to look up.
+        if (target.Anchor.Scope != "body") return null;
+
+        var element = target.Resolve(doc);
+        if (element is null) return null;
+
+        var sectPr = FindGoverningSectPr(element);
+        if (sectPr is null) return null;
+
+        var pgSz = sectPr.Element(W.pgSz);
+        var pgMar = sectPr.Element(W.pgMar);
+        var cols = sectPr.Element(W.cols);
+
+        // The width attribute is `w:w` — exposed in the W class as `W._w` to avoid
+        // collision with the namespace alias `W.w`. Height is just `W.h`. See
+        // WmlToHtmlConverter for the same usage pattern. Twips are integer-valued.
+        int width = ParseInt((string?)pgSz?.Attribute(W._w)) ?? 12240;   // 8.5"
+        int height = ParseInt((string?)pgSz?.Attribute(W.h)) ?? 15840;  // 11"
+        bool landscape = string.Equals((string?)pgSz?.Attribute(W.orient), "landscape",
+            System.StringComparison.Ordinal);
+
+        int top = ParseInt((string?)pgMar?.Attribute(W.top)) ?? 1440;
+        int bottom = ParseInt((string?)pgMar?.Attribute(W.bottom)) ?? 1440;
+        int left = ParseInt((string?)pgMar?.Attribute(W.left)) ?? 1440;
+        int right = ParseInt((string?)pgMar?.Attribute(W.right)) ?? 1440;
+
+        int colCount = 1;
+        if (cols is not null && int.TryParse((string?)cols.Attribute(W.num), out var parsedCols))
+            colCount = parsedCols;
+
+        var (headerUris, footerUris) = ResolveSectionHeaderFooterUris(doc, sectPr);
+
+        // The sectPr itself doesn't carry a stable Unid in every fixture; fall back
+        // to a deterministic synthetic id derived from element position so the field
+        // is always non-null and stable across reads of the same doc state.
+        var sectionUnid = (string?)sectPr.Attribute(PtOpenXml.Unid)
+            ?? $"sect:{sectPr.Parent?.Elements().ToList().IndexOf(sectPr) ?? 0}";
+
+        return new SectionInfo
+        {
+            SectionUnid = sectionUnid,
+            PageWidthTwips = width,
+            PageHeightTwips = height,
+            Landscape = landscape,
+            MarginTopTwips = top,
+            MarginBottomTwips = bottom,
+            MarginLeftTwips = left,
+            MarginRightTwips = right,
+            Columns = colCount,
+            HeaderPartUris = headerUris,
+            FooterPartUris = footerUris,
+        };
     }
+
+    private static XElement? FindGoverningSectPr(XElement element)
+    {
+        // The sectPr that governs a paragraph is either:
+        // (a) the next sectPr-bearing paragraph's pPr/sectPr after this one (mid-doc section break), or
+        // (b) the body's trailing sectPr (the document-final section).
+        var body = element.AncestorsAndSelf(W.body).FirstOrDefault();
+        if (body is null) return null;
+
+        // Walk forward from the element looking for any p whose pPr has a sectPr.
+        foreach (var sib in element.ElementsAfterSelf())
+        {
+            if (sib.Name != W.p) continue;
+            var sp = sib.Element(W.pPr)?.Element(W.sectPr);
+            if (sp is not null) return sp;
+        }
+        if (element.Name == W.p)
+        {
+            var ownSect = element.Element(W.pPr)?.Element(W.sectPr);
+            if (ownSect is not null) return ownSect;
+        }
+        return body.Element(W.sectPr);
+    }
+
+    private static (IReadOnlyList<string> headers, IReadOnlyList<string> footers)
+        ResolveSectionHeaderFooterUris(WordprocessingDocument doc, XElement sectPr)
+    {
+        var main = doc.MainDocumentPart;
+        if (main is null)
+            return (System.Array.Empty<string>(), System.Array.Empty<string>());
+
+        var headers = new List<string>();
+        var footers = new List<string>();
+
+        foreach (var headerRef in sectPr.Elements(W.headerReference))
+        {
+            var rId = (string?)headerRef.Attribute(R.id);
+            if (rId is null) continue;
+            var part = main.GetPartById(rId) as HeaderPart;
+            if (part is not null) headers.Add(part.Uri.ToString());
+        }
+        foreach (var footerRef in sectPr.Elements(W.footerReference))
+        {
+            var rId = (string?)footerRef.Attribute(R.id);
+            if (rId is null) continue;
+            var part = main.GetPartById(rId) as FooterPart;
+            if (part is not null) footers.Add(part.Uri.ToString());
+        }
+        return (headers, footers);
+    }
+
+    private static int? ParseInt(string? raw)
+        => int.TryParse(raw, System.Globalization.NumberStyles.Any,
+            System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
 
     // ─── Internals ──────────────────────────────────────────────────────
 

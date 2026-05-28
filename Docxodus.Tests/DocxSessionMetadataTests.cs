@@ -75,4 +75,32 @@ public class DocxSessionMetadataTests
         Assert.Equal(0, list.Level);
         Assert.Equal(NumberFormat.Bullet, list.Format);
     }
+
+    [Fact]
+    public void BM005_GetSectionInfo_BodyAnchor_ResolvesLandscapeAndHeaders()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildBM_LandscapeSection());
+        var anchor = session.Project().AnchorIndex.Values.First(t => t.Anchor.Kind == "p");
+
+        var info = session.GetSectionInfo(anchor.Anchor.Id);
+
+        Assert.NotNull(info);
+        Assert.Equal(16838, info!.PageWidthTwips);
+        Assert.Equal(11906, info.PageHeightTwips);
+        Assert.True(info.Landscape);
+        Assert.Equal(720, info.MarginTopTwips);
+        Assert.Equal(720, info.MarginBottomTwips);
+        Assert.Equal(1080, info.MarginLeftTwips);
+        Assert.Equal(1080, info.MarginRightTwips);
+        Assert.Equal(2, info.Columns);
+        Assert.Single(info.HeaderPartUris);
+        Assert.Empty(info.FooterPartUris);
+    }
+
+    [Fact]
+    public void BM006_GetSectionInfo_UnknownAnchor_ReturnsNull()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        Assert.Null(session.GetSectionInfo("p:body:does-not-exist"));
+    }
 }
