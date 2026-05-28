@@ -116,4 +116,60 @@ public class DocxSessionMetadataTests
 
         Assert.Null(session.GetSectionInfo(hdrAnchor!.Anchor.Id));
     }
+
+    [Fact]
+    public void BM008_OutlineLevel_FromHeadingStyle_ResolvesToZeroBasedLevel()
+    {
+        // BuildDS001 has Heading1..6 styles defined. Apply Heading2 to the first paragraph.
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = session.Project().AnchorIndex.Values.First(t => t.Anchor.Kind == "p");
+        var setStyle = session.SetParagraphStyle(anchor.Anchor.Id, "Heading2");
+        Assert.True(setStyle.Success);
+
+        // SetParagraphStyle may have changed the anchor kind from "p" to "h" — re-resolve.
+        var freshIndex = session.Project().AnchorIndex;
+        var promoted = freshIndex.Values.First(t => t.Anchor.Kind == "h");
+
+        var meta = session.GetBlockMetadata(promoted.Anchor.Id);
+        Assert.NotNull(meta);
+        Assert.Equal("Heading2", meta!.StyleId);
+        Assert.Equal("Heading 2", meta.StyleName);
+        Assert.Equal(1, meta.OutlineLevel);  // Heading2 → outlineLvl 1 (0-based)
+    }
+
+    [Fact]
+    public void BM009_GetBlockMetadatas_Bulk_DedupesAndMapsUnknownToNull()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchors = session.Project().AnchorIndex.Values.Where(t => t.Anchor.Kind == "p").ToList();
+        Assert.True(anchors.Count >= 2);
+
+        var ids = new[] {
+            anchors[0].Anchor.Id,
+            anchors[0].Anchor.Id,         // duplicate
+            anchors[1].Anchor.Id,
+            "p:body:does-not-exist",
+        };
+
+        var map = session.GetBlockMetadatas(ids);
+
+        Assert.Equal(3, map.Count);  // duplicate dropped
+        Assert.NotNull(map[anchors[0].Anchor.Id]);
+        Assert.NotNull(map[anchors[1].Anchor.Id]);
+        Assert.Null(map["p:body:does-not-exist"]);
+    }
+
+    [Fact]
+    public void BM010_HasInlineFormatting_DetectsBoldRun()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = session.Project().AnchorIndex.Values.First(t => t.Anchor.Kind == "p");
+
+        Assert.False(session.GetBlockMetadata(anchor.Anchor.Id)!.HasInlineFormatting);
+
+        var apply = session.ApplyFormat(anchor.Anchor.Id, span: null, new FormatOp { Bold = true });
+        Assert.True(apply.Success);
+
+        Assert.True(session.GetBlockMetadata(anchor.Anchor.Id)!.HasInlineFormatting);
+    }
 }
