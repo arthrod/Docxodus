@@ -116,6 +116,20 @@
                 }
             },
 
+            // Pre-warm the comparison code path; returns elapsed ms.
+            prepare: async function() {
+                if (!window.DocxodusWorker) {
+                    return { error: { message: 'Worker not initialized' } };
+                }
+                try {
+                    const start = performance.now();
+                    await window.DocxodusWorker.prepare();
+                    return { ok: true, durationMs: performance.now() - start };
+                } catch (error) {
+                    return { error: { message: error.message } };
+                }
+            },
+
             // Get document metadata using worker (for lazy loading)
             getDocumentMetadata: async function(bytes) {
                 if (!window.DocxodusWorker) {

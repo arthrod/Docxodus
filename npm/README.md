@@ -300,6 +300,36 @@ const metadata = await docxodus.getDocumentMetadata(docxFile);
 docxodus.terminate();
 ```
 
+#### First-call warmup
+
+`createWorkerDocxodus()` warms the .NET WASM runtime, but the **comparison code
+path is not exercised until your first `compareDocuments()`**. That first call
+pays a one-time warmup cost (comparison-assembly initialization + JIT of the
+diff/XML engine) — roughly **2× the latency** of every subsequent compare.
+
+`prepare()` is an **optional** method that pays this cost up front. Call it once
+after creating the worker — during app boot, or while the user is still picking
+files — so the first user-triggered comparison is already hot. It does **not**
+run automatically; if you skip it, the first compare simply absorbs the warmup
+as before.
+
+```typescript
+const docxodus = await createWorkerDocxodus({ wasmBasePath: '/wasm/' });
+
+// Optional: warm the comparison path ahead of the first user action.
+await docxodus.prepare();
+
+// Now hot — the first real compare runs at steady-state speed and triggers
+// no further .wasm fetches.
+const redlined = await docxodus.compareDocuments(original, modified);
+```
+
+`prepare()` is idempotent (repeated calls share one in-flight warmup and resolve
+immediately once complete), needs no input documents or seed files of your own
+(it builds tiny seed documents inside the worker), and is concurrent-safe —
+issuing a `compareDocuments()` while a `prepare()` is still in flight will not
+double-load assemblies.
+
 ### React Hooks
 
 #### `useDocxodus(wasmBasePath?: string)`

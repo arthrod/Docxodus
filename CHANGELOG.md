@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **`WorkerDocxodus.prepare()` — comparison-path warmup** (consumer issue JSv4/crowdsourced-redlines-js#2). `createWorkerDocxodus()` warms the .NET WASM runtime but does **not** load the comparison assemblies — the runtime defers `Docxodus.*.wasm` and its `System.*.wasm` dependents until the first real comparison, so the first `compareDocuments()` paid an extra ~3s of pure assembly-load latency. The new `prepare(): Promise<void>` pays that cost up front: it runs a complete comparison inside the worker against two tiny seed documents constructed in-memory on the .NET side (no caller IO, no seed fixtures to ship), forcing every assembly the engine touches to resolve. After `await prepare()`, the next `compareDocuments()` / `compareDocumentsToHtml()` triggers no further `.wasm` fetches. The method is idempotent (repeated/concurrent calls share one in-flight warmup and resolve immediately once complete) and concurrent-safe (a `compareDocuments()` issued while a `prepare()` is in flight does not double-load assemblies). Implemented as a new `Warmup()` `[JSExport]` on `DocumentComparer`, a `"prepare"` worker message, and the `WorkerDocxodus.prepare()` proxy method. Tests: `npm/tests/worker-prepare.spec.ts` (verifies via page-level `.wasm` request monitoring that prepare loads `Docxodus.wasm`, the following compare loads none, idempotency resolves <50ms, and concurrent prepare+compare never double-loads).
+
 ## [6.1.0] - 2026-05-28
 
 ### Changed

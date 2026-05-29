@@ -2,7 +2,9 @@ using System.Runtime.InteropServices.JavaScript;
 using System.Runtime.Versioning;
 using System.Text.Json;
 using Docxodus;
+using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Wordprocessing;
 
 namespace DocxodusWasm;
 
@@ -13,6 +15,89 @@ namespace DocxodusWasm;
 [SupportedOSPlatform("browser")]
 public partial class DocumentComparer
 {
+    /// <summary>
+    /// Force the comparison code path fully hot.
+    ///
+    /// Creating the WASM runtime does not exercise the comparison engine, so
+    /// the first real <see cref="CompareDocuments"/> pays a one-time warmup
+    /// cost — comparison-assembly initialization plus JIT of the diff/XML
+    /// stack — on top of the actual diff work (~2x the steady-state latency).
+    ///
+    /// <para>This method runs a complete comparison against two tiny seed
+    /// documents constructed in-memory, exercising the exact code path
+    /// <see cref="CompareDocuments"/> uses (<see cref="WmlComparer.Compare"/>).
+    /// That resolves and JIT-compiles everything the engine touches, so a
+    /// subsequent real comparison runs at steady-state speed and triggers no
+    /// further <c>.wasm</c> fetches.</para>
+    ///
+    /// <para>Idempotent and self-contained: no caller IO, no seed fixtures to
+    /// ship. Safe to call repeatedly — the warmup work is only paid once.
+    /// Returns <c>"ok"</c> on success or a JSON error object; warmup is
+    /// best-effort, so even the error path has already warmed the engine.</para>
+    /// </summary>
+    /// <returns><c>"ok"</c> on success, or a JSON error object.</returns>
+    [JSExport]
+    public static string Warmup()
+    {
+        try
+        {
+            // Two minimal in-memory documents that differ by a single word, so
+            // the comparer produces a real insertion/deletion and walks the
+            // full LCS + markup path rather than an empty fast-exit.
+            var original = new WmlDocument("warmup-original.docx", BuildSeedDocx("warmup original"));
+            var modified = new WmlDocument("warmup-modified.docx", BuildSeedDocx("warmup modified"));
+
+            var settings = new WmlComparerSettings
+            {
+                AuthorForRevisions = "Docxodus",
+                DateTimeForRevisions = DateTime.UtcNow.ToString("o"),
+                DetailThreshold = 0.15
+            };
+
+            var result = WmlComparer.Compare(original, modified, settings);
+
+            // Touch the revision-extraction path too, since callers that warm
+            // the compare path almost always read revisions next.
+            _ = WmlComparer.GetRevisions(result, settings);
+
+            return "ok";
+        }
+        catch (Exception ex)
+        {
+            // The act of calling WmlComparer.Compare above has already forced
+            // the assemblies to load even if the comparison itself threw, so
+            // warmup has still served its purpose. Report the failure so a
+            // caller can surface it, but do not throw.
+            return DocumentConverter.SerializeError(ex.Message, ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
+    /// Build a minimal but valid DOCX package (one paragraph) in memory.
+    /// Includes the parts comparison expects (styles, settings).
+    /// </summary>
+    private static byte[] BuildSeedDocx(string text)
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+            mainPart.Document = new Document(new Body(
+                new Paragraph(
+                    new Run(
+                        new Text(text) { Space = SpaceProcessingModeValues.Preserve }))));
+
+            var stylesPart = mainPart.AddNewPart<StyleDefinitionsPart>();
+            stylesPart.Styles = new Styles();
+
+            var settingsPart = mainPart.AddNewPart<DocumentSettingsPart>();
+            settingsPart.Settings = new Settings();
+
+            mainPart.Document.Save();
+        }
+        return ms.ToArray();
+    }
+
     /// <summary>
     /// Compare two DOCX documents and return the result as a redlined DOCX (byte array).
     /// </summary>

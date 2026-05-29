@@ -668,6 +668,12 @@ export interface DocxodusWasmExports {
     ) => string;
   };
   DocumentComparer: {
+    /**
+     * Force the comparison code path hot by running a real comparison against
+     * tiny in-memory seed documents. Returns "ok" or a JSON error object.
+     * Idempotent — assemblies load only once.
+     */
+    Warmup: () => string;
     CompareDocuments: (
       originalBytes: Uint8Array,
       modifiedBytes: Uint8Array,
@@ -2009,6 +2015,7 @@ export type WorkerRequestType =
   | "getRevisions"
   | "getDocumentMetadata"
   | "getVersion"
+  | "prepare"
   | "sessionOpen"
   | "sessionClose"
   | "sessionAddAnnotation"
@@ -2100,6 +2107,14 @@ export interface WorkerGetVersionRequest extends WorkerRequestBase {
 }
 
 /**
+ * Warm up the comparison code path so the next compare triggers no further
+ * WASM assembly fetches. Carries no payload.
+ */
+export interface WorkerPrepareRequest extends WorkerRequestBase {
+  type: "prepare";
+}
+
+/**
  * Open a DocxSession in the worker.
  */
 export interface WorkerSessionOpenRequest extends WorkerRequestBase {
@@ -2173,6 +2188,7 @@ export type WorkerRequest =
   | WorkerGetRevisionsRequest
   | WorkerGetDocumentMetadataRequest
   | WorkerGetVersionRequest
+  | WorkerPrepareRequest
   | WorkerSessionOpenRequest
   | WorkerSessionCloseRequest
   | WorkerSessionAddAnnotationRequest
@@ -2254,6 +2270,13 @@ export interface WorkerGetVersionResponse extends WorkerResponseBase {
 }
 
 /**
+ * Response from prepare request. Carries no payload beyond success/error.
+ */
+export interface WorkerPrepareResponse extends WorkerResponseBase {
+  type: "prepare";
+}
+
+/**
  * Response from sessionOpen request.
  */
 export interface WorkerSessionOpenResponse extends WorkerResponseBase {
@@ -2294,6 +2317,7 @@ export type WorkerResponse =
   | WorkerGetRevisionsResponse
   | WorkerGetDocumentMetadataResponse
   | WorkerGetVersionResponse
+  | WorkerPrepareResponse
   | WorkerSessionOpenResponse
   | WorkerSessionCloseResponse
   | WorkerSessionEditResponse;
