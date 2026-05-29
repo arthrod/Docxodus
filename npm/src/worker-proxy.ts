@@ -28,6 +28,7 @@ import type {
   WorkerGetRevisionsResponse,
   WorkerGetDocumentMetadataResponse,
   WorkerGetVersionResponse,
+  WorkerPrepareResponse,
   WorkerSessionOpenResponse,
   WorkerSessionEditResponse,
   WorkerDocxodusOptions,
@@ -211,6 +212,30 @@ export interface WorkerDocxodus {
   getVersion(): Promise<VersionInfo>;
 
   /**
+   * Pre-warm the comparison code path.
+   *
+   * The 10s runtime warmup paid by {@link createWorkerDocxodus} does not load
+   * the comparison assemblies — the .NET WASM runtime defers
+   * `Docxodus.*.wasm` and its `System.*.wasm` dependents until the first
+   * {@link compareDocuments} call, which then costs ~3s of pure assembly-load
+   * latency. Call `prepare()` after creating the worker to pay that cost ahead
+   * of any user action; once it resolves, the next {@link compareDocuments}
+   * (or {@link compareDocumentsToHtml}) triggers no further `.wasm` fetches.
+   *
+   * Semantics:
+   * - **Idempotent.** Repeated calls share one in-flight warmup and resolve
+   *   immediately once it has completed.
+   * - **No caller IO.** No seed files to fetch, no inputs to construct — the
+   *   seed documents are built inside the worker.
+   * - **Concurrent-safe.** `prepare()` and `compareDocuments()` may be called
+   *   in any order; a `compareDocuments()` issued while a `prepare()` is in
+   *   flight does not double-load assemblies.
+   *
+   * @returns A Promise that resolves when the comparison path is fully hot.
+   */
+  prepare(): Promise<void>;
+
+  /**
    * Open a {@link WorkerDocxSession} for surgical annotation editing inside
    * the worker. The document bytes are transferred to the worker (zero-copy).
    *
@@ -288,6 +313,11 @@ export async function createWorkerDocxodus(
 
   // Track if worker is active
   let isWorkerActive = true;
+
+  // Cached warmup promise. Set on the first prepare() and reused thereafter so
+  // repeated/concurrent calls share a single in-flight (or completed) warmup.
+  // Reset to null on failure so a later prepare() can retry.
+  let preparePromise: Promise<void> | null = null;
 
   // Handle worker messages
   worker.onmessage = (event: MessageEvent<WorkerResponse | { type: "ready" }>) => {
@@ -453,6 +483,22 @@ export async function createWorkerDocxodus(
         type: "getVersion",
       });
       return response.version!;
+    },
+
+    prepare(): Promise<void> {
+      // Idempotent: hand back the existing warmup if one is in flight or done.
+      if (preparePromise) {
+        return preparePromise;
+      }
+      preparePromise = sendRequest<WorkerPrepareResponse>({
+        id: generateId(),
+        type: "prepare",
+      }).then(() => undefined);
+      // On failure, clear the cache so a subsequent prepare() can retry.
+      preparePromise.catch(() => {
+        preparePromise = null;
+      });
+      return preparePromise;
     },
 
     async openDocxSession(

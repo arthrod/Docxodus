@@ -511,6 +511,23 @@ function handleSessionMoveAnnotation(
 }
 
 /**
+ * Handle prepare request — warm the comparison code path so the next
+ * compareDocuments triggers no further WASM assembly fetches.
+ */
+function handlePrepare(): { error?: string } {
+  const exports = ensureInitialized();
+  try {
+    const result = exports.DocumentComparer.Warmup();
+    if (isErrorResponse(result)) {
+      return parseError(result);
+    }
+    return {};
+  } catch (error) {
+    return { error: String(error) };
+  }
+}
+
+/**
  * Handle getVersion request.
  */
 function handleGetVersion(): {
@@ -642,6 +659,17 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
           type: "getVersion",
           success: !result.error,
           version: result.version,
+          error: result.error,
+        };
+        break;
+      }
+
+      case "prepare": {
+        const result = handlePrepare();
+        response = {
+          id: request.id,
+          type: "prepare",
+          success: !result.error,
           error: result.error,
         };
         break;
