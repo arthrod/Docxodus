@@ -130,6 +130,29 @@ internal static class DiffFuzzer
         public string DescribeMutations() => string.Join("; ", Mutations.Select(m => m.Describe()));
     }
 
+    /// <summary>
+    /// A K-reviewer composite fuzz case (Task 5.2): one shared base plus <c>reviewerCount</c> reviewer
+    /// documents, each = the base with a DISJOINT partition of comparable mutations applied (reviewer
+    /// <c>i</c> edits only body paragraphs where <c>index % reviewerCount == i</c>). Built for the
+    /// consolidate own-oracle — round-trip (reject ≡ base) and the composite apply-verifier — so only the
+    /// cross-reviewer-clean COMPARABLE kinds participate (EditWord / InsertParagraph / DeleteParagraph /
+    /// EditTableCell / EditFootnote); Relocate / Bold / Split / Merge are excluded for v1.
+    /// </summary>
+    /// <param name="Seed">The seed that deterministically generated this case.</param>
+    /// <param name="Base">The shared base document bytes every reviewer revised.</param>
+    /// <param name="Reviewers">Per-reviewer (author name, revised-document bytes), in reviewer order.</param>
+    /// <param name="AppliedMutations">Per-reviewer list of the mutations that ACTUALLY changed that
+    /// reviewer's document (parallel to <see cref="Reviewers"/>) — the repro/classification metadata.</param>
+    public sealed record CompositeFuzzCase(
+        int Seed,
+        byte[] Base,
+        (string Author, byte[] Doc)[] Reviewers,
+        IReadOnlyList<IReadOnlyList<Mutation>> AppliedMutations)
+    {
+        public string DescribeReviewer(int i) =>
+            $"{Reviewers[i].Author}: " + string.Join("; ", AppliedMutations[i].Select(m => m.Describe()));
+    }
+
     // ---------------------------------------------------------------------- the document model
 
     /// <summary>A run inside a paragraph: text plus an optional bold flag (the only modeled format the fuzzer sets).</summary>
@@ -176,6 +199,27 @@ internal static class DiffFuzzer
         public List<Para> Paragraphs = new();
         public Table? Table; // appended after the paragraphs when present
         public string? FootnoteText; // a single footnote (id=1) when present; the EditFootnote mutation edits it
+
+        /// <summary>
+        /// A deep, alias-free copy of the model. <see cref="Apply"/> mutates the model in place, so the
+        /// composite fuzzer clones the shared base ONCE PER REVIEWER before applying that reviewer's
+        /// partition of mutations — without this, one reviewer's edits would leak into the next reviewer's
+        /// (and the base) document. Every Para/Run/Table-row container is reconstructed; no list, paragraph,
+        /// or run instance is shared with the source.
+        /// </summary>
+        public DocModel Clone()
+        {
+            var copy = new DocModel { FootnoteText = FootnoteText };
+            foreach (var p in Paragraphs)
+                copy.Paragraphs.Add(ClibPara(p));
+            if (Table is { } t)
+            {
+                copy.Table = new Table();
+                foreach (var row in t.Rows)
+                    copy.Table.Rows.Add(new List<string>(row));
+            }
+            return copy;
+        }
     }
 
     // ---------------------------------------------------------------------- generation
@@ -197,6 +241,127 @@ internal static class DiffFuzzer
         var rightBytes = Serialize(model);
 
         return new FuzzCase(seed, leftBytes, rightBytes, baseParaCount, hasTable, applied);
+    }
+
+    /// <summary>
+    /// Build a K-reviewer composite case for <paramref name="seed"/>: one shared base, and
+    /// <paramref name="reviewerCount"/> reviewer documents each = a DEEP CLONE of the base with a disjoint
+    /// partition of comparable mutations applied. Reviewer <c>i</c> edits only the base paragraphs in its
+    /// residue class (<c>index % reviewerCount == i</c>); each reviewer applies 1–3 mutations restricted to
+    /// the cross-reviewer-clean comparable kinds. A small deliberate-collision chance lets two reviewers
+    /// touch the same paragraph — the round-trip oracle still holds.
+    /// </summary>
+    public static CompositeFuzzCase GenerateComposite(int seed, int reviewerCount)
+    {
+        var rng = new Random(seed);
+
+        var baseModel = GenerateBase(rng, out _, out _);
+
+        // v1 composite set excludes FOOTNOTES entirely. The footnote-reference run tokenizes to an atomic
+        // NoteRef token (MatchKey "fn") that the apply-verifier's text view counts but the test's
+        // body-only Docs.PlainText (which reads w:t only) does not — a text-projection asymmetry in the
+        // harness, not a consolidate defect. (The composite merger also does not yet merge note-scope
+        // content — NoteOps is always null — so a reviewer footnote edit would be silently dropped; that
+        // is tracked for a later note-consolidation task.) Strip the footnote from the base so neither the
+        // base nor any reviewer carries one, keeping the own-oracle clean. EditFootnote is likewise absent
+        // from PickCompositeMutation's pool.
+        baseModel.FootnoteText = null;
+
+        // Same asymmetry for TABLES: the apply-verifier reconstructs a non-paragraph block as its content
+        // hash (BlockText → ContentHash.ToHex()), while the test's body oracle Docs.PlainText reads only the
+        // body's direct-child w:p elements (table cell paragraphs are excluded). A table can therefore never
+        // match in the apply-verifier's text projection, so the v1 composite set carries no table and
+        // EditTableCell is omitted from the pool. Round-trip (reject ≡ base) still validates the full body
+        // including any structure; only this body-text apply-verifier needs the paragraph-only shape.
+        baseModel.Table = null;
+
+        var baseBytes = Serialize(baseModel).DocumentByteArray;
+
+        var reviewers = new (string Author, byte[] Doc)[reviewerCount];
+        var appliedPerReviewer = new List<IReadOnlyList<Mutation>>(reviewerCount);
+
+        for (int i = 0; i < reviewerCount; i++)
+        {
+            // Deep-copy the base so this reviewer's in-place mutations cannot leak into the base or any
+            // sibling reviewer.
+            var model = baseModel.Clone();
+            int count = rng.Next(1, 4); // 1..3 mutations per reviewer
+            var applied = new List<Mutation>();
+            for (int k = 0; k < count; k++)
+            {
+                var m = PickCompositeMutation(rng, model, i, reviewerCount);
+                if (m is { } mut && Apply(model, mut))
+                    applied.Add(mut);
+            }
+
+            reviewers[i] = ($"Reviewer{i + 1}", Serialize(model).DocumentByteArray);
+            appliedPerReviewer.Add(applied);
+        }
+
+        return new CompositeFuzzCase(seed, baseBytes, reviewers, appliedPerReviewer);
+    }
+
+    /// <summary>
+    /// Pick one comparable mutation for reviewer <paramref name="reviewer"/>, resolved INTO that reviewer's
+    /// partition (<c>paraIndex % reviewerCount == reviewer</c>). A small deliberate-collision chance instead
+    /// targets a foreign paragraph so the oracle is also exercised under occasional cross-reviewer overlap.
+    /// Returns null when no paragraph can be targeted (an empty partition), which the caller treats as a
+    /// skipped slot. The v1 composite pool is paragraph-only (EditWord / InsertParagraph / DeleteParagraph) —
+    /// EditTableCell and EditFootnote are excluded (see <see cref="GenerateComposite"/>).
+    /// </summary>
+    private static Mutation? PickCompositeMutation(Random rng, DocModel model, int reviewer, int reviewerCount)
+    {
+        var pool = new[]
+        {
+            MutationKind.EditWord, MutationKind.EditWord,
+            MutationKind.InsertParagraph,
+            MutationKind.DeleteParagraph,
+        };
+        var kind = pool[rng.Next(pool.Length)];
+
+        // 1-in-8 deliberate collision: target a foreign paragraph; otherwise this reviewer's partition.
+        bool collide = rng.Next(8) == 0;
+        if (PickPartitionParagraph(rng, model, reviewer, reviewerCount, collide) is not { } para)
+            return null;
+
+        return kind switch
+        {
+            MutationKind.EditWord =>
+                new Mutation(kind, Index: para, Target: rng.Next(0, 1_000), Payload: BankWord(rng)),
+            MutationKind.InsertParagraph =>
+                new Mutation(kind, Index: para, Payload: BankWord(rng)),
+            MutationKind.DeleteParagraph =>
+                new Mutation(kind, Index: para),
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// Resolve a body-paragraph index in reviewer <paramref name="reviewer"/>'s residue class
+    /// (<c>index % reviewerCount == reviewer</c>), or — when <paramref name="collide"/> — a foreign index.
+    /// For InsertParagraph the index is an insertion position (0..Count), so the partition is interpreted
+    /// over positions too. Returns null when no candidate index exists.
+    /// </summary>
+    private static int? PickPartitionParagraph(
+        Random rng, DocModel model, int reviewer, int reviewerCount, bool collide)
+    {
+        int n = model.Paragraphs.Count;
+        if (n == 0)
+            return null;
+        var candidates = new List<int>();
+        for (int idx = 0; idx < n; idx++)
+        {
+            bool mine = idx % reviewerCount == reviewer;
+            if (collide ? !mine : mine)
+                candidates.Add(idx);
+        }
+        if (candidates.Count == 0)
+            candidates = collide
+                ? Enumerable.Range(0, n).ToList()              // tiny doc: fall back to any index
+                : null!;
+        if (candidates is null || candidates.Count == 0)
+            return null;
+        return candidates[rng.Next(candidates.Count)];
     }
 
     /// <summary>Serialize the model to DOCX bytes, routing through the footnote-carrying builder when the
