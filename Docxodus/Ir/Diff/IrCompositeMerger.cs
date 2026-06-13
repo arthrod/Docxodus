@@ -30,7 +30,7 @@ internal static class IrCompositeMerger
         var scripts = reviewers.Select(r => IrEditScriptBuilder.Build(baseIr, r.Ir, settings)).ToList();
         var baseOrder = BaseBlockAnchors(baseIr);
         var byBase = GroupByBaseAnchor(scripts);
-        var insertsAfter = GroupInsertsByPrecedingAnchor(scripts, baseOrder);
+        var insertsAfter = GroupInsertsByPrecedingAnchor(scripts);
 
         var ops = new List<IrCompositeOp>();
         var conflicts = new List<IrConflict>();
@@ -485,6 +485,8 @@ internal static class IrCompositeMerger
             conflicts.AddRange(blockConflicts);
             var merged = new IrTokenDiff(IrNodeList.From(authored.Select(a => a.Op)));
             var structOp = touched[0].Op with { TokenDiff = merged };
+            // Only the first conflict id is linked on the op; consumers needing all conflict ids
+            // on this op must scan IrCompositeScript.Conflicts independently (by design).
             ops.Add(new IrCompositeOp(structOp, "", touched[0].Reviewer, IrNodeList.From(authored),
                 blockConflicts.Count > 0 ? blockConflicts[0].Id : (int?)null));
             return;
@@ -519,7 +521,7 @@ internal static class IrCompositeMerger
     /// inserting after the same base block both appear, attributed, with no conflict.
     /// </summary>
     internal static Dictionary<string, List<(int Reviewer, IrEditOp Op)>> GroupInsertsByPrecedingAnchor(
-        IReadOnlyList<IrEditScript> scripts, List<string> baseOrder)
+        IReadOnlyList<IrEditScript> scripts)
     {
         var map = new Dictionary<string, List<(int Reviewer, IrEditOp Op)>>();
         for (int i = 0; i < scripts.Count; i++)

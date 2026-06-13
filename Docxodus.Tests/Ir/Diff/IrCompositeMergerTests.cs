@@ -91,6 +91,17 @@ public class IrCompositeMergerTests
         Assert.NotEmpty(MergeOf(b, ("Bob", deleter), ("Fred", editor)).Conflicts);
     }
 
+    [Fact]
+    public void Both_reviewers_deleting_same_block_is_consensus_not_conflict()
+    {
+        var b = Docs.Para("alpha", "beta to delete", "omega");
+        var r1 = Docs.Para("alpha", "omega");
+        var r2 = Docs.Para("alpha", "omega");
+        var s = MergeOf(b, ("Bob", r1), ("Fred", r2));
+        Assert.Empty(s.Conflicts);
+        Assert.Single(s.Operations.Where(o => o.Op.Kind == IrEditOpKind.DeleteBlock));
+    }
+
     // Helper reused by later tasks: merge base + reviewers into an IrCompositeScript.
     internal static IrCompositeScript MergeOf(WmlDocument baseDoc, params (string Author, WmlDocument Doc)[] reviewers)
         => MergeOf(ConflictResolution.BaseWins, baseDoc, reviewers);
