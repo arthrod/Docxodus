@@ -102,6 +102,48 @@ public class IrCompositeMergerTests
         Assert.Single(s.Operations.Where(o => o.Op.Kind == IrEditOpKind.DeleteBlock));
     }
 
+    [Fact]
+    public void Reviewer_changing_both_text_and_pPr_routes_to_conflict_not_silent_compose()
+    {
+        // Base paragraph (no pPr) plus a second paragraph so the doc has stable structure.
+        var b = ParaDoc(("the quick brown fox jumps", ""), ("tail", ""));
+        // Bob changes a word AND the paragraph's alignment (center) — a pPr delta.
+        var r1 = ParaDoc(("the SLOW brown fox jumps", "<w:jc w:val=\"center\"/>"), ("tail", ""));
+        // Fred changes a DIFFERENT word, no pPr change — on its own this would token-compose with Bob.
+        var r2 = ParaDoc(("the quick brown fox LEAPS", ""), ("tail", ""));
+
+        var s = MergeOf(b, ("Bob", r1), ("Fred", r2));
+
+        // The reviewer's pPr change must NOT be silently dropped by the token-compose path.
+        // It must surface: either as a recorded conflict OR as a non-composed (no AuthoredTokens) op.
+        var firstParaMods = s.Operations
+            .Where(o => o.Op.Kind == IrEditOpKind.ModifyBlock)
+            .ToList();
+        bool composedAway = firstParaMods.Any(o => o.AuthoredTokens != null);
+        Assert.True(!composedAway || s.Conflicts.Count > 0,
+            "A reviewer who changed BOTH text and pPr was silently token-composed, dropping the pPr change.");
+        // The block-level conflict path is the expected route for a text+pPr ModifyBlock.
+        Assert.NotEmpty(s.Conflicts);
+    }
+
+    /// <summary>
+    /// Build a one-section DOCX from (text, pPrInnerXml) pairs: each tuple is one paragraph whose
+    /// <c>w:pPr</c> inner XML is <c>pPrInnerXml</c> (empty string ⇒ no <c>w:pPr</c>) and whose single
+    /// run holds <c>text</c>. Lets a test express a paragraph-level formatting delta (e.g. alignment).
+    /// </summary>
+    private static WmlDocument ParaDoc(params (string Text, string PPrInnerXml)[] paras)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var (text, pPr) in paras)
+        {
+            sb.Append("<w:p>");
+            if (!string.IsNullOrEmpty(pPr))
+                sb.Append("<w:pPr>").Append(pPr).Append("</w:pPr>");
+            sb.Append("<w:r><w:t xml:space=\"preserve\">").Append(text).Append("</w:t></w:r></w:p>");
+        }
+        return Docxodus.Tests.Ir.IrTestDocuments.FromBodyXml(sb.ToString());
+    }
+
     // Helper reused by later tasks: merge base + reviewers into an IrCompositeScript.
     internal static IrCompositeScript MergeOf(WmlDocument baseDoc, params (string Author, WmlDocument Doc)[] reviewers)
         => MergeOf(ConflictResolution.BaseWins, baseDoc, reviewers);

@@ -24,8 +24,9 @@ namespace Docxodus.Ir.Diff;
 /// the two-way path (where <c>RightSource == Right</c> always).</para>
 /// <para><b>Scope (Task 2.2).</b> EqualBlock / InsertBlock / DeleteBlock / single-reviewer ModifyBlock — plus
 /// single-reviewer Move/Split/Merge passthrough (these arise from one reviewer in v1). The COMPOSED
-/// multi-reviewer ModifyBlock branch (<see cref="IrCompositeOp.AuthoredTokens"/> non-null) is Task 2.3 and
-/// throws <see cref="NotImplementedException"/> here. Conflict-policy body shaping is Task 2.4.</para>
+/// multi-reviewer ModifyBlock branch (<see cref="IrCompositeOp.AuthoredTokens"/> non-null) is handled by
+/// <see cref="IrMarkupRenderer.RenderComposedParagraph"/>, which reuses the two-way token-span emit helpers
+/// to attribute each span to its contributing reviewer. Conflict-policy body shaping is Task 2.4.</para>
 /// <para><b>Invariant.</b> Reject-all yields the BASE document's content; accept-all yields the per-reviewer
 /// accepted edits — the multi-author generalization of the two-way accept≡right / reject≡left contract.</para>
 /// </summary>
@@ -140,7 +141,7 @@ internal static class IrCompositeMarkupRenderer
     /// Dispatch one composite op: point the shared <see cref="IrMarkupRenderer.RenderState"/> at the
     /// contributing reviewer (author override + right source IR + media bucket), then reuse the two-way
     /// renderer's per-op emit dispatch (<see cref="IrMarkupRenderer.RenderBlockOp"/>). A composed
-    /// multi-reviewer ModifyBlock (Task 2.3) throws.
+    /// multi-reviewer ModifyBlock is handled by <see cref="IrMarkupRenderer.RenderComposedParagraph"/>.
     /// </summary>
     private static void EmitCompositeOp(
         IrCompositeOp compositeOp,

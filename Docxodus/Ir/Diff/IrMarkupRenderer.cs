@@ -1333,7 +1333,9 @@ internal static class IrMarkupRenderer
         {
             // Defensive: a composed op should always resolve its base paragraph. Fall back to the merged
             // diff via the single-reviewer path so the op is not silently dropped.
-            RenderModifiedParagraph(op.Op, op.Op.TokenDiff!, state, sink);
+            if (op.Op.TokenDiff != null)
+                RenderModifiedParagraph(op.Op, op.Op.TokenDiff, state, sink);
+            // else: base paragraph AND token diff both missing — nothing to emit; skip.
             return;
         }
 

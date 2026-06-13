@@ -472,7 +472,8 @@ internal static class IrCompositeMerger
             ops.Add(new IrCompositeOp(op, reviewers[rev].Author, rev));
             return;
         }
-        if (touched.All(e => e.Op.Kind == IrEditOpKind.ModifyBlock && e.Op.TokenDiff != null))
+        if (touched.All(e => e.Op.Kind == IrEditOpKind.ModifyBlock && e.Op.TokenDiff != null)
+            && touched.All(e => ParagraphPropsUnchanged(e.Op, baseIr, reviewers[e.Reviewer].Ir)))
         {
             // TOKEN-SPAN COMPOSITION
             var baseTokens = ParagraphBaseTokens(anchor, baseIr, settings);   // IReadOnlyList<IrDiffToken>
@@ -610,6 +611,33 @@ internal static class IrCompositeMerger
     private static IReadOnlyList<IrDiffToken> RightTokensFor(
         IrEditOp op, IrDocument reviewerIr, IrDiffSettings settings) =>
         op.RightAnchor is { } ra ? TokenizeAnchor(ra, reviewerIr, settings) : System.Array.Empty<IrDiffToken>();
+
+    /// <summary>
+    /// True when a ModifyBlock reviewer op changed ONLY paragraph text (and/or run-level formatting),
+    /// leaving the paragraph's own <c>w:pPr</c> (style id, justification, indentation, spacing, outline
+    /// level, keep/break flags, and the unmodeled-pPr digest) byte-identical to the base. This is the
+    /// gate for TOKEN-SPAN COMPOSITION: that path clones the BASE paragraph's pPr, so a reviewer who
+    /// ALSO changed pPr would have that change silently dropped — such ops fall through to the
+    /// block-level CONFLICT branch (where the policy preserves/surfaces the reviewer's full edit).
+    /// <para>The comparison reuses the IR's modeled paragraph format (<see cref="IrParaFormat"/>), the
+    /// same per-paragraph formatting the reader records from <c>w:pPr</c> and that the aligner's
+    /// FormatOnly classification keys on — its record value-equality covers every modeled property plus
+    /// the unmodeled-pPr digest, and is deliberately INDEPENDENT of run/token formatting (which the
+    /// compose path handles correctly). A reviewer op with no resolvable right paragraph, or a
+    /// non-paragraph anchor, conservatively reports "changed" so it is NOT composed.</para>
+    /// </summary>
+    private static bool ParagraphPropsUnchanged(IrEditOp op, IrDocument baseIr, IrDocument reviewerIr)
+    {
+        if (op.LeftAnchor is not { } leftAnchor
+            || !baseIr.AnchorIndex.TryGetValue(leftAnchor, out var baseBlock)
+            || baseBlock is not IrParagraph basePara)
+            return false;
+        if (op.RightAnchor is not { } rightAnchor
+            || !reviewerIr.AnchorIndex.TryGetValue(rightAnchor, out var rightBlock)
+            || rightBlock is not IrParagraph rightPara)
+            return false;
+        return basePara.Format == rightPara.Format;
+    }
 
     /// <summary>Resolve <paramref name="anchor"/> to a block in <paramref name="ir"/> and tokenize it with the
     /// SAME entry the diff builder used (<see cref="IrDiffTokenizer.Tokenize"/>). Empty for an unknown anchor
