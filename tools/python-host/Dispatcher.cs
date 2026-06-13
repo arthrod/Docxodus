@@ -37,7 +37,7 @@ internal static class Dispatcher
         "docx_diff_consolidate" => DocxDiffConsolidate(args),
         "docx_diff_get_conflicts" => DocxDiffOps.GetConflictsJson(BaseB(args), ReviewersJson(args), DiffSettingsJson(args)),
         "docx_diff_get_consolidated_revisions" => DocxDiffOps.GetConsolidatedRevisionsJson(BaseB(args), ReviewersJson(args), DiffSettingsJson(args)),
-        "docx_diff_get_consolidated_edit_script" => DocxDiffOps.GetConsolidatedEditScriptJson(BaseB(args), ReviewersJson(args), DiffSettingsJson(args)),
+        "docx_diff_get_consolidated_edit_script" => JsonString(DocxDiffOps.GetConsolidatedEditScriptJson(BaseB(args), ReviewersJson(args), DiffSettingsJson(args))),
         "project" => DocxSessionOps.Project(Handle(args)),
         "project_anchor" => DocxSessionOps.ProjectAnchor(
             Handle(args), Str(args, "anchorId"),
