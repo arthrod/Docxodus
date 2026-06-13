@@ -33,4 +33,27 @@ public class IrCompositeModelTests
         Assert.Single(script.Operations);
         Assert.Empty(script.Conflicts);
     }
+
+    [Fact]
+    public void Conflict_records_are_value_equal_and_competitors_participate()
+    {
+        var c1 = new IrConflict(1, "p:body:a", 2, 3, Docxodus.ConflictResolution.BaseWins,
+            IrNodeList.From(new[] { new IrConflictCompetitor("Bob", "X"), new IrConflictCompetitor("Fred", "Y") }));
+        var c2 = new IrConflict(1, "p:body:a", 2, 3, Docxodus.ConflictResolution.BaseWins,
+            IrNodeList.From(new[] { new IrConflictCompetitor("Bob", "X"), new IrConflictCompetitor("Fred", "Y") }));
+        Assert.Equal(c1, c2);
+
+        // a different competitor list makes the conflicts unequal (Competitors participates in equality)
+        var c3 = c1 with { Competitors = IrNodeList.From(new[] { new IrConflictCompetitor("Bob", "X") }) };
+        Assert.NotEqual(c1, c3);
+
+        // a different applied policy makes them unequal
+        var c4 = c1 with { AppliedPolicy = Docxodus.ConflictResolution.StackAll };
+        Assert.NotEqual(c1, c4);
+
+        // IrCompositeScript NoteOps defaults null
+        var script = new IrCompositeScript(IrNodeList.Empty<IrCompositeOp>(), IrNodeList.From(new[] { c1 }));
+        Assert.Null(script.NoteOps);
+        Assert.Single(script.Conflicts);
+    }
 }

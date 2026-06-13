@@ -1,4 +1,5 @@
 #nullable enable
+
 using Docxodus.Ir;
 
 namespace Docxodus.Ir.Diff;
