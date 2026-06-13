@@ -176,6 +176,8 @@ This repo is not just a .NET library — it ships a four-layer stack. Changes to
 
 When the core library changes a public method or setting on `DocxSession`, update **`Docxodus/Internal/DocxSessionOps.cs` first** — both bridges and both clients pick up the change automatically. Then ripple through: tests, the WASM `[JSExport]` shell in `DocxSessionBridge.cs`, the stdio dispatcher in `tools/python-host/Dispatcher.cs`, `npm/src/types.ts` + `npm/src/index.ts`, `python/src/docx_scalpel/types.py` + `python/src/docx_scalpel/session.py`. The table in "Feature Development Workflow" below summarizes when each is required.
 
+The same single-owner-facade pattern applies to the **stateless** surfaces (no session handle): `HtmlConversionOps` owns DOCX→HTML, and `DocxDiffOps` (`Docxodus/Internal/DocxDiffOps.cs`) owns the public `DocxDiff` engine (Compare / GetRevisions / GetEditScriptJson). Both the WASM bridge (`DocxDiffBridge.cs`) and the stdio dispatcher route through `DocxDiffOps`, so the settings-in / revisions-out JSON wire shapes — and any future change to them — live in exactly one place. The corresponding clients are `npm/src/index.ts`'s `docxDiff*` wrappers (`DocxDiffBridge` on `DocxodusWasmExports`) and `docx-scalpel`'s `docx_diff_*` module functions (`python/src/docx_scalpel/session.py`, with the `DocxDiff*` types/enums in `types.py`/`enums.py`). When a stateless surface changes, update its `*Ops` facade first, then ripple the two bridges + two clients exactly as for `DocxSession`.
+
 ### WASM Conditional Compilation
 
 The core library compiles in two modes controlled by the `WASM_BUILD` MSBuild property (set by `scripts/build-wasm.sh`):
@@ -185,7 +187,7 @@ The core library compiles in two modes controlled by the `WASM_BUILD` MSBuild pr
 
 When touching image/font/color code, check whether your change compiles under `WASM_BUILD` before shipping — the npm build will fail loudly if it doesn't.
 
-**Switching back from a WASM build to the default build:** after `scripts/build-wasm.sh` runs, the cached `Docxodus.dll` in `Docxodus/bin/Debug/net8.0/` is the WASM-mode assembly (no `SkiaSharp`, no `ImageInfo.SaveImage`). The next `dotnet build Docxodus.sln` won't recompile it because nothing changed in `Docxodus/`, but `Docxodus.Tests` links against the stale binary and fails with `error CS1061: 'ImageInfo' does not contain a definition for 'SaveImage'`. Fix: run `dotnet clean Docxodus.sln` once before going back to the non-WASM workflow.
+**WASM-mode output isolation:** the WASM-mode `Docxodus.dll` (no `SkiaSharp`, no `ImageInfo.SaveImage`) builds into its own `Docxodus/bin/wasm/` + `Docxodus/obj/wasm/` paths (see the `WASM_BUILD` PropertyGroup in `Docxodus.csproj`), so neither `scripts/build-wasm.sh` nor a solution build (which compiles Docxodus twice — `DocxodusWasm` references it with `WASM_BUILD=true`) can clobber the default-mode assembly. If you ever see `error CS1061: 'ImageInfo' does not contain a definition for 'SaveImage'` again, a stale pre-isolation artifact is lingering — delete `Docxodus*/bin` + `Docxodus*/obj` once; no recurring `dotnet clean` ritual is needed.
 
 ### Document Wrapper Classes
 
@@ -240,6 +242,14 @@ Format change detection produces **native Word format change markup** (`w:rPrCha
 - The output document contains `w:rPrChange` elements inside `w:rPr` with the old formatting properties
 - `GetRevisions()` recognizes this native markup and returns `WmlComparerRevisionType.FormatChanged` revisions
 - `WmlComparerRevision.FormatChange` contains details about what changed (old/new properties, changed property names)
+
+**DocxDiff.cs** - Public facade over the IR diff engine — a structure-aware, anchor-addressed DOCX comparison engine and the diff-side counterpart to `WmlToMarkdownConverter`/`DocxSession`. The NEW engine; `WmlComparer` remains the default/blessed comparison API (`DocxDiff` ships as a production-candidate pending Word manual-verification + burn-in — decision D4):
+- `Compare(left, right, settings?)` → `WmlDocument` — native tracked-changes markup (`w:ins`/`w:del`/`w:moveFrom`/`w:moveTo`/`w:rPrChange`); satisfies the WmlComparer contract (accept ≡ right, reject ≡ left)
+- `GetRevisions(left, right, settings?)` → `IReadOnlyList<DocxDiffRevision>` — consumer revisions rendered off the edit script
+- `GetEditScriptJson(left, right, settings?)` → `string` — the edit script as data (the differentiator vs `WmlComparer`)
+- `DocxDiffSettings` mirrors `WmlComparerSettings` defaults (two honest deviations: `Deterministic` revision dates default true; `FormatComparison` defaults `ModeledOnly`). `DocxDiffRevision` adds `LeftAnchor`/`RightAnchor` (`kind:scope:unid`, interoperable with `DocxSession`/markdown projection)
+- No static state — `AuthorForRevisions` flows per call (multi-author / consolidate-compatible)
+- Wraps the internal `Docxodus/Ir/Diff/` pipeline (`IrReader → IrEditScriptBuilder → IrMarkupRenderer/IrRevisionRenderer/IrEditScriptJson`); see `docs/architecture/ir_diff_engine.md`
 
 **WmlToHtmlConverter.cs / HtmlToWmlConverter.cs** - Bidirectional DOCX ↔ HTML conversion. Key settings in `WmlToHtmlConverterSettings`:
 - `RenderTrackedChanges` - Render insertions/deletions as `<ins>`/`<del>` instead of accepting them
@@ -352,6 +362,7 @@ Detailed design docs for the major subsystems live in `docs/architecture/`. Read
 - `docx_converter.md`, `comment_rendering.md`, `paginated_headers_footers.md`, `custom_annotations.md`, `unsupported_content_placeholders.md`, `wml_to_html_converter_gaps.md` — WmlToHtmlConverter internals
 - `opencontracts_export.md` — OpenContractExporter format
 - `markdown_projection.md` — WmlToMarkdownConverter design
+- `ir_diff_engine.md` — DocxDiff (IR diff engine) public surface, pipeline, edit script, settings, parity status, relationship to WmlComparer
 - `docx_mutation_api.md` — DocxSession surface, anchor lifecycle, error catalog, supported markdown subset
 - `python_docxodus.md` — planned Python wrapper for DocxSession; wire protocol, type mapping, distribution
 - `skiasharp-removal-plan.md`, `wasm-optimization-plan.md`, `ui_responsiveness.md`, `profiling-results.md` — WASM/browser work

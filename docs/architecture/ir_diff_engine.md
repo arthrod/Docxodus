@@ -1,0 +1,140 @@
+# IR Diff Engine
+
+> **Status:** Public surface shipped (M2.5). The engine ships as `DocxDiff` (`Docxodus/DocxDiff.cs`) — a **production-candidate**, NOT yet the blessed default. `WmlComparer` remains the default comparison API. The IR engine becomes the default only after the Word manual-verification checklist clears and a burn-in period (decision **D4**, still open). See the decision log in `docs/superpowers/specs/2026-06-11-ir-diff-layout-program-plan.md`.
+
+The IR diff engine is a structure-aware DOCX comparison engine built on Docxodus' intermediate document representation (IR). It is the write-side analogue of the read-only IR pipeline that backs the markdown projection: it reads two documents into anchor-addressed IR snapshots, computes an **edit script** between them, and renders that script three ways — native tracked-changes markup, a consumer revision list, or the script itself as JSON (diff-as-data).
+
+It is a sibling to `WmlComparer` in the comparison family. The differences that motivate it:
+
+1. **Anchor-addressed revisions.** Every revision carries the stable block anchor(s) (`kind:scope:unid`) it derives from — the same anchor grammar as the markdown projection and `DocxSession`. A revision can be located in the projection or fed straight to a `DocxSession` mutation. `WmlComparer.WmlComparerRevision` has no anchors.
+2. **Diff-as-data.** The edit script serializes to stable JSON, so the diff is storable, transportable to non-.NET consumers, and auditable. `WmlComparer` only produces an OOXML document or an in-memory revision list.
+3. **A modeled IR.** Comparison runs over the IR's typed blocks/runs/format records rather than raw atom streams, which makes table row/cell-precise diffs, footnote/endnote scope diffs, and modeled-format-change detection first-class.
+
+## Public surface
+
+`public static class DocxDiff` (`Docxodus/DocxDiff.cs`):
+
+| Method | Returns | Purpose |
+|---|---|---|
+| `Compare(left, right, settings?)` | `WmlDocument` | Tracked-changes document with native `w:ins`/`w:del`/`w:moveFrom`/`w:moveTo`/`w:rPrChange` markup. Satisfies the WmlComparer contract: `AcceptRevisions(result) ≡ right`, `RejectRevisions(result) ≡ left` at the per-block text level. |
+| `GetRevisions(left, right, settings?)` | `IReadOnlyList<DocxDiffRevision>` | The consumer revision list, rendered directly off the edit script (no produce-then-reparse round-trip). |
+| `GetEditScriptJson(left, right, settings?)` | `string` | The edit script as indented JSON — the diff-as-data differentiator. |
+
+Supporting public types: `DocxDiffSettings`, `DocxDiffRevision`, `DocxDiffRevisionType`, `DocxDiffFormatChange`, `DocxDiffRevisionGranularity`, `DocxDiffFormatComparison`. All `#nullable enable`, fully XML-documented, no static or process-global state (multi-author / consolidate-compatible — author flows per call via `DocxDiffSettings.AuthorForRevisions`).
+
+### Anchor grammar and DocxSession interop
+
+`DocxDiffRevision.LeftAnchor` / `RightAnchor` are block anchors of the form `kind:scope:unid` — e.g. `p:body:a1b2c3d4` (a body paragraph), `li:body:…` (list item), `tbl:body:…` (table), `p:fn3:…` (a paragraph in footnote 3). The `kind`/`scope` match the markdown projection's and `DocxSession`'s anchor grammar, so:
+
+- A revision resolves to a location in the markdown projection (review UIs, blame).
+- A revision can be passed straight to a `DocxSession` call (`ReplaceText`, `GetBlockMetadata`, `AddAnnotation`, …) on the corresponding document.
+
+A left anchor resolves against the `left` document's IR; a right anchor against `right`. Anchor presence by revision type: Inserted → right only; Deleted → left only; FormatChanged → both; Moved source → left, Moved destination → right. A token-level revision inside a modified/moved-and-edited block carries the enclosing block's anchor(s).
+
+## Pipeline
+
+```
+                    settings (DocxDiffSettings.ToIrDiffSettings → IrDiffSettings)
+                         │
+left  ─ IrReader.Read ──▶ IrDocument ─┐
+                                      ├─▶ IrEditScriptBuilder.Build ─▶ IrEditScript ─┬─▶ IrMarkupRenderer.Render   ─▶ WmlDocument
+right ─ IrReader.Read ──▶ IrDocument ─┘                                              ├─▶ IrRevisionRenderer.Render ─▶ revisions
+                                                                                     └─▶ IrEditScriptJson.Write    ─▶ JSON
+```
+
+Internal stages (all `internal`, under `Docxodus/Ir/Diff/`):
+
+- **`IrReader`** — reads a `WmlDocument` to an `IrDocument` (anchor-indexed blocks; accepted-revision view; provenance off for the diff path). Shared with the markdown projection.
+- **`IrDiffTokenizer`** — splits IR runs into word/separator/atomic tokens with match keys (case folding, NBSP conflation, hyperlink-target-in-key, field transparency). The diff's tokenization, NOT an IR fact.
+- **`IrBlockAligner`** — unique-hash `(ContentHash, FormatFingerprint)` anchoring → LIS spine → in-order gap fill; relocations fall off the spine as moves; similarity-based in-gap pairing + cross-gap fuzzy moves.
+- **`IrTokenDiffer`** — Myers O(ND) token diff inside a paired block (Equal/Insert/Delete/FormatChanged).
+- **`IrTableDiffer`** — nested table row/cell diffs (a cell-text edit surfaces as a token diff inside that cell, not a whole-table blob).
+- **`IrEditScriptBuilder`** — assembles the `IrEditScript` from the alignment + token/table diffs, including footnote/endnote scope ops.
+- **`IrMarkupRenderer` / `IrRevisionRenderer` / `IrEditScriptJson`** — the three renderers above.
+
+## Edit script
+
+The `IrEditScript` is an ordered list of block operations (`IrEditOpKind`), plus a parallel `noteOps` list for footnote/endnote scopes:
+
+| Kind | Meaning | Anchors |
+|---|---|---|
+| `EqualBlock` | Both sides identical | both |
+| `FormatOnlyBlock` | Text-equal, modeled format differs (`w:rPrChange`-grade) | both |
+| `ModifyBlock` | Same block, edited (carries a nested token/table diff) | both |
+| `InsertBlock` | Right-only block | right only |
+| `DeleteBlock` | Left-only block | left only |
+| `MoveBlock` | Relocated block (source + destination ops share a `moveGroupId`) | source: left, dest: right |
+| `MoveModifyBlock` | Relocated AND edited (the case `WmlComparer` cannot express as a move) | source: left, dest: right |
+| `SplitBlock` | One left paragraph split across N≥2 right paragraphs (M2.6) | left + `splitMergeAnchors` (the N rights) |
+| `MergeBlock` | N≥2 left paragraphs fused into one right paragraph (M2.6) | right + `splitMergeAnchors` (the N lefts) |
+
+A `ModifyBlock` over a paragraph carries a `tokenDiff`; over a table, a `tableDiff` (row ops with nested cell ops); a textbox-bearing block carries `textboxDiffs`. A `SplitBlock`/`MergeBlock` carries `splitMergeAnchors` (the plural side, document order) plus `segmentDiffs` — one COMPLETE token diff per member, whose singular-side spans are slice-local; the slices tile the singular side's token stream exactly, in order (the partition invariant: slice *i*'s length = Σ of segment *i*'s non-Insert left-span lengths for a split, non-Delete right-span lengths for a merge — boundaries are implicit in the diff ops, never stored). N:M (plural on both sides) is physically representable by the nullable fields but rejected by the test-side `AssertSplitMergePairing` (a `SplitBlock` must carry a null `rightAnchor`, a `MergeBlock` a null `leftAnchor`, no anchor may appear in two ops' `splitMergeAnchors`) and never emitted by the builder — the pairing assert is the load-bearing scope ceiling. The JSON is a faithful serialization of this structure (top-level `operations` + optional `noteOps`; `splitMergeAnchors`/`segmentDiffs` appear only on split/merge ops, so pre-M2.6 scripts serialize byte-identically), and is deterministic for identical inputs.
+
+## Settings
+
+`DocxDiffSettings` is the public mirror of the internal `IrDiffSettings`; it exposes the consumer-relevant subset and maps onto it in `ToIrDiffSettings()`.
+
+| Public setting | Default | Maps to | Notes |
+|---|---|---|---|
+| `AuthorForRevisions` | `"Open-Xml-PowerTools"` | `IrDiffSettings.AuthorForRevisions` | matches `WmlComparerSettings` |
+| `Deterministic` | `true` | `IrDiffSettings.Deterministic` | **deviation from `WmlComparerSettings`** (which is wall-clock by default) |
+| `DateTimeForRevisions` | `null` → epoch or `DateTime.Now` | `IrDiffSettings.DateTimeForRevisions` | explicit value always wins |
+| `CaseInsensitive` / `Culture` | `false` / `null` | `CaseInsensitive` / `Culture` | |
+| `ConflateBreakingAndNonbreakingSpaces` | `true` | same | |
+| `WordSeparators` | `null` → default set | `WordSeparators` | |
+| `DetectMoves` | `true` | `RenderMoves` | render-time relabel: the engine always ALIGNS a relocation as a move; this controls whether it is REPORTED as one |
+| `MoveSimilarityThreshold` | `0.8` | same | |
+| `MoveMinimumWordCount` | `3` | `MoveMinimumTokenCount` | |
+| `RevisionGranularity` | `Fine` | `RevisionGranularity` | `Fine` = engine-native one-revision-per-token-span (byte-stable); `WmlComparerCompatible` = coalesce/trim/prune to match the legacy comparer's coarser revision set |
+| `FormatComparison` | `ModeledOnly` | `IrFormatComparison` | `ModeledOnly` reports only modeled-field deltas (false-negative on unmodeled rPr); `Full` sees every rPr difference |
+
+### Two honest defaults that deviate from `WmlComparerSettings`
+
+1. **Deterministic dates.** `WmlComparerSettings.DateTimeForRevisions` defaults to `DateTime.Now` — the same compare twice yields different dates. `DocxDiff` pins a fixed epoch by default so output is reproducible. Opt into wall-clock via `Deterministic = false`.
+2. **`FormatComparison = ModeledOnly`.** A `w:rPrChange`-grade report can only DESCRIBE modeled fields, so a format change driven by an undescribable unmodeled-only rPr flip (`w:lang`, `w:bCs`, complex-script toggles) is noise. `ModeledOnly` collapses that noise; the trade-off is a false negative on a visible-but-unmodeled change (e.g. `w:shd` run shading). `Full` restores byte-fidelity comparison.
+
+## Parity status
+
+The engine was developed against `WmlComparer` as the oracle under a binding method rule: WmlComparer presumed correct per gap; the IR is fixed to match unless an oracle fault is established with concrete evidence. As of M2.6 (this surface):
+
+- **`GetRevisions` parity: 179/179 genuine count-exact PASSES — the documented-deviation catalog is EMPTY.** M2.6 closed the last two deviations (WC-1450/WC-1830, the 1:N sub-paragraph split — see the section below); the scoreboard asserts `Deviation == 0` and ratchets the genuine-pass floor at 179.
+- **Produced-markup parity:** floor 39 fixtures round-trip clean (accept ≡ right, reject ≡ left, schema-valid); the round-trip allowlist is **1 fixture** (WC-BodyBookmarks endnote→footnote whole-note-store conversion, on which the WmlComparer oracle itself throws — there is no oracle behaviour to match). M2.6 Task 2 closed WC022 (the `InOrderRefine` same-unid identity reservation); the split/merge markup (below) round-trips on both corpus split fixtures and the synthetic split/merge shapes.
+- The only remaining artifact anywhere is that single oracle-crashes allowlist fixture.
+
+### 1:N paragraph split / N:1 merge (M2.6) — the implemented algorithm
+
+One before-paragraph whose content migrates across N after-paragraphs (the user pressed Enter mid-paragraph), or the reverse merge, is a first-class engine capability. Design: `docs/superpowers/specs/2026-06-12-subparagraph-split-merge-design.md` (DESIGN-RESOLVED + adversarial review); this section records what the code DOES — the source of truth is `IrBlockAligner.DetectOneToManyInGap`/`FindQualifyingRun`/`TrimAndGate` + `IrSplitSegmenter`.
+
+**Detection (in `FillOneGap`, after the unambiguous-table-residue rule, before the 1×1-residue rule; gated by `IrDiffSettings.DetectSplitMerge`, default ON).** One side-parameterized worker runs twice per gap — split (singular = left) first, then merge (singular = right); a block consumed by a split group is never reconsidered by the merge scan.
+
+1. **Candidates.** A gap paragraph on the singular side qualifies iff it is still FREE, or was Modified-paired by THIS gap's `SimilarityPair` to a plural-side paragraph inside the gap (the pairing is *promoted* if a window qualifies). `Unchanged`/`FormatOnly`/`Moved` blocks are NEVER candidates: a content-equal pair has zero unmatched tail, so promoting one could only manufacture a false split — this is what preserves the WC022 identity-reservation reject-order invariant (review finding F4.2; regression-tested both directions with detection on).
+2. **Window enumeration.** For each candidate, ascending start × ascending end over maximal CONTIGUOUS runs of eligible plural indices (free paragraphs, or the candidate's own partner), capped at `SplitMaxRunLength` (8). The first window that passes all gates wins — shortest-first is deliberate: the smallest window clearing the coverage bar absorbs the least foreign content.
+3. **O(1) length prefilter.** Before any scoring, a window is skipped unless its cached content-token total lies in `[SplitCoverageThreshold × singularContent, singularContent / (1 − SplitForeignSlack)]` — the thresholds' arithmetic implications. Growing a window only adds content, so exceeding the upper bound breaks out of the end-loop. This is what keeps a fully-rewritten G×G gap at G²·O(1) instead of G²·O(LCS) (the adversarial 200×200 fixture's 5-second bound).
+4. **Scoring (`IrSplitSegmenter.Score`).** One in-order LCS (standard DP, deterministic back-walk tie-break) of the singular paragraph's full token stream against the window's concatenated streams. `Coverage` = LCS-matched singular CONTENT tokens / singular content tokens; `ForeignSlack` = unmatched window content tokens / window content tokens (content = non-Separator, non-Textbox; separators participate in the LCS for boundary context but never score).
+5. **Edge trim (the false-positive guard, review R2).** Leading and trailing members with ZERO matched content are dropped, then the trimmed window is re-scored. This excludes an unrelated net-new edge neighbor and edge empty carriers, while keeping INTERIOR net-new members (WC-1830's inserted math paragraph between the two halves) — their foreign content is priced by the slack gate.
+6. **Fire gates (on the trimmed window).** ≥2 members carrying at least one content token; a paired candidate's partner inside the window plus ≥1 other free member; `Coverage ≥ SplitCoverageThreshold` (0.90); `ForeignSlack ≤ SplitForeignSlack` (0.34). The thresholds are corpus-swept (`IrSplitThresholdSweepTests`): the shipped pair sits on a plateau at the grid maximum with ≥1 full grid step of margin on every axis (the F4.1 gate, re-asserted on every run).
+7. **On fire.** Any prior Modified pairing is overwritten; every member's kind/match slots are stamped immediately (no window may reuse a consumed block — the F2.2 overlap ceiling); the group is recorded and its indices leave the leftover lists, so the 1×1 rule and surplus classification see only what remains. `EmitEntries` collapses each group to ONE alignment entry (`IrAlignmentKind.Split` at the FIRST member's right position carrying `MultiBlocks`; `Merge` at the right block's position), with deletion buckets flushed exactly once per anchored left.
+
+**Segmentation (`IrSplitSegmenter.ComputeSegmentDiffs`, at projection time).** The same LCS assigns every singular token to a member: a matched token goes to its partner's member, an unmatched token to the nearest PRECEDING matched token's member (leading unmatched → member 0) — a total, monotone rule. Each slice is re-diffed against its member with the ordinary Myers differ, so every segment diff carries the full token-diff invariant battery over (slice, member) and the partition invariant holds structurally. For a merge the segmenter runs with singular = right, and the builder mirrors each diff (`MirrorDiff`: Insert↔Delete + span swap) so stored diffs always read left → right.
+
+**Surfaces.** *Apply-verifier:* a `SplitBlock` pushes one reconstructed tuple per member (the existing count/order/`ReferenceEquals` loop then proves the N rights sit contiguously at the op's position); a `MergeBlock` pushes one tuple reconstructed from the N members; the cell/note path additionally asserts the produced right-anchor SEQUENCE equals the right block list (the F3.2 strengthening, asserted corpus-wide). *Revisions:* Fine mode reports each segment's token diff plus one `Inserted "\n"` per new pilcrow (`Deleted "\n"` per removed one) — a clean split is visible but claims no content change; compatible mode reproduces the oracle's account — segment 0's inline edits (seam-whitespace-only ins/del suppressed) plus exactly ONE coalesced `Inserted` (`"\n" + Σ(memberText + "\n")`) per split — which is what lands WC-1830 at 2 and WC-1450 at 7. *Markup:* the anchored-split shape — N paragraphs, each member's pPr and segment content, with `MarkParagraphMark` inserted marks on paragraphs 0..N−2 (deleted marks for a merge, whose non-final paragraphs keep their LEFT pPr); REJECT removes the marks and RevisionProcessor re-fuses the paragraphs, reconstructing LEFT; ACCEPT yields the N right paragraphs. *Wire:* additive optional arrays only. *Fuzzer:* `SplitParagraph`/`MergeParagraphs` mutation kinds run the own-oracle battery (apply-verify + JSON round-trip + determinism) on every seed; they are excluded from the cross-engine differential class because the engines frame a clean split differently BY CONSTRUCTION (WmlComparer reports the tail as a Deleted+Inserted pair of identical text; the IR keeps it Equal and reports the structural mark — the `RelocateParagraph` precedent).
+
+**Deltas vs the spec worth knowing.** (a) The spec's §3.2 "anchored-split" example cell (WC-1450's `Second `-prefix cell) turned out NOT to be a split at all — its before-paragraph never contained the tail (`Score` member-match probe: `[11, 0]`); the oracle's `Inserted "Second "` + `Inserted "When you click…"` is the ordinary Modify + InsertBlock account, which the edge trim correctly preserves. (b) The implemented mark placement (inserted marks on 0..N−2, last paragraph keeps the original pilcrow) differs from the spec's §3.2 oracle excerpt but satisfies the same accept ≡ right / reject ≡ left contract the spec adjudicates on (§3.3/§5.5 explicitly allow this). (c) There is no `IrSegmentDiff` wrapper record (review F1.3) — `segmentDiffs` is a plain token-diff list. (d) Scope ceilings: N:M and cross-gap splits never fire (one singular side, one gap, by construction); `DetectSplitMerge = false` restores strict 1:1 op semantics.
+
+## Relationship to WmlComparer
+
+| | `WmlComparer` | `DocxDiff` (IR engine) |
+|---|---|---|
+| Status | Default / blessed | Production-candidate (D4 open) |
+| Comparison substrate | Atom streams | Modeled IR (blocks/runs/format records) |
+| Revisions | `WmlComparerRevision` (OOXML members, no anchors) | `DocxDiffRevision` (anchor-addressed; no OOXML members) |
+| Move markup | `GetRevisions`-only post-process; **native `w:moveFrom`/`w:moveTo` IS produced** by the IR markup renderer | native `w:moveFrom`/`w:moveTo` |
+| Format change | detected + described (`w:rPrChange`) | detected + described (modeled-only by default) |
+| Diff-as-data | none | edit-script JSON |
+| Determinism | wall-clock dates by default | deterministic by default |
+
+> **Note for readers of `wml_comparer_gaps.md`:** that document's older "native move markup is not generated" / "format change detection is a gap" claims were stale (both shipped in the v6.x line and are produced by `DocxDiff`'s markup renderer here). The gaps doc has been corrected and points here.
+
+## Cross-layer ripple
+
+The four-layer ripple (WASM bridge → npm/TypeScript → python host/`docx_scalpel`) for these three entry points is tracked as M2.5 Task 5 (see the program plan). This document covers the .NET public surface.
