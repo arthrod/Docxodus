@@ -43,6 +43,10 @@ from .types import (
     CharSpan,
     CrossBlockMatch,
     DocumentAnnotation,
+    DocxDiffConflict,
+    DocxDiffConsolidatedRevision,
+    DocxDiffConsolidateSettings,
+    DocxDiffReviewer,
     DocxDiffRevision,
     DocxDiffSettings,
     DocxSessionSettings,
@@ -69,6 +73,10 @@ __all__ = [
     "docx_diff_compare",
     "docx_diff_get_revisions",
     "docx_diff_get_edit_script",
+    "docx_diff_consolidate",
+    "docx_diff_get_conflicts",
+    "docx_diff_get_consolidated_revisions",
+    "docx_diff_get_consolidated_edit_script",
 ]
 
 
@@ -181,6 +189,119 @@ def docx_diff_get_edit_script(
     if not isinstance(result, str):
         raise TypeError(
             f"docx_diff_get_edit_script: expected str, got {type(result).__name__}"
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# DocxDiff consolidate — multi-reviewer composite diff
+# ---------------------------------------------------------------------------
+#
+# These mirror the .NET ``DocxDiff`` consolidate overloads and the WASM/npm
+# ``docxDiffConsolidate`` / ``docxDiffGetConflicts`` /
+# ``docxDiffGetConsolidatedRevisions`` / ``docxDiffGetConsolidatedEditScript``
+# wrappers. All four are stateless: pass a base DOCX byte blob and a sequence
+# of reviewer blobs, get the result — no session.
+
+
+def _consolidate_args(
+    base: bytes,
+    reviewers: "Iterable[DocxDiffReviewer]",
+    settings: "DocxDiffConsolidateSettings | None",
+) -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "baseB64": base64.b64encode(base).decode("ascii"),
+        "reviewers": [
+            {
+                "author": r.author,
+                "docB64": base64.b64encode(r.document).decode("ascii"),
+            }
+            for r in reviewers
+        ],
+    }
+    if settings is not None:
+        wire = settings.to_wire()
+        if wire:
+            args["settings"] = wire
+    return args
+
+
+def docx_diff_consolidate(
+    base: bytes,
+    reviewers: "Iterable[DocxDiffReviewer]",
+    settings: "DocxDiffConsolidateSettings | None" = None,
+) -> bytes:
+    """Consolidate reviewer DOCX blobs onto a base; return a redlined DOCX.
+
+    Mirrors .NET ``DocxDiff.Consolidate``. Diffs each reviewer's document
+    against ``base``, merges the resulting edit scripts, resolves conflicts
+    per ``settings.conflict_resolution``, and renders a single tracked-changes
+    document. Accepting its revisions yields the consolidated result; rejecting
+    them yields ``base``.
+    """
+    result = _call("docx_diff_consolidate", _consolidate_args(base, reviewers, settings))
+    if not isinstance(result, dict) or "docxB64" not in result:
+        raise TypeError(
+            f"docx_diff_consolidate: expected {{docxB64}}, got {result!r}"
+        )
+    return base64.b64decode(result["docxB64"])
+
+
+def docx_diff_get_conflicts(
+    base: bytes,
+    reviewers: "Iterable[DocxDiffReviewer]",
+    settings: "DocxDiffConsolidateSettings | None" = None,
+) -> tuple[DocxDiffConflict, ...]:
+    """Consolidate reviewer blobs against ``base``; return the conflict list.
+
+    Mirrors .NET ``DocxDiff.GetConflicts`` — the conflicts-as-data view: every
+    base span where two or more reviewers made incompatible edits, with each
+    reviewer's competing text and the resolution policy that would be applied
+    under the current settings.
+    """
+    result = _call("docx_diff_get_conflicts", _consolidate_args(base, reviewers, settings))
+    conflicts = result.get("conflicts", []) if isinstance(result, dict) else []
+    return tuple(DocxDiffConflict._from_wire(c) for c in conflicts)
+
+
+def docx_diff_get_consolidated_revisions(
+    base: bytes,
+    reviewers: "Iterable[DocxDiffReviewer]",
+    settings: "DocxDiffConsolidateSettings | None" = None,
+) -> tuple[DocxDiffConsolidatedRevision, ...]:
+    """Consolidate reviewer blobs against ``base``; return the merged revision list.
+
+    Mirrors .NET ``DocxDiff.GetConsolidatedRevisions`` — the revisions-as-data
+    view of the consolidated edit script, where each revision additionally carries
+    the conflict id (if any) it derives from.
+    """
+    result = _call(
+        "docx_diff_get_consolidated_revisions",
+        _consolidate_args(base, reviewers, settings),
+    )
+    revisions = result.get("revisions", []) if isinstance(result, dict) else []
+    return tuple(DocxDiffConsolidatedRevision._from_wire(r) for r in revisions)
+
+
+def docx_diff_get_consolidated_edit_script(
+    base: bytes,
+    reviewers: "Iterable[DocxDiffReviewer]",
+    settings: "DocxDiffConsolidateSettings | None" = None,
+) -> str:
+    """Consolidate reviewer blobs against ``base``; return the edit script as JSON.
+
+    Mirrors .NET ``DocxDiff.GetConsolidatedEditScriptJson`` — the merged
+    anchor-addressed block-operation list as machine-readable JSON, suitable for
+    storage, transport, and review tooling.
+    """
+    result = _call(
+        "docx_diff_get_consolidated_edit_script",
+        _consolidate_args(base, reviewers, settings),
+    )
+    if not isinstance(result, str):
+        raise TypeError(
+            f"docx_diff_get_consolidated_edit_script: expected str, "
+            f"got {type(result).__name__}"
         )
     return result
 

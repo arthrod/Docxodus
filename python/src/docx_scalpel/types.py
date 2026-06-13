@@ -21,6 +21,7 @@ from typing import Any, Mapping, Sequence
 from .enums import (
     AnchorIdRendering,
     AnchorRenderMode,
+    ConflictResolution,
     ContextBoundary,
     DocxDiffFormatComparison,
     DocxDiffRevisionGranularity,
@@ -68,6 +69,11 @@ __all__ = [
     "DocxDiffSettings",
     "DocxDiffRevision",
     "DocxDiffFormatChange",
+    "DocxDiffReviewer",
+    "DocxDiffConsolidateSettings",
+    "DocxDiffConflictCompetitor",
+    "DocxDiffConflict",
+    "DocxDiffConsolidatedRevision",
 ]
 
 
@@ -880,6 +886,136 @@ class DocxDiffRevision:
             format_change=DocxDiffFormatChange._from_wire(fc) if fc else None,
             left_anchor=d.get("leftAnchor"),
             right_anchor=d.get("rightAnchor"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# DocxDiff consolidate — multi-reviewer composite diff
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DocxDiffReviewer:
+    """One reviewer's document for ``docx_diff_consolidate`` and friends.
+
+    ``document`` is the reviewer's DOCX bytes (their redlined or edited version
+    of the base); ``author`` is the display name used for their revisions.
+    """
+
+    document: bytes
+    author: str
+
+
+@dataclass(frozen=True, slots=True)
+class DocxDiffConsolidateSettings:
+    """Settings for the ``docx_diff_consolidate_*`` module functions.
+
+    Wraps a :class:`DocxDiffSettings` for the per-reviewer diffs plus
+    ``conflict_resolution`` for how to handle competing edits.
+
+    ``to_wire()`` starts from the embedded diff settings wire dict and adds
+    ``conflictResolution`` only when it is non-default (i.e. not ``BASE_WINS``),
+    matching the sparse-emit convention used by :meth:`DocxDiffSettings.to_wire`.
+    """
+
+    diff: DocxDiffSettings = field(default_factory=DocxDiffSettings)
+    conflict_resolution: ConflictResolution = ConflictResolution.BASE_WINS
+
+    def to_wire(self) -> dict[str, Any]:
+        wire = self.diff.to_wire()
+        if self.conflict_resolution != ConflictResolution.BASE_WINS:
+            wire["conflictResolution"] = int(self.conflict_resolution)
+        return wire
+
+
+@dataclass(frozen=True, slots=True)
+class DocxDiffConflictCompetitor:
+    """One reviewer's competing edit within a :class:`DocxDiffConflict`.
+
+    ``author`` is the reviewer's display name; ``result_text`` is the text
+    their edit produces at the conflicting span.
+    """
+
+    author: str
+    result_text: str
+
+    @classmethod
+    def _from_wire(cls, d: Mapping[str, Any]) -> "DocxDiffConflictCompetitor":
+        return cls(
+            author=d.get("author", ""),
+            result_text=d.get("resultText", ""),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DocxDiffConflict:
+    """A conflict produced by ``docx_diff_get_conflicts`` — a base span where two
+    or more reviewers made incompatible edits.
+
+    ``id`` is a stable integer index for the conflict within this consolidation.
+    ``base_anchor`` is the anchor id in the base document. ``token_start`` /
+    ``token_end`` delimit the conflicting token range within that block.
+    ``policy`` is the :class:`ConflictResolution` that would be applied by
+    ``docx_diff_consolidate`` under the current settings. ``competitors`` lists
+    each reviewer's competing edit.
+    """
+
+    id: int
+    base_anchor: str
+    token_start: int
+    token_end: int
+    policy: ConflictResolution
+    competitors: tuple[DocxDiffConflictCompetitor, ...]
+
+    @classmethod
+    def _from_wire(cls, d: Mapping[str, Any]) -> "DocxDiffConflict":
+        return cls(
+            id=int(d["id"]),
+            base_anchor=d.get("baseAnchor", ""),
+            token_start=int(d.get("tokenStart", 0)),
+            token_end=int(d.get("tokenEnd", 0)),
+            policy=ConflictResolution(int(d.get("policy", 0))),
+            competitors=tuple(
+                DocxDiffConflictCompetitor._from_wire(c)
+                for c in d.get("competitors", ())
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DocxDiffConsolidatedRevision:
+    """One consumer revision from ``docx_diff_get_consolidated_revisions``.
+
+    Mirrors :class:`DocxDiffRevision` with all of its fields plus an optional
+    ``conflict_id`` that links this revision to a :class:`DocxDiffConflict`
+    when the revision arose from a conflict resolution decision.
+    """
+
+    type: DocxDiffRevisionType
+    text: str
+    author: str
+    date: str
+    move_group_id: int | None = None
+    is_move_source: bool | None = None
+    format_change: DocxDiffFormatChange | None = None
+    left_anchor: str | None = None
+    right_anchor: str | None = None
+    conflict_id: int | None = None
+
+    @classmethod
+    def _from_wire(cls, d: Mapping[str, Any]) -> "DocxDiffConsolidatedRevision":
+        fc = d.get("formatChange")
+        return cls(
+            type=DocxDiffRevisionType._from_wire(d["revisionType"]),
+            text=d.get("text", ""),
+            author=d.get("author", ""),
+            date=d.get("date", ""),
+            move_group_id=d.get("moveGroupId"),
+            is_move_source=d.get("isMoveSource"),
+            format_change=DocxDiffFormatChange._from_wire(fc) if fc else None,
+            left_anchor=d.get("leftAnchor"),
+            right_anchor=d.get("rightAnchor"),
+            conflict_id=d.get("conflictId"),
         )
 
 

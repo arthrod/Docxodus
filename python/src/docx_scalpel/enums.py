@@ -26,6 +26,7 @@ __all__ = [
     "EmptyParagraphMode",
     "AnchorIdRendering",
     "RegexOptions",
+    "ConflictResolution",
 ]
 
 
@@ -205,6 +206,17 @@ class AnchorIdRendering(IntEnum):
     FULL_UNID = 0
     ABBREVIATED = 1
     SEQUENTIAL = 2
+
+
+class ConflictResolution(IntEnum):
+    """How ``docx_diff_consolidate`` resolves competing edits at the same base span.
+
+    Integer-coded to match the .NET ``ConflictResolution`` enum positions.
+    """
+
+    BASE_WINS = 0
+    FIRST_REVIEWER_WINS = 1
+    STACK_ALL = 2
 
 
 class RegexOptions(IntFlag):
