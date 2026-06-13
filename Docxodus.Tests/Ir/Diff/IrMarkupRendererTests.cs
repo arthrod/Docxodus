@@ -1150,4 +1150,20 @@ public class IrMarkupRendererTests
             e.ErrorType == DocumentFormat.OpenXml.Validation.ValidationErrorType.Schema &&
             !OxPt.WcTests.ExpectedErrors.Contains(e.Description));
     }
+
+    // ----------------------------------------------------------------- author override (composite groundwork)
+
+    /// <summary>Regression pin: the two-way render path leaves <see cref="RenderState.AuthorOverride"/> null,
+    /// so every revision is still stamped with <see cref="DocxDiffSettings.AuthorForRevisions"/>. Guards that
+    /// adding the (composite-only) override does not change ordinary two-way output.</summary>
+    [Fact]
+    public void Author_override_null_keeps_settings_author()
+    {
+        var left = Docs.Para("alpha one", "beta two");
+        var right = Docs.Para("alpha one EDITED", "beta two");
+        var settings = new DocxDiffSettings { AuthorForRevisions = "Eric" };
+        var doc = DocxDiff.Compare(left, right, settings);
+        var xml = Docs.MainPartXml(doc);
+        Assert.Contains("w:author=\"Eric\"", xml);
+    }
 }

@@ -1057,7 +1057,7 @@ internal static class IrMarkupRenderer
         var start = new XElement(startName,
             new XAttribute(W.id, rangeId),
             new XAttribute(W.name, moveName),
-            new XAttribute(W.author, state.Settings.AuthorForRevisions),
+            new XAttribute(W.author, state.AuthorOverride ?? state.Settings.AuthorForRevisions),
             new XAttribute(W.date, state.Settings.DateTimeForRevisions));
         var end = new XElement(endName, new XAttribute(W.id, rangeId));
 
@@ -1675,6 +1675,10 @@ internal static class IrMarkupRenderer
         public IrDocument Right { get; }
         public IrDiffSettings Settings { get; }
 
+        /// <summary>When non-null, overrides Settings.AuthorForRevisions for emitted revision attributes
+        /// (composite multi-author rendering). Null for normal two-way render → behavior unchanged.</summary>
+        public string? AuthorOverride { get; set; }
+
         /// <summary>RIGHT-sourced clone roots (in document order) that may carry image relationship references
         /// the LEFT package cannot resolve. After they are placed in the new body (still the same XElement
         /// instances), <see cref="WmlComparer.MoveRelatedPartsToDestination"/> walks each and remaps ids in
@@ -1685,7 +1689,7 @@ internal static class IrMarkupRenderer
         /// <summary>Fresh (author, id, date) attribute triple for one revision element; id ascends from 1.</summary>
         public object[] RevisionAttributes() => new object[]
         {
-            new XAttribute(W.author, Settings.AuthorForRevisions),
+            new XAttribute(W.author, AuthorOverride ?? Settings.AuthorForRevisions),
             new XAttribute(W.id, _nextId++),
             new XAttribute(W.date, Settings.DateTimeForRevisions),
         };
