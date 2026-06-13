@@ -426,17 +426,21 @@ internal static class IrCompositeMerger
         return expected == baseTokenCount;
     }
 
-    // ---- Filled by Task 1.4 ----
+    // ---- Task 1.4: block-level merge dispatch ----
 
-    internal static Dictionary<string, List<(int Reviewer, IrEditOp Op)>> GroupInsertsByPrecedingAnchor(
-        IReadOnlyList<IrEditScript> scripts, List<string> baseOrder) => throw new System.NotImplementedException();
-
-    private static void EmitInsertsAt(
-        IReadOnlyDictionary<string, List<(int Reviewer, IrEditOp Op)>> insertsAfter,
-        string anchor,
-        IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
-        List<IrCompositeOp> ops) => throw new System.NotImplementedException();
-
+    /// <summary>
+    /// Merge the reviewers' ops anchored at one base block (<paramref name="anchor"/>) into the composite
+    /// op stream. Dispatch (spec §6 step 3):
+    /// <list type="bullet">
+    /// <item><b>Untouched / all-equal</b> → one base-sourced EqualBlock.</item>
+    /// <item><b>Single reviewer touched it</b> → that reviewer's op verbatim.</item>
+    /// <item><b>Consensus</b> (all touching ops produce the same right result) → one op (first reviewer).</item>
+    /// <item><b>All ModifyBlock paragraph edits</b> → token-span composition (<see cref="ComposeTokenSpans"/>):
+    /// disjoint word edits compose into one merged ModifyBlock with per-span authorship; overlapping word
+    /// edits become token conflicts resolved by <paramref name="policy"/>.</item>
+    /// <item><b>Anything else</b> (e.g. delete-vs-modify) → a BLOCK-LEVEL conflict resolved by policy.</item>
+    /// </list>
+    /// </summary>
     private static void MergeOneBaseBlock(
         string anchor,
         IReadOnlyDictionary<string, List<(int Reviewer, IrEditOp Op)>> byBase,
@@ -446,5 +450,180 @@ internal static class IrCompositeMerger
         IrDiffSettings settings,
         List<IrCompositeOp> ops,
         List<IrConflict> conflicts,
-        ref int nextConflictId) => throw new System.NotImplementedException();
+        ref int nextConflictId)
+    {
+        if (!byBase.TryGetValue(anchor, out var entries) ||
+            entries.All(e => e.Op.Kind == IrEditOpKind.EqualBlock))
+        {
+            ops.Add(EqualOp(anchor));
+            return;
+        }
+        var touched = entries.Where(e => e.Op.Kind != IrEditOpKind.EqualBlock).ToList();
+
+        if (touched.Count == 1)
+        {
+            var (rev, op) = touched[0];
+            ops.Add(new IrCompositeOp(op, reviewers[rev].Author, rev));
+            return;
+        }
+        if (AllOpsIdentical(touched, reviewers, settings))            // CONSENSUS
+        {
+            var (rev, op) = touched[0];
+            ops.Add(new IrCompositeOp(op, reviewers[rev].Author, rev));
+            return;
+        }
+        if (touched.All(e => e.Op.Kind == IrEditOpKind.ModifyBlock && e.Op.TokenDiff != null))
+        {
+            // TOKEN-SPAN COMPOSITION
+            var baseTokens = ParagraphBaseTokens(anchor, baseIr, settings);   // IReadOnlyList<IrDiffToken>
+            int baseCount = baseTokens.Count;
+            var reviewerDiffs = touched.Select(e =>
+                (e.Reviewer, reviewers[e.Reviewer].Author, e.Op.TokenDiff!,
+                 RightTokensFor(e.Op, reviewers[e.Reviewer].Ir, settings))).ToList();
+            var authored = ComposeTokenSpans(baseCount, reviewerDiffs, policy, anchor, nextConflictId, out var blockConflicts);
+            nextConflictId += blockConflicts.Count;
+            conflicts.AddRange(blockConflicts);
+            var merged = new IrTokenDiff(IrNodeList.From(authored.Select(a => a.Op)));
+            var structOp = touched[0].Op with { TokenDiff = merged };
+            ops.Add(new IrCompositeOp(structOp, "", touched[0].Reviewer, IrNodeList.From(authored),
+                blockConflicts.Count > 0 ? blockConflicts[0].Id : (int?)null));
+            return;
+        }
+        // BLOCK-LEVEL CONFLICT
+        var cid = nextConflictId++;
+        conflicts.Add(new IrConflict(cid, anchor, 0, 0, policy,
+            IrNodeList.From(touched.Select(e =>
+                new IrConflictCompetitor(reviewers[e.Reviewer].Author, BlockResultText(e.Op, reviewers[e.Reviewer].Ir, settings))))));
+        switch (policy)
+        {
+            case Docxodus.ConflictResolution.BaseWins:
+                ops.Add(EqualOp(anchor)); break;
+            case Docxodus.ConflictResolution.FirstReviewerWins:
+                ops.Add(new IrCompositeOp(touched[0].Op, reviewers[touched[0].Reviewer].Author, touched[0].Reviewer, null, cid)); break;
+            case Docxodus.ConflictResolution.StackAll:
+                foreach (var (rev, op) in touched)
+                    ops.Add(new IrCompositeOp(op, reviewers[rev].Author, rev, null, cid));
+                break;
+        }
+    }
+
+    /// <summary>A base-sourced EqualBlock op for <paramref name="anchor"/> (Author "", reviewer -1).</summary>
+    private static IrCompositeOp EqualOp(string anchor) =>
+        new(new IrEditOp(IrEditOpKind.EqualBlock, anchor, anchor, null, null, null), "", -1);
+
+    /// <summary>
+    /// Index every reviewer's right-only <see cref="IrEditOpKind.InsertBlock"/> op by the base anchor it
+    /// FOLLOWS — the <see cref="IrEditOp.LeftAnchor"/> of the most recent non-insert op in that reviewer's
+    /// script (or "" for inserts at the very top, before any base block). The composite emitter slots each
+    /// reviewer's inserts immediately after that anchor (<see cref="EmitInsertsAt"/>), so two reviewers both
+    /// inserting after the same base block both appear, attributed, with no conflict.
+    /// </summary>
+    internal static Dictionary<string, List<(int Reviewer, IrEditOp Op)>> GroupInsertsByPrecedingAnchor(
+        IReadOnlyList<IrEditScript> scripts, List<string> baseOrder)
+    {
+        var map = new Dictionary<string, List<(int Reviewer, IrEditOp Op)>>();
+        for (int i = 0; i < scripts.Count; i++)
+        {
+            string preceding = "";
+            foreach (var op in scripts[i].Operations)
+            {
+                if (op.Kind == IrEditOpKind.InsertBlock)
+                {
+                    if (!map.TryGetValue(preceding, out var list)) map[preceding] = list = new();
+                    list.Add((i, op));
+                }
+                else if (op.LeftAnchor != null) preceding = op.LeftAnchor;
+            }
+        }
+        return map;
+    }
+
+    /// <summary>
+    /// Emit every reviewer's inserts slotted after <paramref name="anchor"/> (in reviewer order, then the
+    /// reviewer's own insert order). Disjoint inserts from different reviewers both appear — there is no
+    /// insert-vs-insert conflict at the block level (the spec treats block inserts as independent additions).
+    /// </summary>
+    private static void EmitInsertsAt(
+        IReadOnlyDictionary<string, List<(int Reviewer, IrEditOp Op)>> insertsAfter,
+        string anchor,
+        IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
+        List<IrCompositeOp> ops)
+    {
+        if (!insertsAfter.TryGetValue(anchor, out var list)) return;
+        foreach (var (rev, op) in list)
+            ops.Add(new IrCompositeOp(op, reviewers[rev].Author, rev));
+    }
+
+    // ---- Task 1.4: result-equivalence + tokenization helpers ----
+
+    /// <summary>
+    /// True when every touched op produces the SAME right result, so the reviewers reached the same edit and
+    /// there is no conflict. Conservative: any shape we cannot prove equal returns false (falling through to
+    /// compose/conflict). A set of ModifyBlock ops is identical iff all resolve to byte-equal right paragraph
+    /// text; a set of DeleteBlock ops is identical (all delete the same base block to nothing). Mixed kinds —
+    /// including delete-vs-modify — are NOT identical.
+    /// </summary>
+    private static bool AllOpsIdentical(
+        List<(int Reviewer, IrEditOp Op)> touched,
+        IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
+        IrDiffSettings settings)
+    {
+        var kind = touched[0].Op.Kind;
+        if (touched.Any(e => e.Op.Kind != kind))
+            return false;
+
+        if (kind == IrEditOpKind.DeleteBlock)
+            return true;
+
+        if (kind == IrEditOpKind.ModifyBlock)
+        {
+            string first = BlockResultText(touched[0].Op, reviewers[touched[0].Reviewer].Ir, settings);
+            return touched.All(e =>
+                BlockResultText(e.Op, reviewers[e.Reviewer].Ir, settings) == first);
+        }
+
+        return false;
+    }
+
+    /// <summary>Tokenize the BASE paragraph at <paramref name="anchor"/> exactly as
+    /// <see cref="IrEditScriptBuilder"/> tokenizes a Modified pair's left side, so token indices line up with
+    /// the reviewers' <see cref="IrEditOp.TokenDiff"/> left coordinates. Non-paragraph (or unknown) anchors
+    /// yield an empty list.</summary>
+    private static IReadOnlyList<IrDiffToken> ParagraphBaseTokens(
+        string anchor, IrDocument baseIr, IrDiffSettings settings) =>
+        TokenizeAnchor(anchor, baseIr, settings);
+
+    /// <summary>Tokenize the reviewer's RIGHT paragraph (<paramref name="op"/>'s <see cref="IrEditOp.RightAnchor"/>)
+    /// exactly as <see cref="IrEditScriptBuilder"/> tokenizes a Modified pair's right side, so token indices
+    /// line up with <paramref name="op"/>'s <see cref="IrEditOp.TokenDiff"/> right coordinates. This supplies
+    /// the inserted-text source <see cref="ComposeTokenSpans"/> needs.</summary>
+    private static IReadOnlyList<IrDiffToken> RightTokensFor(
+        IrEditOp op, IrDocument reviewerIr, IrDiffSettings settings) =>
+        op.RightAnchor is { } ra ? TokenizeAnchor(ra, reviewerIr, settings) : System.Array.Empty<IrDiffToken>();
+
+    /// <summary>Resolve <paramref name="anchor"/> to a block in <paramref name="ir"/> and tokenize it with the
+    /// SAME entry the diff builder used (<see cref="IrDiffTokenizer.Tokenize"/>). Empty for an unknown anchor
+    /// or a non-paragraph block.</summary>
+    private static IReadOnlyList<IrDiffToken> TokenizeAnchor(string anchor, IrDocument ir, IrDiffSettings settings) =>
+        ir.AnchorIndex.TryGetValue(anchor, out var block) && block is IrParagraph p
+            ? IrDiffTokenizer.Tokenize(p, settings)
+            : System.Array.Empty<IrDiffToken>();
+
+    /// <summary>
+    /// The accepted (right) text the reviewer's op would produce: the concatenated token text of the right
+    /// paragraph for a ModifyBlock (or any op carrying a <see cref="IrEditOp.RightAnchor"/>), and "" for a
+    /// DeleteBlock (no right anchor — the block is removed). Used for conflict-competitor reporting and the
+    /// consensus check. Tokenizing for text uses the diff tokenizer so the text matches what the diff sees.
+    /// </summary>
+    private static string BlockResultText(IrEditOp op, IrDocument reviewerIr, IrDiffSettings settings)
+    {
+        if (op.RightAnchor is not { } ra)
+            return "";
+        if (!reviewerIr.AnchorIndex.TryGetValue(ra, out var block) || block is not IrParagraph p)
+            return "";
+        var sb = new System.Text.StringBuilder();
+        foreach (var t in IrDiffTokenizer.Tokenize(p, settings))
+            sb.Append(t.Text);
+        return sb.ToString();
+    }
 }
