@@ -665,6 +665,83 @@ public class IrMarkupRendererTests
         AssertRoundTrip(leftDoc, right, label: "hyperlink-present-edit-outside");
     }
 
+    /// <summary>
+    /// Build a one-paragraph body holding TWO ADJACENT <c>w:hyperlink</c> siblings that share the SAME target
+    /// (both reference relationship id "rIdLink"). The two links are genuinely DISTINCT source elements that
+    /// merely happen to point at the same URI — a shape Word produces routinely (two authored links to one page).
+    /// <paramref name="firstInner"/> / <paramref name="secondInner"/> are the inner XML of each hyperlink.
+    /// </summary>
+    private static WmlDocument TwoAdjacentSameTargetLinks(string firstInner, string secondInner)
+    {
+        var body =
+            "<w:p>" +
+            $"<w:hyperlink r:id=\"rIdLink\" xmlns:r=\"{RelsNs}\">{firstInner}</w:hyperlink>" +
+            $"<w:hyperlink r:id=\"rIdLink\" xmlns:r=\"{RelsNs}\">{secondInner}</w:hyperlink>" +
+            "</w:p>";
+        return Docxodus.Tests.Ir.IrTestDocuments.FromBodyXmlWithHyperlinks(
+            body, ("rIdLink", "https://example.com"));
+    }
+
+    /// <summary>
+    /// REGRESSION (F2 follow-up): two ADJACENT, genuinely-DISTINCT source <c>w:hyperlink</c>s that share the
+    /// same target ("first" / "second"); the RIGHT edits the SECOND link's anchor ("second" → "SECOND"). The F2
+    /// fragment-coalescer rejoined emitted hyperlink fragments by ATTRIBUTE EQUALITY gated on "carries a plain
+    /// run", which could not tell "N fragments of ONE split source link" from "N distinct source links sharing a
+    /// target": it folded all three emitted fragments into ONE link, so REJECT yielded ONE link ("firstsecond")
+    /// while LEFT had TWO — RejectRevisions ≢ left at the ContentHash level (IrReader frames each hyperlink
+    /// boundary). The source-wrapper-identity coalescer must keep the two distinct links separate.
+    /// </summary>
+    [Fact]
+    public void Adjacent_distinct_same_target_hyperlinks_one_edited_round_trips()
+    {
+        var left = TwoAdjacentSameTargetLinks(
+            "<w:r><w:t>first</w:t></w:r>", "<w:r><w:t>second</w:t></w:r>");
+        var right = TwoAdjacentSameTargetLinks(
+            "<w:r><w:t>first</w:t></w:r>", "<w:r><w:t>SECOND</w:t></w:r>");
+
+        var rl = DocxDiff.Compare(left, right);
+
+        Assert.Equal(Docs.PlainText(left), Docs.PlainText(RevisionProcessor.RejectRevisions(rl)));   // reject ≡ left
+        Assert.Equal(Docs.PlainText(right), Docs.PlainText(RevisionAccepter.AcceptRevisions(rl)));   // accept ≡ right
+        AssertRoundTrip(left, right, label: "adjacent-distinct-same-target-one-edited");
+    }
+
+    /// <summary>
+    /// REGRESSION guard: the same two adjacent distinct same-target links with NO edit must NOT collapse into
+    /// one link — reject ≡ left ≡ accept at the ContentHash level (two link boundaries preserved both ways).
+    /// </summary>
+    [Fact]
+    public void Adjacent_distinct_same_target_hyperlinks_unchanged_stay_separate()
+    {
+        var doc = TwoAdjacentSameTargetLinks(
+            "<w:r><w:t>first</w:t></w:r>", "<w:r><w:t>second</w:t></w:r>");
+
+        var rl = DocxDiff.Compare(doc, doc);
+
+        Assert.Equal(Docs.PlainText(doc), Docs.PlainText(RevisionProcessor.RejectRevisions(rl)));   // reject ≡ left
+        Assert.Equal(Docs.PlainText(doc), Docs.PlainText(RevisionAccepter.AcceptRevisions(rl)));    // accept ≡ right
+        AssertRoundTrip(doc, doc, label: "adjacent-distinct-same-target-unchanged");
+    }
+
+    /// <summary>
+    /// Edge pin: a single-token hyperlink anchor with NO separator ("aaaa" → "zzzz") FULLY replaced — there is
+    /// no Equal (plain) run inside the link, so the emitted fragment is a pure del-link followed by a pure
+    /// ins-link. Reject ≡ left, accept ≡ right; pins that the no-Equal-run intra-link replace still round-trips
+    /// after the coalescer drops reliance on the plain-run gate.
+    /// </summary>
+    [Fact]
+    public void Hyperlink_single_token_anchor_no_equal_run_replaced_round_trips()
+    {
+        var left = HyperlinkPara("<w:r><w:t>aaaa</w:t></w:r>");
+        var right = HyperlinkPara("<w:r><w:t>zzzz</w:t></w:r>");
+
+        var rl = DocxDiff.Compare(left, right);
+
+        Assert.Equal(Docs.PlainText(left), Docs.PlainText(RevisionProcessor.RejectRevisions(rl)));   // reject ≡ left
+        Assert.Equal(Docs.PlainText(right), Docs.PlainText(RevisionAccepter.AcceptRevisions(rl)));   // accept ≡ right
+        AssertRoundTrip(left, right, label: "hyperlink-single-token-no-equal-run");
+    }
+
     [Fact]
     [Trait("Category", "Corpus")]
     public void Render_endnote_edit_lands_markup_inside_endnotes_part_and_round_trips()

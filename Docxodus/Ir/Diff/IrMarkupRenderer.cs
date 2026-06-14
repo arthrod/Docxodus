@@ -84,6 +84,12 @@ namespace Docxodus.Ir.Diff;
 /// </remarks>
 internal static class IrMarkupRenderer
 {
+    /// <summary>TRANSIENT marker attribute carrying a source <c>w:hyperlink</c>'s document-order ordinal onto
+    /// each emitted wrapper clone, so <see cref="CoalesceAdjacentHyperlinks"/> can rejoin ONLY the fragments of
+    /// the SAME source link. In the <c>pt:</c> namespace so the body's blanket <c>pt:</c> strip would catch any
+    /// stray, but the coalescer removes it explicitly before output regardless.</summary>
+    private static readonly XName SourceLinkId = PtOpenXml.pt + "SourceLinkId";
+
     /// <summary>
     /// Render <paramref name="script"/> into a tracked-revisions <see cref="WmlDocument"/> on the LEFT
     /// document's package. <paramref name="left"/>/<paramref name="right"/> are the original documents the
@@ -1564,18 +1570,27 @@ internal static class IrMarkupRenderer
     /// <summary>
     /// Merge consecutive <c>w:hyperlink</c> siblings that are PIECES OF ONE SOURCE LINK back into a single
     /// <c>w:hyperlink</c>. The token-op walk slices a hyperlink whose anchor is edited INTERNALLY into one wrapper
-    /// per overlapping op (e.g. Equal "our " then del "website" then ins "homepage"), all bearing the same link
-    /// attributes; without re-joining them the rendered structure would be N adjacent links instead of the
-    /// source's one, so accept/reject would match only at the text level, not the block ContentHash level.
+    /// per overlapping op (e.g. Equal "our " then del "website" then ins "homepage"); without re-joining them the
+    /// rendered structure would be N adjacent links instead of the source's one, so accept/reject would match
+    /// only at the text level, not the block ContentHash level.
     ///
-    /// The merge is GATED to never join two links that may be DIFFERENT targets. A wrapper is "revision-pure"
-    /// when all its run-level children are <c>w:del</c>/<c>w:ins</c> (no plain <c>w:r</c>). The whole-anchor
-    /// retarget case (WC019: a link's text AND href both change → pure <c>w:del</c>-link of the OLD target
-    /// followed by a pure <c>w:ins</c>-link of the NEW target, the new id remapped post-assembly) is exactly a
-    /// revision-pure-followed-by-revision-pure adjacency — those MUST stay separate so the remap and the
-    /// empty-shell-drop on accept restore the right/left link each side. An intra-anchor edit always carries an
-    /// Equal (plain-run) piece that anchors the group, so its del/ins pieces fold into a link that already holds
-    /// a plain run — the gate lets that through. Same-shell, same-target: semantics-preserving when merged.
+    /// Adjacency is grouped by SOURCE-LINK IDENTITY (the transient <see cref="SourceLinkId"/> ordinal stamped in
+    /// <see cref="SourceRunModel.Slice"/>), NOT by attribute equality. Two genuinely DISTINCT adjacent source
+    /// links that happen to share a target carry DIFFERENT ordinals, so they never group — fixing the regression
+    /// where attribute-equality grouping folded an unedited link plus the next link's edit into one link, so
+    /// reject collapsed two source links into one (ContentHash divergence). All fragments of ONE edited link
+    /// share the ordinal (the LEFT and RIGHT models number their Nth hyperlink identically), so an intra-anchor
+    /// edit's Equal/del/ins pieces group together.
+    ///
+    /// The merge is still GATED to never join two links that may be DIFFERENT targets at the SAME ordinal. A
+    /// wrapper is "revision-pure" when all its run-level children are <c>w:del</c>/<c>w:ins</c> (no plain
+    /// <c>w:r</c>). The whole-anchor retarget case (WC019: a link's text AND href both change → pure
+    /// <c>w:del</c>-link of the OLD target followed by a pure <c>w:ins</c>-link of the NEW target, the new id
+    /// remapped post-assembly) is ordinal-0 del + ordinal-0 ins with NO plain piece — those MUST stay separate
+    /// so the remap + empty-shell-drop restore the right/left link on each side. An intra-anchor TEXT edit always
+    /// carries an Equal (plain-run) piece that anchors the group, so its del/ins pieces fold into a link that
+    /// already holds a plain run — the gate lets that through. The transient ordinal marker is stripped from
+    /// every wrapper before return so it never reaches output.
     /// </summary>
     private static List<XElement> CoalesceAdjacentHyperlinks(List<XElement> content)
     {
@@ -1591,21 +1606,20 @@ internal static class IrMarkupRenderer
                 continue;
             }
 
-            // Gather the maximal run of adjacent same-shell hyperlinks starting here. They are pieces of the same
-            // token-op walk over one source-link char span; the slicer emits one wrapper per overlapping op.
+            // Gather the maximal run of adjacent hyperlinks that came from the SAME source link (same
+            // SourceLinkId ordinal). They are pieces of the same token-op walk over one source-link char span;
+            // the slicer emits one wrapper per overlapping op. Distinct adjacent links carry distinct ordinals and
+            // so end the run, even when their attributes (target) coincide.
             int j = i + 1;
-            while (j < content.Count && content[j].Name == W.hyperlink && SameHyperlinkShell(el, content[j]))
+            while (j < content.Count && content[j].Name == W.hyperlink && SameSourceLink(el, content[j]))
                 j++;
 
             int runLen = j - i;
             // Coalesce the run into ONE w:hyperlink IFF it carries at least one plain (Equal/unchanged) run — the
-            // signal that the link is the SAME target on both sides (the diff matched some anchor text, so the
-            // tokenizer's target-suffixed keys agreed). A run with NO plain piece is a pure del→ins retarget
-            // (WC019: text AND href both change → del-link of the OLD target, ins-link of the NEW target, the new
-            // id remapped post-assembly) — those MUST stay separate so the remap + empty-shell-drop restore the
-            // right/left link on each side. (Adjacent DISTINCT same-shell source links are rare and, when the
-            // run carries a plain anchor, merging them is semantics-preserving anyway: same attributes, same
-            // target string.)
+            // signal that some anchor text matched on both sides (so the link's target is the SAME on both sides).
+            // A run with NO plain piece is a pure del→ins retarget (WC019: text AND href both change → del-link of
+            // the OLD target, ins-link of the NEW target, the new id remapped post-assembly) — those MUST stay
+            // separate so the remap + empty-shell-drop restore the right/left link on each side.
             bool anyPlainRun = false;
             for (int k = i; k < j; k++)
                 if (!IsRevisionPureHyperlink(content[k]))
@@ -1628,7 +1642,27 @@ internal static class IrMarkupRenderer
             }
             i = j;
         }
+
+        // Strip the transient source-link ordinal marker from every emitted wrapper so it never reaches output.
+        // (The body-wide pt: sweep in Render would also catch it, but stripping here keeps the marker an internal
+        // detail of the coalescer and protects callers that inspect the returned content before that sweep.)
+        foreach (var el in merged)
+            if (el.Name == W.hyperlink)
+                el.Attribute(SourceLinkId)?.Remove();
         return merged;
+    }
+
+    /// <summary>True iff two emitted <c>w:hyperlink</c> wrappers came from the SAME source link — i.e. they carry
+    /// the same transient <see cref="SourceLinkId"/> ordinal. A wrapper with no ordinal (defensive: a hyperlink
+    /// that bypassed the ordinal-stamping slice path) matches only another with no ordinal AND the same target
+    /// shell, so it never spuriously groups with a distinct link.</summary>
+    private static bool SameSourceLink(XElement a, XElement b)
+    {
+        var ao = a.Attribute(SourceLinkId)?.Value;
+        var bo = b.Attribute(SourceLinkId)?.Value;
+        if (ao != null || bo != null)
+            return ao == bo;
+        return SameHyperlinkShell(a, b);
     }
 
     /// <summary>True iff a <c>w:hyperlink</c> carries no plain (Equal/unchanged) run — every run-level child is a
@@ -2016,6 +2050,15 @@ internal static class IrMarkupRenderer
         /// twice across adjacent token ops. Keyed by reference identity.</summary>
         private readonly HashSet<XElement> _claimedZeroWidth = new();
 
+        /// <summary>0-based ordinal of each top-level source <c>w:hyperlink</c> element within this paragraph, in
+        /// document order, keyed by the source element's reference identity. The LEFT and RIGHT models walk their
+        /// paragraphs in the same order, so the Nth hyperlink on each side gets the SAME ordinal — a STABLE
+        /// per-source-link id that <see cref="CoalesceAdjacentHyperlinks"/> uses to rejoin ONLY the fragments of
+        /// ONE source link (an intra-anchor edit emits its Equal/del/ins pieces under one ordinal), and to keep
+        /// genuinely DISTINCT adjacent links (different ordinals) separate even when they share a target.</summary>
+        private readonly Dictionary<XElement, int> _hyperlinkOrdinal = new(ReferenceEqualityComparer.Instance);
+        private int _nextHyperlinkOrdinal;
+
         public SourceRunModel(XElement para)
         {
             int charOffset = 0;
@@ -2041,6 +2084,10 @@ internal static class IrMarkupRenderer
                 // before (sum of descendant w:t lengths), so token char coordinates are unchanged. (Other
                 // containers — sdt/smartTag/ins/del — stay atomic but are now claim-tracked in Slice so they too
                 // emit once across overlapping ops; only the hyperlink needs intra-anchor splitting to round-trip.)
+                // Assign this hyperlink its document-order ordinal (nested hyperlinks are schema-invalid, so only
+                // top-level hyperlinks are numbered). Slice stamps the ordinal onto each emitted wrapper clone so
+                // the coalescer can rejoin only fragments of the SAME source link.
+                _hyperlinkOrdinal[runLevel] = _nextHyperlinkOrdinal++;
                 var childChain = chain.Append(runLevel);
                 bool anyChild = false;
                 foreach (var child in runLevel.Elements())
@@ -2149,7 +2196,13 @@ internal static class IrMarkupRenderer
                     for (int i = groupChain.Count - 1; i >= 0; i--)
                     {
                         var shell = groupChain[i];
-                        content = new XElement(shell.Name, shell.Attributes(), content);
+                        var wrapper = new XElement(shell.Name, shell.Attributes(), content);
+                        // Tag a hyperlink wrapper with its source-link ordinal (a TRANSIENT pt: marker the
+                        // coalescer reads and then strips) so adjacent emitted fragments are rejoined ONLY when
+                        // they came from the SAME source w:hyperlink — never two distinct links sharing a target.
+                        if (shell.Name == W.hyperlink && _hyperlinkOrdinal.TryGetValue(shell, out int ord))
+                            wrapper.SetAttributeValue(SourceLinkId, ord);
+                        content = wrapper;
                     }
                     if (content is XElement single)
                         result.Add(single);
