@@ -86,6 +86,28 @@ path (`HCO052`). A DOM block's anchor is a valid session/render anchor.
   well under the <150 ms/edit target. The session-attached path is committed and exposed
   through WASM/npm (`DocxSession.renderBlock`).
 
+**Editor MVP built & proven (`npm/src/editor.ts`, `npm/tests/editor.spec.ts`).** A
+framework-agnostic `DocxEditor` (pure TS) renders a faithful document with `data-anchor`
+blocks, makes projection-addressable paragraphs/headings `contenteditable`, and on blur
+commits via `DocxSession` then re-renders **only that block** from the live session.
+Browser test on HC031: render **90 editable blocks** → edit one → only that block
+re-renders → save (39 KB) reopens with the edit persisted **and** untouched content intact
+(lossless). Two findings that refine the design:
+- **Anchors are stable within a live session.** `ReplaceText` mutates runs in place and
+  does NOT re-derive the paragraph's Unid (deterministic assignment only fills *absent*
+  Unids), so the edited block keeps its anchor mid-session — the §6.3 stable-key concern is
+  milder than assumed (a client-side key registry is not needed for within-session edits;
+  it only matters across save/reopen, where the content-hash Unid legitimately changes).
+- **HTML stamps more anchors than the projection indexes.** Paragraphs inside opaque
+  tables get a `data-anchor` but are not individually addressable via the markdown/
+  `ReplaceText` path, so the editor only makes projection-addressable blocks editable;
+  table-cell editing (via `ReplaceCellContent`) is future work.
+
+**Still Plan 2 (not yet built):** worker offload of the editing surface (the MVP runs on
+the main thread; fine for debounced per-block edits, needed for heavy docs), block-flow
+**pagination** integration (page boxes via `pagination.ts`), rich in-block formatting on
+edit (the MVP replaces an edited block from plain text), and a React wrapper.
+
 What was built to clear it (committed):
 - `WmlToHtmlConverterSettings.StampAnchors` → stamps `data-anchor=Unid` on
   `p`/`h*`/`li`/`table` (`WmlToHtmlConverter.cs`).
