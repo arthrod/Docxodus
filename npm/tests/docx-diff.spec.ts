@@ -115,3 +115,95 @@ test.describe('DocxDiff (IR diff engine) bridge', () => {
     expect(Array.isArray(result.revisions)).toBe(true);
   });
 });
+
+// Composite N-way consolidate: merge two reviewers' edits against a shared base.
+// Uses the same WC fixtures — base is the original, both reviewers edit the same
+// modified span (under distinct authors) so the second reviewer overlaps the
+// first, exercising the conflict path.
+test.describe('DocxDiff consolidate (composite N-way) bridge', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/test-harness.html');
+    await waitForDocxodus(page);
+  });
+
+  test('Consolidate two reviewers returns redlined DOCX bytes', async ({ page }) => {
+    const base = readTestFile('WC/WC001-Digits.docx');
+    const rev = readTestFile('WC/WC001-Digits-Mod.docx');
+
+    const result = await page.evaluate(
+      ([b, r]) => {
+        const res = (window as any).DocxodusTests.docxDiffConsolidate(
+          new Uint8Array(b),
+          [
+            { author: 'Alice', document: new Uint8Array(r) },
+            { author: 'Bob', document: new Uint8Array(r) },
+          ]
+        );
+        return res.docxBytes ? { length: res.docxBytes.length } : res;
+      },
+      [Array.from(base), Array.from(rev)]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.length).toBeGreaterThan(1000);
+  });
+
+  test('GetConflicts reports overlapping reviewer edits', async ({ page }) => {
+    // Two reviewers edit the SAME word differently ("quick" -> "SLOW" vs "FAST"),
+    // which is a genuine cross-reviewer token-overlap conflict. (Two reviewers making
+    // the IDENTICAL edit would be a consensus, not a conflict, and yield zero.)
+    const base = readTestFile('RC/RC100-Conflict-Base.docx');
+    const alice = readTestFile('RC/RC100-Conflict-Alice.docx');
+    const bob = readTestFile('RC/RC100-Conflict-Bob.docx');
+
+    const result = await page.evaluate(
+      ([b, a, f]) => {
+        return (window as any).DocxodusTests.docxDiffGetConflicts(
+          new Uint8Array(b),
+          [
+            { author: 'Alice', document: new Uint8Array(a) },
+            { author: 'Bob', document: new Uint8Array(f) },
+          ]
+        );
+      },
+      [Array.from(base), Array.from(alice), Array.from(bob)]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(Array.isArray(result.conflicts)).toBe(true);
+    // The overlapping edit on the same word produces at least one conflict, each
+    // with its competing per-author variants.
+    expect(result.conflicts.length).toBeGreaterThan(0);
+    for (const c of result.conflicts) {
+      expect(typeof c.baseAnchor).toBe('string');
+      expect(Array.isArray(c.competitors)).toBe(true);
+      expect(c.competitors.length).toBeGreaterThan(0);
+    }
+  });
+
+  test('GetConsolidatedRevisions returns multi-author revisions', async ({ page }) => {
+    const base = readTestFile('WC/WC001-Digits.docx');
+    const rev = readTestFile('WC/WC001-Digits-Mod.docx');
+
+    const result = await page.evaluate(
+      ([b, r]) => {
+        return (window as any).DocxodusTests.docxDiffGetConsolidatedRevisions(
+          new Uint8Array(b),
+          [
+            { author: 'Alice', document: new Uint8Array(r) },
+            { author: 'Bob', document: new Uint8Array(r) },
+          ]
+        );
+      },
+      [Array.from(base), Array.from(rev)]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(Array.isArray(result.revisions)).toBe(true);
+    expect(result.revisions.length).toBeGreaterThan(0);
+    for (const rv of result.revisions) {
+      expect(typeof rv.revisionType).toBe('string');
+      expect(typeof rv.author).toBe('string');
+    }
+  });
+});

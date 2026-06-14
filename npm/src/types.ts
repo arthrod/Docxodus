@@ -483,6 +483,80 @@ export interface DocxDiffRevision {
   rightAnchor?: string;
 }
 
+// ─── DocxDiff consolidate (composite N-way) ─────────────────────────────────
+//
+// The composite layer over the IR diff engine: merge several reviewers' edits
+// against one shared base DOCX. Mirrors the .NET consolidate surface
+// (`DocxDiff.Consolidate` / `GetConflicts` / `GetConsolidatedRevisions` /
+// `GetConsolidatedEditScriptJson`) — see `docs/architecture/ir_diff_engine.md`.
+
+/**
+ * How overlapping reviewer edits at the same base token span are resolved.
+ * Integer values match the .NET `ConflictResolution` enum positions.
+ */
+export enum ConflictResolution {
+  /** Keep the base text where reviewers disagree (the default). */
+  BaseWins = 0,
+  /** The first reviewer (by input order) wins each contested span. */
+  FirstReviewerWins = 1,
+  /** Stack every reviewer's variant so a human can pick. */
+  StackAll = 2,
+}
+
+/** One reviewer's edited copy of the shared base document, plus their name. */
+export interface DocxDiffReviewer {
+  /** The reviewer's edited DOCX bytes. */
+  document: Uint8Array;
+  /** Author name stamped on this reviewer's revisions in the consolidated output. */
+  author: string;
+}
+
+/**
+ * Settings for the `docxDiffConsolidate*` functions. Extends {@link DocxDiffSettings}
+ * with the conflict-resolution policy; mirrors the .NET `DocxDiffConsolidateSettings`.
+ */
+export interface DocxDiffConsolidateSettings extends DocxDiffSettings {
+  /** Policy for overlapping reviewer edits (default {@link ConflictResolution.BaseWins}). */
+  conflictResolution?: ConflictResolution;
+}
+
+/** One reviewer's contested variant at a conflict span. */
+export interface DocxDiffConflictCompetitor {
+  /** The reviewer whose variant this is. */
+  author: string;
+  /** The text this reviewer would produce for the contested span. */
+  resultText: string;
+}
+
+/**
+ * A single conflict: two or more reviewers edited the same base token span
+ * incompatibly. Returned by {@link docxDiffGetConflicts}.
+ */
+export interface DocxDiffConflict {
+  /** Stable id for this conflict within the consolidation. */
+  id: number;
+  /** The base-document block anchor (`kind:scope:unid`) the conflict sits in. */
+  baseAnchor: string;
+  /** First contested base token index (inclusive). */
+  tokenStart: number;
+  /** Last contested base token index (exclusive). */
+  tokenEnd: number;
+  /** The {@link ConflictResolution} policy that was applied to this conflict. */
+  policy: ConflictResolution | number;
+  /** The competing reviewer variants. */
+  competitors: DocxDiffConflictCompetitor[];
+}
+
+/**
+ * One revision from {@link docxDiffGetConsolidatedRevisions}. A
+ * {@link DocxDiffRevision} plus the id of the conflict it participates in
+ * (when it sits in a contested span).
+ */
+export interface DocxDiffConsolidatedRevision extends DocxDiffRevision {
+  /** The {@link DocxDiffConflict.id} this revision belongs to, if any. */
+  conflictId?: number;
+}
+
 /**
  * Type guard to check if a revision is an insertion.
  * @param revision - The revision to check
@@ -843,6 +917,30 @@ export interface DocxodusWasmExports {
     GetEditScriptJson: (
       leftBytes: Uint8Array,
       rightBytes: Uint8Array,
+      settingsJson: string
+    ) => string;
+    /** Consolidated redlined DOCX bytes (native markup), or empty array on error. */
+    Consolidate: (
+      baseBytes: Uint8Array,
+      reviewersJson: string,
+      settingsJson: string
+    ) => Uint8Array;
+    /** `{"revisions":[…]}` JSON for the consolidation, or a JSON error object. */
+    GetConsolidatedRevisionsJson: (
+      baseBytes: Uint8Array,
+      reviewersJson: string,
+      settingsJson: string
+    ) => string;
+    /** Consolidated edit-script JSON (diff-as-data), or a JSON error object. */
+    GetConsolidatedEditScriptJson: (
+      baseBytes: Uint8Array,
+      reviewersJson: string,
+      settingsJson: string
+    ) => string;
+    /** `{"conflicts":[…]}` JSON for the consolidation, or a JSON error object. */
+    GetConflictsJson: (
+      baseBytes: Uint8Array,
+      reviewersJson: string,
       settingsJson: string
     ) => string;
   };

@@ -194,4 +194,212 @@ internal static class DocxDiffOps
         }
         sb.Append('}');
     }
+
+    // ---- Consolidate (composite N-way) wire surface --------------------------
+    //
+    // Reviewers arrive as a JSON array, each element carrying the reviewer's
+    // author name and their full revised DOCX as base64:
+    //   [{"author":"Bob","docB64":"<base64 docx>"}, ...]
+    // Settings reuse the diff settings object (same camelCase fields parsed by
+    // ParseSettings) and additionally carry an optional integer
+    // "conflictResolution" (0=BaseWins,1=FirstReviewerWins,2=StackAll).
+
+    /// <summary>Consolidate N reviewer documents against a base; return the merged DOCX bytes.</summary>
+    public static byte[] Consolidate(byte[] baseBytes, string reviewersJson, string? settingsJson)
+    {
+        if (baseBytes == null || baseBytes.Length == 0)
+            throw new ArgumentException("No base document data provided", nameof(baseBytes));
+
+        var baseDoc = new WmlDocument("base.docx", baseBytes);
+        var reviewers = ParseReviewers(reviewersJson);
+        var settings = ParseConsolidateSettings(settingsJson);
+        return DocxDiff.Consolidate(baseDoc, reviewers, settings).DocumentByteArray;
+    }
+
+    /// <summary>Consolidate; return the merged revision list as JSON.</summary>
+    public static string GetConsolidatedRevisionsJson(byte[] baseBytes, string reviewersJson, string? settingsJson)
+    {
+        if (baseBytes == null || baseBytes.Length == 0)
+            throw new ArgumentException("No base document data provided", nameof(baseBytes));
+
+        var baseDoc = new WmlDocument("base.docx", baseBytes);
+        var revs = DocxDiff.GetConsolidatedRevisions(
+            baseDoc, ParseReviewers(reviewersJson), ParseConsolidateSettings(settingsJson));
+        return SerializeConsolidatedRevisions(revs);
+    }
+
+    /// <summary>Consolidate; return the merged edit script as JSON.</summary>
+    public static string GetConsolidatedEditScriptJson(byte[] baseBytes, string reviewersJson, string? settingsJson)
+    {
+        if (baseBytes == null || baseBytes.Length == 0)
+            throw new ArgumentException("No base document data provided", nameof(baseBytes));
+
+        var baseDoc = new WmlDocument("base.docx", baseBytes);
+        return DocxDiff.GetConsolidatedEditScriptJson(
+            baseDoc, ParseReviewers(reviewersJson), ParseConsolidateSettings(settingsJson));
+    }
+
+    /// <summary>Consolidate; return the per-token conflict report as JSON.</summary>
+    public static string GetConflictsJson(byte[] baseBytes, string reviewersJson, string? settingsJson)
+    {
+        if (baseBytes == null || baseBytes.Length == 0)
+            throw new ArgumentException("No base document data provided", nameof(baseBytes));
+
+        var baseDoc = new WmlDocument("base.docx", baseBytes);
+        var conflicts = DocxDiff.GetConflicts(
+            baseDoc, ParseReviewers(reviewersJson), ParseConsolidateSettings(settingsJson));
+        return SerializeConflicts(conflicts);
+    }
+
+    /// <summary>
+    /// Parse the reviewer transport array
+    /// <c>[{"author":"Bob","docB64":"&lt;base64 docx&gt;"}, ...]</c> into
+    /// <see cref="DocxDiffReviewer"/> objects. A null/empty/whitespace string or
+    /// a non-array yields an empty list; elements missing <c>docB64</c> are skipped.
+    /// </summary>
+    public static List<DocxDiffReviewer> ParseReviewers(string reviewersJson)
+    {
+        var reviewers = new List<DocxDiffReviewer>();
+        if (string.IsNullOrWhiteSpace(reviewersJson))
+            return reviewers;
+
+        using var doc = JsonDocument.Parse(reviewersJson);
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Array)
+            return reviewers;
+
+        foreach (var el in root.EnumerateArray())
+        {
+            if (el.ValueKind != JsonValueKind.Object)
+                continue;
+            if (!el.TryGetProperty("docB64", out var docB64) || docB64.ValueKind != JsonValueKind.String)
+                continue;
+            var b64 = docB64.GetString();
+            if (string.IsNullOrEmpty(b64))
+                continue;
+
+            var author = el.TryGetProperty("author", out var a) && a.ValueKind == JsonValueKind.String
+                ? a.GetString()!
+                : string.Empty;
+
+            reviewers.Add(new DocxDiffReviewer
+            {
+                Author = author,
+                Document = new WmlDocument("reviewer.docx", Convert.FromBase64String(b64!)),
+            });
+        }
+        return reviewers;
+    }
+
+    /// <summary>
+    /// Parse consolidate settings: the same JSON object carries the diff fields
+    /// (parsed via <see cref="ParseSettings"/>) plus an optional integer
+    /// <c>conflictResolution</c> (0=BaseWins,1=FirstReviewerWins,2=StackAll).
+    /// </summary>
+    public static DocxDiffConsolidateSettings ParseConsolidateSettings(string? settingsJson)
+    {
+        var settings = new DocxDiffConsolidateSettings { Diff = ParseSettings(settingsJson) };
+        if (string.IsNullOrWhiteSpace(settingsJson))
+            return settings;
+
+        using var doc = JsonDocument.Parse(settingsJson);
+        var root = doc.RootElement;
+        if (root.ValueKind == JsonValueKind.Object &&
+            root.TryGetProperty("conflictResolution", out var cr) && cr.ValueKind == JsonValueKind.Number)
+        {
+            settings.ConflictResolution = cr.GetInt32() switch
+            {
+                1 => ConflictResolution.FirstReviewerWins,
+                2 => ConflictResolution.StackAll,
+                _ => ConflictResolution.BaseWins,
+            };
+        }
+        return settings;
+    }
+
+    /// <summary>
+    /// Serialize a consolidated revision list to the wire JSON shape — mirrors
+    /// <see cref="SerializeRevisions"/> with the added <c>conflictId</c> field
+    /// (<c>author</c> is already present on every revision).
+    /// </summary>
+    public static string SerializeConsolidatedRevisions(IReadOnlyList<DocxDiffConsolidatedRevision> revisions)
+    {
+        var sb = new StringBuilder(256);
+        sb.Append("{\"revisions\":[");
+        for (var i = 0; i < revisions.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            AppendConsolidatedRevision(sb, revisions[i]);
+        }
+        sb.Append("]}");
+        return sb.ToString();
+    }
+
+    private static void AppendConsolidatedRevision(StringBuilder sb, DocxDiffConsolidatedRevision r)
+    {
+        sb.Append("{\"revisionType\":").Append(DocxSessionJson.JsonString(r.Type.ToString()));
+        sb.Append(",\"text\":").Append(DocxSessionJson.JsonString(r.Text));
+        sb.Append(",\"author\":").Append(DocxSessionJson.JsonString(r.Author));
+        sb.Append(",\"date\":").Append(DocxSessionJson.JsonString(r.Date));
+
+        sb.Append(",\"moveGroupId\":");
+        sb.Append(r.MoveGroupId is { } mg ? mg.ToString(CultureInfo.InvariantCulture) : "null");
+
+        sb.Append(",\"isMoveSource\":");
+        sb.Append(r.IsMoveSource is { } ms ? (ms ? "true" : "false") : "null");
+
+        sb.Append(",\"formatChange\":");
+        if (r.FormatChange is { } fc)
+            AppendFormatChange(sb, fc);
+        else
+            sb.Append("null");
+
+        sb.Append(",\"leftAnchor\":");
+        sb.Append(r.LeftAnchor is { } la ? DocxSessionJson.JsonString(la) : "null");
+        sb.Append(",\"rightAnchor\":");
+        sb.Append(r.RightAnchor is { } ra ? DocxSessionJson.JsonString(ra) : "null");
+
+        sb.Append(",\"conflictId\":");
+        sb.Append(r.ConflictId is { } cid ? cid.ToString(CultureInfo.InvariantCulture) : "null");
+
+        sb.Append('}');
+    }
+
+    /// <summary>
+    /// Serialize the conflict report to the wire JSON shape
+    /// <c>{"conflicts":[{"id","baseAnchor","tokenStart","tokenEnd","policy","competitors":[{"author","resultText"}]}]}</c>.
+    /// <c>policy</c> is the integer-coded <see cref="ConflictResolution"/> that was applied.
+    /// </summary>
+    public static string SerializeConflicts(IReadOnlyList<DocxDiffConflict> conflicts)
+    {
+        var sb = new StringBuilder(256);
+        sb.Append("{\"conflicts\":[");
+        for (var i = 0; i < conflicts.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            AppendConflict(sb, conflicts[i]);
+        }
+        sb.Append("]}");
+        return sb.ToString();
+    }
+
+    private static void AppendConflict(StringBuilder sb, DocxDiffConflict c)
+    {
+        sb.Append("{\"id\":").Append(c.Id.ToString(CultureInfo.InvariantCulture));
+        sb.Append(",\"baseAnchor\":").Append(DocxSessionJson.JsonString(c.BaseAnchor));
+        sb.Append(",\"tokenStart\":").Append(c.TokenStart.ToString(CultureInfo.InvariantCulture));
+        sb.Append(",\"tokenEnd\":").Append(c.TokenEnd.ToString(CultureInfo.InvariantCulture));
+        sb.Append(",\"policy\":").Append(((int)c.AppliedPolicy).ToString(CultureInfo.InvariantCulture));
+
+        sb.Append(",\"competitors\":[");
+        for (var i = 0; i < c.Competitors.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var comp = c.Competitors[i];
+            sb.Append("{\"author\":").Append(DocxSessionJson.JsonString(comp.Author));
+            sb.Append(",\"resultText\":").Append(DocxSessionJson.JsonString(comp.ResultText));
+            sb.Append('}');
+        }
+        sb.Append("]}");
+    }
 }

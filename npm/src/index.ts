@@ -11,6 +11,12 @@ import type {
   // DocxDiff (IR diff engine)
   DocxDiffSettings,
   DocxDiffRevision,
+  // DocxDiff consolidate (composite N-way)
+  DocxDiffReviewer,
+  DocxDiffConsolidateSettings,
+  DocxDiffConflict,
+  DocxDiffConflictCompetitor,
+  DocxDiffConsolidatedRevision,
   Annotation,
   AddAnnotationRequest,
   AddAnnotationResponse,
@@ -101,6 +107,7 @@ import {
   RevisionType,
   DocxDiffRevisionGranularity,
   DocxDiffFormatComparison,
+  ConflictResolution,
   ProjectionScopes,
   AnchorRenderMode,
   TableRenderMode,
@@ -196,6 +203,12 @@ export type {
   // DocxDiff (IR diff engine)
   DocxDiffSettings,
   DocxDiffRevision,
+  // DocxDiff consolidate (composite N-way)
+  DocxDiffReviewer,
+  DocxDiffConsolidateSettings,
+  DocxDiffConflict,
+  DocxDiffConflictCompetitor,
+  DocxDiffConsolidatedRevision,
 };
 
 export {
@@ -205,6 +218,7 @@ export {
   RevisionType,
   DocxDiffRevisionGranularity,
   DocxDiffFormatComparison,
+  ConflictResolution,
   ProjectionScopes,
   AnchorRenderMode,
   TableRenderMode,
@@ -984,6 +998,232 @@ export async function docxDiffGetEditScript(
   if (isErrorResponse(result)) {
     const error = parseError(result);
     throw new Error(`Failed to get DocxDiff edit script: ${error.error}`);
+  }
+
+  return result;
+}
+
+// ─── DocxDiff consolidate (composite N-way) ─────────────────────────────────
+//
+// Merge several reviewers' edits against one shared base DOCX. Each reviewer is
+// base64-encoded into the `[{author,docB64}]` wire shape the host base64-DECODES
+// (standard base64, not url-safe). Settings flow as the diff-settings JSON object
+// extended with an optional integer `conflictResolution`.
+
+/**
+ * Encode a Uint8Array to a standard (non-url-safe) base64 string. Uses a chunked
+ * binary string so large documents don't blow the call-stack limit of
+ * `String.fromCharCode(...bytes)`, and works in both browser (`btoa`) and Node
+ * (`Buffer`) hosts.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof btoa === "function") {
+    let binary = "";
+    const chunkSize = 0x8000; // 32 KB per chunk keeps the spread small
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
+    }
+    return btoa(binary);
+  }
+  // Node fallback (e.g. unit tests outside a browser).
+  return Buffer.from(bytes).toString("base64");
+}
+
+/** Serialize reviewers to the `[{author,docB64}]` wire JSON the host expects. */
+async function reviewersJson(reviewers: DocxDiffReviewer[]): Promise<string> {
+  const arr = await Promise.all(
+    reviewers.map(async (r) => ({
+      author: r.author,
+      docB64: bytesToBase64(await toBytes(r.document)),
+    }))
+  );
+  return JSON.stringify(arr);
+}
+
+/**
+ * Serialize DocxDiffConsolidateSettings to the wire JSON the bridge parses. Same
+ * shape as {@link docxDiffSettingsJson} plus the integer `conflictResolution`
+ * when present (empty string when undefined).
+ */
+function docxDiffConsolidateSettingsJson(
+  settings?: DocxDiffConsolidateSettings
+): string {
+  return settings ? JSON.stringify(settings) : "";
+}
+
+/** Map a single revision wire object (camelCase or PascalCase) to {@link DocxDiffRevision}. */
+function mapDocxDiffRevision(r: any): DocxDiffRevision {
+  return {
+    revisionType: r.revisionType ?? r.RevisionType,
+    text: r.text ?? r.Text,
+    author: r.author ?? r.Author,
+    date: r.date ?? r.Date,
+    moveGroupId: r.moveGroupId ?? r.MoveGroupId ?? undefined,
+    isMoveSource: r.isMoveSource ?? r.IsMoveSource ?? undefined,
+    formatChange: (r.formatChange || r.FormatChange) ? {
+      oldProperties: r.formatChange?.oldProperties ?? r.FormatChange?.OldProperties,
+      newProperties: r.formatChange?.newProperties ?? r.FormatChange?.NewProperties,
+      changedPropertyNames: r.formatChange?.changedPropertyNames ?? r.FormatChange?.ChangedPropertyNames,
+    } : undefined,
+    leftAnchor: r.leftAnchor ?? r.LeftAnchor ?? undefined,
+    rightAnchor: r.rightAnchor ?? r.RightAnchor ?? undefined,
+  };
+}
+
+/**
+ * Consolidate several reviewers' edits against a shared base DOCX and return the
+ * merged redlined result as a DOCX (native multi-author tracked-changes markup).
+ *
+ * @param base - The shared base document all reviewers edited from.
+ * @param reviewers - The reviewers' edited copies + author names.
+ * @param settings - Optional {@link DocxDiffConsolidateSettings}; omit for engine defaults.
+ * @returns Consolidated redlined DOCX as Uint8Array.
+ * @throws Error if consolidation fails.
+ */
+export async function docxDiffConsolidate(
+  base: File | Uint8Array,
+  reviewers: DocxDiffReviewer[],
+  settings?: DocxDiffConsolidateSettings
+): Promise<Uint8Array> {
+  const exports = ensureInitialized();
+  const baseBytes = await toBytes(base);
+  const reviewersJsonStr = await reviewersJson(reviewers);
+
+  await yieldToMain();
+
+  const result = exports.DocxDiffBridge.Consolidate(
+    baseBytes,
+    reviewersJsonStr,
+    docxDiffConsolidateSettingsJson(settings)
+  );
+
+  if (result.length === 0) {
+    throw new Error("DocxDiff consolidation failed - empty result");
+  }
+
+  return result;
+}
+
+/**
+ * Consolidate several reviewers' edits against a shared base DOCX and return the
+ * per-token conflict report — every base span two or more reviewers edited
+ * incompatibly, with each reviewer's competing variant.
+ *
+ * @param base - The shared base document all reviewers edited from.
+ * @param reviewers - The reviewers' edited copies + author names.
+ * @param settings - Optional {@link DocxDiffConsolidateSettings}; omit for engine defaults.
+ * @returns Array of {@link DocxDiffConflict}.
+ * @throws Error if the operation fails.
+ */
+export async function docxDiffGetConflicts(
+  base: File | Uint8Array,
+  reviewers: DocxDiffReviewer[],
+  settings?: DocxDiffConsolidateSettings
+): Promise<DocxDiffConflict[]> {
+  const exports = ensureInitialized();
+  const baseBytes = await toBytes(base);
+  const reviewersJsonStr = await reviewersJson(reviewers);
+
+  await yieldToMain();
+
+  const result = exports.DocxDiffBridge.GetConflictsJson(
+    baseBytes,
+    reviewersJsonStr,
+    docxDiffConsolidateSettingsJson(settings)
+  );
+
+  if (isErrorResponse(result)) {
+    const error = parseError(result);
+    throw new Error(`Failed to get DocxDiff conflicts: ${error.error}`);
+  }
+
+  const parsed = JSON.parse(result);
+  return (parsed.conflicts || parsed.Conflicts || []).map((c: any) => ({
+    id: c.id ?? c.Id,
+    baseAnchor: c.baseAnchor ?? c.BaseAnchor,
+    tokenStart: c.tokenStart ?? c.TokenStart,
+    tokenEnd: c.tokenEnd ?? c.TokenEnd,
+    policy: c.policy ?? c.Policy,
+    competitors: (c.competitors || c.Competitors || []).map((comp: any) => ({
+      author: comp.author ?? comp.Author,
+      resultText: comp.resultText ?? comp.ResultText,
+    })),
+  }));
+}
+
+/**
+ * Consolidate several reviewers' edits against a shared base DOCX and return the
+ * merged revision list — each revision carrying its author, block anchors, and
+ * (when contested) the {@link DocxDiffConsolidatedRevision.conflictId} linking it
+ * to a {@link DocxDiffConflict}.
+ *
+ * @param base - The shared base document all reviewers edited from.
+ * @param reviewers - The reviewers' edited copies + author names.
+ * @param settings - Optional {@link DocxDiffConsolidateSettings}; omit for engine defaults.
+ * @returns Array of {@link DocxDiffConsolidatedRevision}.
+ * @throws Error if the operation fails.
+ */
+export async function docxDiffGetConsolidatedRevisions(
+  base: File | Uint8Array,
+  reviewers: DocxDiffReviewer[],
+  settings?: DocxDiffConsolidateSettings
+): Promise<DocxDiffConsolidatedRevision[]> {
+  const exports = ensureInitialized();
+  const baseBytes = await toBytes(base);
+  const reviewersJsonStr = await reviewersJson(reviewers);
+
+  await yieldToMain();
+
+  const result = exports.DocxDiffBridge.GetConsolidatedRevisionsJson(
+    baseBytes,
+    reviewersJsonStr,
+    docxDiffConsolidateSettingsJson(settings)
+  );
+
+  if (isErrorResponse(result)) {
+    const error = parseError(result);
+    throw new Error(`Failed to get DocxDiff consolidated revisions: ${error.error}`);
+  }
+
+  const parsed = JSON.parse(result);
+  return (parsed.revisions || parsed.Revisions || []).map((r: any) => ({
+    ...mapDocxDiffRevision(r),
+    conflictId: r.conflictId ?? r.ConflictId ?? undefined,
+  }));
+}
+
+/**
+ * Consolidate several reviewers' edits against a shared base DOCX and return the
+ * merged edit script as a JSON string — the diff-as-data view of the
+ * consolidation (the anchor-addressed list of composite block operations).
+ *
+ * @param base - The shared base document all reviewers edited from.
+ * @param reviewers - The reviewers' edited copies + author names.
+ * @param settings - Optional {@link DocxDiffConsolidateSettings}; omit for engine defaults.
+ * @returns The consolidated edit script serialized as indented JSON.
+ * @throws Error if the operation fails.
+ */
+export async function docxDiffGetConsolidatedEditScript(
+  base: File | Uint8Array,
+  reviewers: DocxDiffReviewer[],
+  settings?: DocxDiffConsolidateSettings
+): Promise<string> {
+  const exports = ensureInitialized();
+  const baseBytes = await toBytes(base);
+  const reviewersJsonStr = await reviewersJson(reviewers);
+
+  await yieldToMain();
+
+  const result = exports.DocxDiffBridge.GetConsolidatedEditScriptJson(
+    baseBytes,
+    reviewersJsonStr,
+    docxDiffConsolidateSettingsJson(settings)
+  );
+
+  if (isErrorResponse(result)) {
+    const error = parseError(result);
+    throw new Error(`Failed to get DocxDiff consolidated edit script: ${error.error}`);
   }
 
   return result;

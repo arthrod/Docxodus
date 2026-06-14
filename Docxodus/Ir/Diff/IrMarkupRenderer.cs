@@ -84,6 +84,12 @@ namespace Docxodus.Ir.Diff;
 /// </remarks>
 internal static class IrMarkupRenderer
 {
+    /// <summary>TRANSIENT marker attribute carrying a source <c>w:hyperlink</c>'s document-order ordinal onto
+    /// each emitted wrapper clone, so <see cref="CoalesceAdjacentHyperlinks"/> can rejoin ONLY the fragments of
+    /// the SAME source link. In the <c>pt:</c> namespace so the body's blanket <c>pt:</c> strip would catch any
+    /// stray, but the coalescer removes it explicitly before output regardless.</summary>
+    private static readonly XName SourceLinkId = PtOpenXml.pt + "SourceLinkId";
+
     /// <summary>
     /// Render <paramref name="script"/> into a tracked-revisions <see cref="WmlDocument"/> on the LEFT
     /// document's package. <paramref name="left"/>/<paramref name="right"/> are the original documents the
@@ -157,21 +163,7 @@ internal static class IrMarkupRenderer
                 // BEFORE PutXDocument so the in-tree XElements are the live ones MoveRelatedPartsToDestination
                 // mutates. Uses the same proven part-copy/fresh-rId path WmlComparer uses for inserted drawings.
                 var rightMain = wDocRight.MainDocumentPart;
-                if (rightMain != null && state.RightSourcedClones.Count > 0)
-                {
-                    // (1) Import hyperlink/external relationships (e.g. w:hyperlink/@r:id targets) the right
-                    // clones reference but the left package lacks — these are NOT parts, so the part-copy path
-                    // below skips them; recreate them with the SAME id where free so the cloned r:id resolves.
-                    ImportHyperlinkAndExternalRelationships(state.RightSourcedClones, main, rightMain);
-
-                    // (2) Import media PARTS (image embeds, diagram data) and remap their r:ids in place, using
-                    // the stream documents' own packages directly (the wrapper's package is the authoritative
-                    // writable one — not the reflection-based OpenXmlPackage.GetPackage()).
-                    var leftPkgPart = streamDoc.GetPackage().GetPart(main.Uri);
-                    var rightPkgPart = rightStream.GetPackage().GetPart(rightMain.Uri);
-                    foreach (var clone in state.RightSourcedClones)
-                        WmlComparer.MoveRelatedPartsToDestination(rightPkgPart, leftPkgPart, clone, skipDanglingRelationships: true);
-                }
+                ImportRightSourcedMedia(state.RightSourcedClones, main, rightMain, streamDoc, rightStream);
 
                 // Strip ALL engine-internal pt:Unid bookkeeping attributes from the assembled body (cloned runs
                 // inside ins/del wrappers carry them too; a single sweep here catches every nested occurrence).
@@ -208,9 +200,36 @@ internal static class IrMarkupRenderer
         }
     }
 
+    /// <summary>
+    /// Import media (and hyperlink/external relationships) referenced by RIGHT-sourced clones into the output's
+    /// LEFT-based main part, remapping the cloned elements' relationship ids IN PLACE. Extracted from
+    /// <see cref="Render"/> so the composite renderer can run the same proven import per-reviewer (each reviewer
+    /// package supplies its own clones). A no-op when there are no media-bearing clones or no right main part.
+    /// </summary>
+    internal static void ImportRightSourcedMedia(
+        IReadOnlyList<XElement> rightClones, MainDocumentPart main, MainDocumentPart? rightMain,
+        OpenXmlMemoryStreamDocument leftStreamDoc, OpenXmlMemoryStreamDocument rightStreamDoc)
+    {
+        if (rightMain == null || rightClones.Count == 0)
+            return;
+
+        // (1) Import hyperlink/external relationships (e.g. w:hyperlink/@r:id targets) the right clones reference
+        // but the left package lacks — these are NOT parts, so the part-copy path below skips them; recreate them
+        // with the SAME id where free so the cloned r:id resolves.
+        ImportHyperlinkAndExternalRelationships(rightClones.ToList(), main, rightMain);
+
+        // (2) Import media PARTS (image embeds, diagram data) and remap their r:ids in place, using the stream
+        // documents' own packages directly (the wrapper's package is the authoritative writable one — not the
+        // reflection-based OpenXmlPackage.GetPackage()).
+        var leftPkgPart = leftStreamDoc.GetPackage().GetPart(main.Uri);
+        var rightPkgPart = rightStreamDoc.GetPackage().GetPart(rightMain.Uri);
+        foreach (var clone in rightClones)
+            WmlComparer.MoveRelatedPartsToDestination(rightPkgPart, leftPkgPart, clone, skipDanglingRelationships: true);
+    }
+
     // ----------------------------------------------------------------- block-op dispatch
 
-    private static void RenderBlockOp(IrEditOp op, RenderState state, List<XElement> sink)
+    internal static void RenderBlockOp(IrEditOp op, RenderState state, List<XElement> sink)
     {
         // A standalone trailing section-break block (a `sec:` anchor, an IrSectionBreak) is last-section page
         // METADATA, not body content. Its `w:sectPr` is a direct w:body child that must be the LAST element —
@@ -224,8 +243,9 @@ internal static class IrMarkupRenderer
         switch (op.Kind)
         {
             case IrEditOpKind.EqualBlock:
-                // Content-equal: emit the RIGHT block verbatim (accepted-state continuity).
-                EmitVerbatim(op.RightAnchor, state.Right, state, sink, fromRight: true);
+                // Content-equal: emit the RIGHT block verbatim (accepted-state continuity). In a composite render
+                // an EqualBlock is base-sourced — the composite renderer points RightSource at the base for it.
+                EmitVerbatim(op.RightAnchor, state.RightSource, state, sink, fromRight: true);
                 break;
 
             case IrEditOpKind.FormatOnlyBlock:
@@ -236,7 +256,7 @@ internal static class IrMarkupRenderer
                 break;
 
             case IrEditOpKind.InsertBlock:
-                EmitWholeBlock(op.RightAnchor, state.Right, state, sink, RevKind.Ins, fromRight: true);
+                EmitWholeBlock(op.RightAnchor, state.RightSource, state, sink, RevKind.Ins, fromRight: true);
                 break;
 
             case IrEditOpKind.DeleteBlock:
@@ -260,7 +280,7 @@ internal static class IrMarkupRenderer
                     if (op.IsMoveSource == true)
                         EmitWholeBlock(op.LeftAnchor, state.Left, state, sink, RevKind.Del, fromRight: false);
                     else
-                        EmitWholeBlock(op.RightAnchor, state.Right, state, sink, RevKind.Ins, fromRight: true);
+                        EmitWholeBlock(op.RightAnchor, state.RightSource, state, sink, RevKind.Ins, fromRight: true);
                 }
                 else if (op.IsMoveSource == true)
                 {
@@ -306,7 +326,7 @@ internal static class IrMarkupRenderer
             EmitWholeBlock(op.LeftAnchor, state.Left, state, sink, RevKind.Del, fromRight: false);
             if (op.SplitMergeAnchors is { } fallbackAnchors)
                 foreach (var a in fallbackAnchors)
-                    EmitWholeBlock(a, state.Right, state, sink, RevKind.Ins, fromRight: true);
+                    EmitWholeBlock(a, state.RightSource, state, sink, RevKind.Ins, fromRight: true);
             return;
         }
 
@@ -321,13 +341,13 @@ internal static class IrMarkupRenderer
             var slice = SubTokens(leftTokens, offset, sliceLen);
             offset += sliceLen;
 
-            var memberPara = SourceElement(anchors[s], state.Right);
+            var memberPara = SourceElement(anchors[s], state.RightSource);
             if (memberPara == null)
             {
-                EmitWholeBlock(anchors[s], state.Right, state, sink, RevKind.Ins, fromRight: true);
+                EmitWholeBlock(anchors[s], state.RightSource, state, sink, RevKind.Ins, fromRight: true);
                 continue;
             }
-            var memberTokens = ParagraphTokens(anchors[s], state.Right, state.Settings);
+            var memberTokens = ParagraphTokens(anchors[s], state.RightSource, state.Settings);
             var rightRuns = new SourceRunModel(memberPara);
 
             var newPara = new XElement(W.p);
@@ -352,19 +372,19 @@ internal static class IrMarkupRenderer
     /// </summary>
     private static void RenderMergeBlock(IrEditOp op, RenderState state, List<XElement> sink)
     {
-        var rightPara = SourceElement(op.RightAnchor, state.Right);
+        var rightPara = SourceElement(op.RightAnchor, state.RightSource);
         if (rightPara == null || op.SplitMergeAnchors is not { } anchors || op.SegmentDiffs is not { } diffs
             || anchors.Count != diffs.Count)
         {
             if (op.SplitMergeAnchors is { } fallbackAnchors)
                 foreach (var a in fallbackAnchors)
                     EmitWholeBlock(a, state.Left, state, sink, RevKind.Del, fromRight: false);
-            EmitWholeBlock(op.RightAnchor, state.Right, state, sink, RevKind.Ins, fromRight: true);
+            EmitWholeBlock(op.RightAnchor, state.RightSource, state, sink, RevKind.Ins, fromRight: true);
             return;
         }
 
         var rightRuns = new SourceRunModel(rightPara);
-        var rightTokens = ParagraphTokens(op.RightAnchor, state.Right, state.Settings);
+        var rightTokens = ParagraphTokens(op.RightAnchor, state.RightSource, state.Settings);
         var rightPPr = rightPara.Element(W.pPr);
 
         int offset = 0;
@@ -431,7 +451,7 @@ internal static class IrMarkupRenderer
     private static void RenderModifyBlock(IrEditOp op, RenderState state, List<XElement> sink)
     {
         bool leftIsPara = ResolveBlock(op.LeftAnchor, state.Left) is IrParagraph;
-        bool rightIsPara = ResolveBlock(op.RightAnchor, state.Right) is IrParagraph;
+        bool rightIsPara = ResolveBlock(op.RightAnchor, state.RightSource) is IrParagraph;
 
         if (op.TokenDiff is { } tokenDiff && leftIsPara && rightIsPara &&
             op.TextboxDiffs is null)   // textbox-interior diffs are not finely rendered in Task 3
@@ -443,7 +463,7 @@ internal static class IrMarkupRenderer
         // A Modified TABLE pair with a nested table diff renders row/cell-precise markup (Task 4).
         if (op.TableDiff is { } tableDiff &&
             ResolveBlock(op.LeftAnchor, state.Left) is IrTable &&
-            ResolveBlock(op.RightAnchor, state.Right) is IrTable)
+            ResolveBlock(op.RightAnchor, state.RightSource) is IrTable)
         {
             if (RenderModifiedTable(op, tableDiff, state, sink))
                 return;
@@ -455,7 +475,7 @@ internal static class IrMarkupRenderer
         if (op.LeftAnchor != null)
             EmitWholeBlock(op.LeftAnchor, state.Left, state, sink, RevKind.Del, fromRight: false);
         if (op.RightAnchor != null)
-            EmitWholeBlock(op.RightAnchor, state.Right, state, sink, RevKind.Ins, fromRight: true);
+            EmitWholeBlock(op.RightAnchor, state.RightSource, state, sink, RevKind.Ins, fromRight: true);
     }
 
 
@@ -468,14 +488,14 @@ internal static class IrMarkupRenderer
     /// </summary>
     private static bool RenderModifiedTable(IrEditOp op, IrTableDiff tableDiff, RenderState state, List<XElement> sink)
     {
-        var rightTbl = SourceElement(op.RightAnchor, state.Right);
+        var rightTbl = SourceElement(op.RightAnchor, state.RightSource);
         var leftTbl = SourceElement(op.LeftAnchor, state.Left);
         if (rightTbl == null || leftTbl == null || rightTbl.Name != W.tbl || leftTbl.Name != W.tbl)
             return false;
 
         // Index the source rows by anchor so a row op resolves to its source w:tr.
         var leftRowsByAnchor = IndexRows(ResolveBlock(op.LeftAnchor, state.Left) as IrTable);
-        var rightRowsByAnchor = IndexRows(ResolveBlock(op.RightAnchor, state.Right) as IrTable);
+        var rightRowsByAnchor = IndexRows(ResolveBlock(op.RightAnchor, state.RightSource) as IrTable);
 
         var newTbl = new XElement(W.tbl);
         // Carry the table's non-row prelude (tblPr, tblGrid, …) from the right shell.
@@ -621,6 +641,245 @@ internal static class IrMarkupRenderer
             MarkWholeParagraph(p, kind, state);
     }
 
+    // ----------------------------------------------------------------- composed multi-reviewer table (FOLLOW-ON B)
+
+    /// <summary>
+    /// Render a COMPOSED multi-reviewer table from <see cref="IrCompositeOp.AuthoredRows"/> (FOLLOW-ON B): a
+    /// SINGLE <c>w:tbl</c> built on the BASE table's tblPr/tblGrid, with each row emitted per its
+    /// <see cref="IrAuthoredRowOp"/>:
+    /// <list type="bullet">
+    /// <item><b>EqualRow</b> → the base row verbatim (no revision markup).</item>
+    /// <item><b>InsertRow / DeleteRow</b> → swap state to the relocating reviewer and reuse the whole-row
+    /// insert/delete markup (the same <see cref="MarkWholeRow"/> the two-way path uses).</item>
+    /// <item><b>ModifyRow</b> → a new <c>w:tr</c> from the BASE row's trPr + base cell skeletons
+    /// (count-stable; v1 clones the base cell tcPr — guaranteed by the column-structure gate). Per
+    /// <see cref="IrAuthoredCellOp"/>: a base passthrough (ComposedBlockOps null) keeps the base cell content
+    /// verbatim; otherwise each cell-block composite op renders into the cell sink via
+    /// <paramref name="renderOneCompositeBlock"/> (the shared composite-block dispatch — this recursion handles
+    /// disjoint multi-author cell paragraphs AND same-cell-paragraph token composition).</item>
+    /// </list>
+    /// The callback breaks the layering cycle: <see cref="IrCompositeMarkupRenderer"/> owns the composite-op
+    /// dispatch and supplies it here so the two-way renderer needs no reference to the composite renderer.
+    /// </summary>
+    internal static void RenderComposedTable(
+        IrCompositeOp op,
+        IrDocument baseIr,
+        IReadOnlyList<IrDocument> reviewerIrs,
+        RenderState state,
+        List<XElement> sink,
+        Action<IrCompositeOp, IrDocument, IReadOnlyList<IrDocument>, RenderState, List<XElement>> renderOneCompositeBlock)
+    {
+        var authoredRows = op.AuthoredRows
+            ?? throw new DocxodusException("RenderComposedTable requires op.AuthoredRows.");
+
+        var baseTblBlock = ResolveBlock(op.Op.LeftAnchor, baseIr) as IrTable;
+        var baseTbl = SourceElement(op.Op.LeftAnchor, baseIr);
+        if (baseTblBlock == null || baseTbl == null || baseTbl.Name != W.tbl)
+        {
+            // Defensive: a composed table op should always resolve its base table. Fall back to the merged
+            // diff via the single-reviewer modify path so the op is not silently dropped.
+            if (op.Op.TableDiff is { } td)
+            {
+                var savedAuthor0 = state.AuthorOverride;
+                var savedSource0 = state.RightSource;
+                var savedId0 = state.RightSourceId;
+                state.AuthorOverride = null;
+                state.RightSource = baseIr;
+                state.RightSourceId = -1;
+                RenderModifyBlock(op.Op, state, sink);
+                state.AuthorOverride = savedAuthor0;
+                state.RightSource = savedSource0;
+                state.RightSourceId = savedId0;
+            }
+            return;
+        }
+
+        // Base row + cell source lookups (cell anchors are NOT in AnchorIndex, so map from the base table IR).
+        var baseRowsByAnchor = IndexRows(baseTblBlock);
+        var baseCellsByAnchor = IndexBaseCells(baseTblBlock);
+
+        var newTbl = new XElement(W.tbl);
+        foreach (var pre in baseTbl.Elements().Where(e => e.Name != W.tr))
+            newTbl.Add(StripUnids(new XElement(pre)));
+
+        foreach (var rowOp in authoredRows)
+        {
+            switch (rowOp.Kind)
+            {
+                case IrRowOpKind.EqualRow:
+                {
+                    if (rowOp.BaseRowAnchor is { } ra && baseRowsByAnchor.TryGetValue(ra, out var src))
+                        newTbl.Add(StripUnids(new XElement(src)));
+                    break;
+                }
+                case IrRowOpKind.InsertRow:
+                {
+                    // A reviewer-inserted whole row: source it from that reviewer's table at the merged
+                    // op's matching InsertRow right anchor.
+                    EmitComposedInsertOrDeleteRow(op, rowOp, reviewerIrs, baseIr, state, newTbl, RevKind.Ins);
+                    break;
+                }
+                case IrRowOpKind.DeleteRow:
+                {
+                    EmitComposedInsertOrDeleteRow(op, rowOp, reviewerIrs, baseIr, state, newTbl, RevKind.Del);
+                    break;
+                }
+                case IrRowOpKind.ModifyRow:
+                {
+                    EmitComposedModifyRow(rowOp, baseRowsByAnchor, baseCellsByAnchor, baseIr, reviewerIrs,
+                        state, newTbl, renderOneCompositeBlock);
+                    break;
+                }
+            }
+        }
+
+        sink.Add(newTbl);
+    }
+
+    /// <summary>Emit a composed whole-row insert/delete: resolve the row's source <c>w:tr</c> (a reviewer's
+    /// inserted row from the merged TableDiff's matching InsertRow right anchor, or the base row for a delete)
+    /// under the relocating reviewer's state, whole-mark it, and append it.</summary>
+    private static void EmitComposedInsertOrDeleteRow(
+        IrCompositeOp op, IrAuthoredRowOp rowOp, IReadOnlyList<IrDocument> reviewerIrs, IrDocument baseIr,
+        RenderState state, XElement newTbl, RevKind kind)
+    {
+        var savedAuthor = state.AuthorOverride;
+        var savedSource = state.RightSource;
+        var savedId = state.RightSourceId;
+        try
+        {
+            if (kind == RevKind.Del)
+            {
+                // Delete: source the base row by its base anchor.
+                if (rowOp.BaseRowAnchor is { } ra)
+                {
+                    var baseTbl = ResolveBlock(op.Op.LeftAnchor, baseIr) as IrTable;
+                    var src = baseTbl?.Rows.FirstOrDefault(r => r.Anchor.ToString() == ra)?.Source.Element;
+                    if (src != null)
+                    {
+                        var row = StripUnids(new XElement(src));
+                        state.AuthorOverride = rowOp.Author;
+                        state.RightSourceId = rowOp.SourceReviewer;
+                        MarkWholeRow(row, RevKind.Del, state);
+                        newTbl.Add(row);
+                    }
+                }
+                return;
+            }
+
+            // Insert: source the reviewer's inserted row directly by its right anchor (carried on the authored
+            // row op).
+            int reviewer = rowOp.SourceReviewer;
+            if (reviewer < 0 || reviewer >= reviewerIrs.Count || rowOp.RightRowAnchor is not { } rra)
+                return;
+            var reviewerIr = reviewerIrs[reviewer];
+            var rowSrc = FindRowSource(reviewerIr, rra);
+            if (rowSrc == null)
+                return;
+            var newRow = StripUnids(new XElement(rowSrc));
+            state.AuthorOverride = rowOp.Author;
+            state.RightSource = reviewerIr;
+            state.RightSourceId = reviewer;
+            state.RegisterMediaReferences(newRow);
+            MarkWholeRow(newRow, RevKind.Ins, state);
+            newTbl.Add(newRow);
+        }
+        finally
+        {
+            state.AuthorOverride = savedAuthor;
+            state.RightSource = savedSource;
+            state.RightSourceId = savedId;
+        }
+    }
+
+    /// <summary>The source <c>w:tr</c> a row anchor resolves to in <paramref name="ir"/>, or null.</summary>
+    private static XElement? FindRowSource(IrDocument ir, string rowAnchor)
+    {
+        foreach (var block in ir.AnchorIndex.Values)
+            if (block is IrTable tbl)
+                foreach (var row in tbl.Rows)
+                    if (row.Anchor.ToString() == rowAnchor)
+                        return row.Source.Element;
+        return null;
+    }
+
+    /// <summary>Emit a composed ModifyRow: a new <c>w:tr</c> from the BASE row's trPr + per-cell content (base
+    /// passthrough or per-cell-block composite render).</summary>
+    private static void EmitComposedModifyRow(
+        IrAuthoredRowOp rowOp,
+        Dictionary<string, XElement> baseRowsByAnchor,
+        Dictionary<string, XElement> baseCellsByAnchor,
+        IrDocument baseIr, IReadOnlyList<IrDocument> reviewerIrs, RenderState state, XElement newTbl,
+        Action<IrCompositeOp, IrDocument, IReadOnlyList<IrDocument>, RenderState, List<XElement>> renderOneCompositeBlock)
+    {
+        if (rowOp.BaseRowAnchor is not { } rowAnchor || !baseRowsByAnchor.TryGetValue(rowAnchor, out var baseRowSrc))
+            return;
+
+        var newRow = new XElement(W.tr);
+        foreach (var pre in baseRowSrc.Elements().Where(e => e.Name != W.tc))
+            newRow.Add(StripUnids(new XElement(pre)));
+
+        if (rowOp.ComposedCells is not { } cells)
+        {
+            // No per-cell view: keep the base row verbatim (defensive).
+            newTbl.Add(StripUnids(new XElement(baseRowSrc)));
+            return;
+        }
+
+        foreach (var cellOp in cells)
+        {
+            XElement? baseCellSrc = cellOp.BaseCellAnchor != null
+                && baseCellsByAnchor.TryGetValue(cellOp.BaseCellAnchor, out var bc) ? bc : null;
+            if (baseCellSrc == null)
+                continue;
+
+            var newCell = new XElement(W.tc);
+            foreach (var pre in baseCellSrc.Elements().Where(e => e.Name != W.p && e.Name != W.tbl))
+                newCell.Add(StripUnids(new XElement(pre)));
+
+            if (cellOp.ComposedBlockOps is { } blockOps)
+            {
+                var cellSink = new List<XElement>();
+                foreach (var cellBlock in blockOps)
+                    renderOneCompositeBlock(cellBlock, baseIr, reviewerIrs, state, cellSink);
+                if (cellSink.Count == 0)
+                    foreach (var b in baseCellSrc.Elements().Where(e => e.Name == W.p || e.Name == W.tbl))
+                        cellSink.Add(StripUnids(new XElement(b)));
+                newCell.Add(cellSink);
+            }
+            else
+            {
+                // Base passthrough: the base cell's content verbatim.
+                foreach (var b in baseCellSrc.Elements().Where(e => e.Name == W.p || e.Name == W.tbl))
+                    newCell.Add(StripUnids(new XElement(b)));
+            }
+            newRow.Add(newCell);
+        }
+
+        // No whole-row media registration here (unlike the two-way RenderModifyRow): each reviewer-sourced
+        // cell-block already registered its own media clones under the CORRECT per-cell RightSourceId inside
+        // RenderOneCompositeBlock, and base-passthrough cells reference base parts already present in the
+        // output package (the assembly clones the base package). A whole-row catch-all would (a) double-register
+        // those reviewer clones and (b) bucket them under whatever RightSourceId is left over after the per-cell
+        // restore (typically base/-1 or an unrelated reviewer), so a cell image could be skipped or imported from
+        // the WRONG reviewer's package on an r:id collision.
+        newTbl.Add(newRow);
+    }
+
+    /// <summary>Map each base cell's anchor to its source <c>w:tc</c> (cells are not in AnchorIndex).</summary>
+    private static Dictionary<string, XElement> IndexBaseCells(IrTable table)
+    {
+        var map = new Dictionary<string, XElement>(StringComparer.Ordinal);
+        foreach (var row in table.Rows)
+            foreach (var cell in row.Cells)
+            {
+                var src = cell.Source.Element;
+                if (src != null)
+                    map[cell.Anchor.ToString()] = src;
+            }
+        return map;
+    }
+
     /// <summary>Index a table's rows by their anchor string for source-row lookup during table rendering.</summary>
     private static Dictionary<string, XElement> IndexRows(IrTable? table)
     {
@@ -639,7 +898,7 @@ internal static class IrMarkupRenderer
     /// <summary>In-place rewrite of native move markup under one block to plain del/ins (mirrors
     /// <see cref="WmlComparer"/>'s <c>SimplifyMoveMarkupToDelIns</c>): <c>w:moveFrom</c> → <c>w:del</c>,
     /// <c>w:moveTo</c> → <c>w:ins</c> (attributes + children preserved), and all four range markers removed.</summary>
-    private static void SimplifyMoveMarkup(XElement block)
+    internal static void SimplifyMoveMarkup(XElement block)
     {
         foreach (var moveFrom in block.DescendantsAndSelf(W.moveFrom).ToList())
             moveFrom.ReplaceWith(new XElement(W.del, moveFrom.Attributes(), moveFrom.Nodes()));
@@ -945,10 +1204,10 @@ internal static class IrMarkupRenderer
     /// </summary>
     private static void EmitMoveDestination(IrEditOp op, RenderState state, List<XElement> sink)
     {
-        var src = SourceElement(op.RightAnchor, state.Right);
+        var src = SourceElement(op.RightAnchor, state.RightSource);
         if (src == null || src.Name != W.p || op.MoveGroupId is not { } gid)
         {
-            EmitWholeBlock(op.RightAnchor, state.Right, state, sink, RevKind.Ins, fromRight: true);
+            EmitWholeBlock(op.RightAnchor, state.RightSource, state, sink, RevKind.Ins, fromRight: true);
             return;
         }
         string moveName = state.MoveName(gid);
@@ -983,14 +1242,14 @@ internal static class IrMarkupRenderer
     private static XElement? BuildMoveModifyDestination(IrEditOp op, IrTokenDiff tokenDiff, RenderState state)
     {
         var leftPara = SourceElement(op.LeftAnchor, state.Left);
-        var rightPara = SourceElement(op.RightAnchor, state.Right);
+        var rightPara = SourceElement(op.RightAnchor, state.RightSource);
         if (leftPara == null || rightPara == null)
             return null;
 
         var leftRuns = new SourceRunModel(leftPara);
         var rightRuns = new SourceRunModel(rightPara);
         var leftTokens = ParagraphTokens(op.LeftAnchor, state.Left, state.Settings);
-        var rightTokens = ParagraphTokens(op.RightAnchor, state.Right, state.Settings);
+        var rightTokens = ParagraphTokens(op.RightAnchor, state.RightSource, state.Settings);
 
         var newPara = new XElement(W.p);
         var rightPPr = rightPara.Element(W.pPr);
@@ -1026,7 +1285,7 @@ internal static class IrMarkupRenderer
                 }
             }
         }
-        newPara.Add(content);
+        newPara.Add(CoalesceAdjacentHyperlinks(content));
         return newPara;
     }
 
@@ -1057,7 +1316,7 @@ internal static class IrMarkupRenderer
         var start = new XElement(startName,
             new XAttribute(W.id, rangeId),
             new XAttribute(W.name, moveName),
-            new XAttribute(W.author, state.Settings.AuthorForRevisions),
+            new XAttribute(W.author, state.AuthorOverride ?? state.Settings.AuthorForRevisions),
             new XAttribute(W.date, state.Settings.DateTimeForRevisions));
         var end = new XElement(endName, new XAttribute(W.id, rangeId));
 
@@ -1256,11 +1515,11 @@ internal static class IrMarkupRenderer
     /// </summary>
     private static void EmitFormatOnlyParagraph(IrEditOp op, RenderState state, List<XElement> sink)
     {
-        var rightPara = SourceElement(op.RightAnchor, state.Right);
+        var rightPara = SourceElement(op.RightAnchor, state.RightSource);
         var leftPara = SourceElement(op.LeftAnchor, state.Left);
         if (rightPara == null || rightPara.Name != W.p || leftPara == null || leftPara.Name != W.p)
         {
-            EmitVerbatim(op.RightAnchor, state.Right, state, sink, fromRight: true);
+            EmitVerbatim(op.RightAnchor, state.RightSource, state, sink, fromRight: true);
             return;
         }
 
@@ -1286,6 +1545,127 @@ internal static class IrMarkupRenderer
         sink.Add(newPara);
     }
 
+    // ------------------------------------------------------- composite (multi-author) modify path
+
+    /// <summary>
+    /// Render ONE base paragraph edited by 2+ reviewers into a single <c>w:p</c> whose run-level content
+    /// composes per-span authorship: consecutive <see cref="IrAuthoredTokenOp"/>s sharing
+    /// <c>(Author, SourceReviewer)</c> are grouped, and each group is emitted via the shared
+    /// <see cref="BuildTokenOpContent"/> with the contributing reviewer's right paragraph as the right source
+    /// (so Insert spans, whose RightStart/RightEnd index THAT reviewer's right-token list, resolve correctly)
+    /// and <see cref="RenderState.AuthorOverride"/> set to that reviewer. Base-sourced groups
+    /// (<c>SourceReviewer == -1</c>, Equal spans) read the BASE paragraph for both sides with no author
+    /// override. The cloned <c>pPr</c> is the BASE paragraph's (the paragraph exists on every side and the
+    /// composed edits are text-only, so the base pPr is the deterministic accepted-state shape).
+    /// <para><paramref name="op"/> carries the MERGED token diff in <c>op.Op.TokenDiff</c> (the apply/json
+    /// truth, used by the single-reviewer path) and the per-span authorship in <c>op.AuthoredTokens</c>;
+    /// <c>op.SourceRightAnchors</c> maps each contributing reviewer to its right paragraph anchor. The
+    /// invariant is the multi-author generalization of the two-way contract: reject-all restores the base
+    /// paragraph text; accept-all yields every reviewer's accepted word edits.</para>
+    /// </summary>
+    internal static void RenderComposedParagraph(
+        IrCompositeOp op,
+        IrDocument baseIr,
+        IReadOnlyList<IrDocument> reviewerIrs,
+        RenderState state,
+        List<XElement> sink)
+    {
+        var authored = op.AuthoredTokens
+            ?? throw new DocxodusException("RenderComposedParagraph requires op.AuthoredTokens.");
+        string? baseAnchor = op.Op.LeftAnchor;
+        var basePara = SourceElement(baseAnchor, baseIr);
+        if (basePara == null)
+        {
+            // Defensive: a composed op should always resolve its base paragraph. Fall back to the merged
+            // diff via the single-reviewer path so the op is not silently dropped.
+            if (op.Op.TokenDiff != null)
+                RenderModifiedParagraph(op.Op, op.Op.TokenDiff, state, sink);
+            // else: base paragraph AND token diff both missing — nothing to emit; skip.
+            return;
+        }
+
+        // Base left tokens + run model, built once (every group's Equal/Delete spans read these).
+        var leftTokens = ParagraphTokens(baseAnchor, baseIr, state.Settings);
+        var leftRuns = new SourceRunModel(basePara);
+
+        // Per-reviewer right paragraph: tokens + run model, resolved from op.SourceRightAnchors (each
+        // contributing reviewer's OWN right paragraph for this base block) and cached so a reviewer with
+        // several disjoint word edits builds its model once.
+        var rightAnchorByReviewer = new Dictionary<int, string>();
+        if (op.SourceRightAnchors != null)
+            foreach (var sra in op.SourceRightAnchors)
+                rightAnchorByReviewer[sra.Reviewer] = sra.Anchor;
+        var rightTokensCache = new Dictionary<int, IReadOnlyList<IrDiffToken>>();
+        var rightRunsCache = new Dictionary<int, SourceRunModel>();
+
+        // Clone the BASE pPr (deterministic; composed edits are text-only).
+        var newPara = new XElement(W.p);
+        var basePPr = basePara.Element(W.pPr);
+        if (basePPr != null)
+            newPara.Add(StripUnids(new XElement(basePPr)));
+
+        // Save/restore the shared state's per-op fields so the renderer's outer loop is unaffected.
+        var savedAuthor = state.AuthorOverride;
+        var savedRightSource = state.RightSource;
+        var savedRightSourceId = state.RightSourceId;
+
+        int i = 0;
+        var count = authored.Count;
+        while (i < count)
+        {
+            // Coalesce the maximal run of consecutive authored ops sharing (Author, SourceReviewer).
+            int reviewer = authored[i].SourceReviewer;
+            string author = authored[i].Author;
+            int groupStart = i;
+            while (i < count &&
+                   authored[i].SourceReviewer == reviewer &&
+                   string.Equals(authored[i].Author, author, StringComparison.Ordinal))
+                i++;
+
+            var groupOps = new IrTokenOp[i - groupStart];
+            for (int k = 0; k < groupOps.Length; k++)
+                groupOps[k] = authored[groupStart + k].Op;
+            var subDiff = new IrTokenDiff(IrNodeList.From(groupOps));
+
+            if (reviewer < 0)
+            {
+                // Base-sourced group (Equal spans): both sides read the base paragraph; no author override.
+                state.AuthorOverride = null;
+                state.RightSource = baseIr;
+                state.RightSourceId = -1;
+                newPara.Add(BuildTokenOpContent(subDiff, leftTokens, leftTokens, leftRuns, leftRuns, state));
+            }
+            else
+            {
+                // Reviewer-sourced group: point the right side at THAT reviewer's right paragraph so Insert
+                // spans (indexing the reviewer's right-token list) resolve to its runs; Delete spans still
+                // read the base (left) model. Author override attributes every emitted revision.
+                state.AuthorOverride = author;
+                state.RightSource = reviewerIrs[reviewer];
+                state.RightSourceId = reviewer;
+
+                if (!rightTokensCache.TryGetValue(reviewer, out var rightTokens))
+                {
+                    string? ra = rightAnchorByReviewer.TryGetValue(reviewer, out var a) ? a : null;
+                    rightTokens = ParagraphTokens(ra, reviewerIrs[reviewer], state.Settings);
+                    rightTokensCache[reviewer] = rightTokens;
+                    var rightPara = SourceElement(ra, reviewerIrs[reviewer]);
+                    rightRunsCache[reviewer] = rightPara != null
+                        ? new SourceRunModel(rightPara)
+                        : new SourceRunModel(new XElement(W.p));
+                }
+                var rightRuns = rightRunsCache[reviewer];
+                newPara.Add(BuildTokenOpContent(subDiff, leftTokens, rightTokens, leftRuns, rightRuns, state));
+            }
+        }
+
+        state.AuthorOverride = savedAuthor;
+        state.RightSource = savedRightSource;
+        state.RightSourceId = savedRightSourceId;
+
+        sink.Add(newPara);
+    }
+
     // ----------------------------------------------------------------- fine modify path
 
     /// <summary>
@@ -1301,12 +1681,12 @@ internal static class IrMarkupRenderer
         IrEditOp op, IrTokenDiff tokenDiff, RenderState state, List<XElement> sink)
     {
         var leftPara = SourceElement(op.LeftAnchor, state.Left);
-        var rightPara = SourceElement(op.RightAnchor, state.Right);
+        var rightPara = SourceElement(op.RightAnchor, state.RightSource);
         if (leftPara == null || rightPara == null)
         {
             // Defensive: fall back to whole-block del+ins if a source element is unexpectedly missing.
             if (op.LeftAnchor != null) EmitWholeBlock(op.LeftAnchor, state.Left, state, sink, RevKind.Del, false);
-            if (op.RightAnchor != null) EmitWholeBlock(op.RightAnchor, state.Right, state, sink, RevKind.Ins, true);
+            if (op.RightAnchor != null) EmitWholeBlock(op.RightAnchor, state.RightSource, state, sink, RevKind.Ins, true);
             return;
         }
 
@@ -1316,7 +1696,7 @@ internal static class IrMarkupRenderer
         // Resolve token char spans: a token op's left span is [left[LeftStart].StartChar, left[LeftEnd-1].EndChar)
         // and likewise right. We resolve via the tokenizers so char coordinates match the diff's exactly.
         var leftTokens = ParagraphTokens(op.LeftAnchor, state.Left, state.Settings);
-        var rightTokens = ParagraphTokens(op.RightAnchor, state.Right, state.Settings);
+        var rightTokens = ParagraphTokens(op.RightAnchor, state.RightSource, state.Settings);
 
         // The new paragraph: clone the RIGHT paragraph's pPr (accepted-state paragraph properties) and rebuild
         // its run-level content from the spans.
@@ -1383,15 +1763,17 @@ internal static class IrMarkupRenderer
                         {
                             state.RegisterMediaReferences(r);
                             // Only a w:r carries run formatting — bookmarks/zero-width markers pass through
-                            // untouched (stamping an rPr onto them is schema-invalid).
-                            if (r.Name == W.r)
+                            // untouched (stamping an rPr onto them is schema-invalid). A w:hyperlink wrapper holds
+                            // its w:r(s) one level down, so stamp each contained run at its aligned left char and
+                            // advance the cursor per-run (descending into the wrapper preserves char alignment).
+                            foreach (var innerRun in RunsForFormatStamp(r))
                             {
                                 int leftChar = ls + (cursor - rs);
                                 var oldRPr = leftRuns.RPrAtChar(leftChar);
-                                ApplyRPrChange(r, oldRPr, state);
+                                ApplyRPrChange(innerRun, oldRPr, state);
+                                cursor += RunTextLength(innerRun);
                             }
                             content.Add(r);
-                            cursor += RunTextLength(r);
                         }
                     }
                     else
@@ -1421,7 +1803,135 @@ internal static class IrMarkupRenderer
             }
         }
 
-        return content;
+        return CoalesceAdjacentHyperlinks(content);
+    }
+
+    /// <summary>
+    /// Merge consecutive <c>w:hyperlink</c> siblings that are PIECES OF ONE SOURCE LINK back into a single
+    /// <c>w:hyperlink</c>. The token-op walk slices a hyperlink whose anchor is edited INTERNALLY into one wrapper
+    /// per overlapping op (e.g. Equal "our " then del "website" then ins "homepage"); without re-joining them the
+    /// rendered structure would be N adjacent links instead of the source's one, so accept/reject would match
+    /// only at the text level, not the block ContentHash level.
+    ///
+    /// Adjacency is grouped by SOURCE-LINK IDENTITY (the transient <see cref="SourceLinkId"/> ordinal stamped in
+    /// <see cref="SourceRunModel.Slice"/>), NOT by attribute equality. Two genuinely DISTINCT adjacent source
+    /// links that happen to share a target carry DIFFERENT ordinals, so they never group — fixing the regression
+    /// where attribute-equality grouping folded an unedited link plus the next link's edit into one link, so
+    /// reject collapsed two source links into one (ContentHash divergence). All fragments of ONE edited link
+    /// share the ordinal (the LEFT and RIGHT models number their Nth hyperlink identically), so an intra-anchor
+    /// edit's Equal/del/ins pieces group together.
+    ///
+    /// The merge is still GATED to never join two links that may be DIFFERENT targets at the SAME ordinal. A
+    /// wrapper is "revision-pure" when all its run-level children are <c>w:del</c>/<c>w:ins</c> (no plain
+    /// <c>w:r</c>). The whole-anchor retarget case (WC019: a link's text AND href both change → pure
+    /// <c>w:del</c>-link of the OLD target followed by a pure <c>w:ins</c>-link of the NEW target, the new id
+    /// remapped post-assembly) is ordinal-0 del + ordinal-0 ins with NO plain piece — those MUST stay separate
+    /// so the remap + empty-shell-drop restore the right/left link on each side. An intra-anchor TEXT edit always
+    /// carries an Equal (plain-run) piece that anchors the group, so its del/ins pieces fold into a link that
+    /// already holds a plain run — the gate lets that through. The transient ordinal marker is stripped from
+    /// every wrapper before return so it never reaches output.
+    /// </summary>
+    private static List<XElement> CoalesceAdjacentHyperlinks(List<XElement> content)
+    {
+        var merged = new List<XElement>();
+        int i = 0;
+        while (i < content.Count)
+        {
+            var el = content[i];
+            if (el.Name != W.hyperlink)
+            {
+                merged.Add(el);
+                i++;
+                continue;
+            }
+
+            // Gather the maximal run of adjacent hyperlinks that came from the SAME source link (same
+            // SourceLinkId ordinal). They are pieces of the same token-op walk over one source-link char span;
+            // the slicer emits one wrapper per overlapping op. Distinct adjacent links carry distinct ordinals and
+            // so end the run, even when their attributes (target) coincide.
+            int j = i + 1;
+            while (j < content.Count && content[j].Name == W.hyperlink && SameSourceLink(el, content[j]))
+                j++;
+
+            int runLen = j - i;
+            // Coalesce the run into ONE w:hyperlink IFF it carries at least one plain (Equal/unchanged) run — the
+            // signal that some anchor text matched on both sides (so the link's target is the SAME on both sides).
+            // A run with NO plain piece is a pure del→ins retarget (WC019: text AND href both change → del-link of
+            // the OLD target, ins-link of the NEW target, the new id remapped post-assembly) — those MUST stay
+            // separate so the remap + empty-shell-drop restore the right/left link on each side.
+            bool anyPlainRun = false;
+            for (int k = i; k < j; k++)
+                if (!IsRevisionPureHyperlink(content[k]))
+                {
+                    anyPlainRun = true;
+                    break;
+                }
+
+            if (runLen > 1 && anyPlainRun)
+            {
+                var combined = new XElement(el);                 // clone the first (carries the shell attributes)
+                for (int k = i + 1; k < j; k++)
+                    combined.Add(content[k].Elements());
+                merged.Add(combined);
+            }
+            else
+            {
+                for (int k = i; k < j; k++)
+                    merged.Add(content[k]);
+            }
+            i = j;
+        }
+
+        // Strip the transient source-link ordinal marker from every emitted wrapper so it never reaches output.
+        // (The body-wide pt: sweep in Render would also catch it, but stripping here keeps the marker an internal
+        // detail of the coalescer and protects callers that inspect the returned content before that sweep.)
+        foreach (var el in merged)
+            if (el.Name == W.hyperlink)
+                el.Attribute(SourceLinkId)?.Remove();
+        return merged;
+    }
+
+    /// <summary>True iff two emitted <c>w:hyperlink</c> wrappers came from the SAME source link — i.e. they carry
+    /// the same transient <see cref="SourceLinkId"/> ordinal. A wrapper with no ordinal (defensive: a hyperlink
+    /// that bypassed the ordinal-stamping slice path) matches only another with no ordinal AND the same target
+    /// shell, so it never spuriously groups with a distinct link.</summary>
+    private static bool SameSourceLink(XElement a, XElement b)
+    {
+        var ao = a.Attribute(SourceLinkId)?.Value;
+        var bo = b.Attribute(SourceLinkId)?.Value;
+        if (ao != null || bo != null)
+            return ao == bo;
+        return SameHyperlinkShell(a, b);
+    }
+
+    /// <summary>True iff a <c>w:hyperlink</c> carries no plain (Equal/unchanged) run — every run-level child is a
+    /// revision wrapper (<c>w:del</c>/<c>w:ins</c>), or it is empty. (An empty link has no anchoring plain content
+    /// either, so it counts as revision-pure for the coalescing gate.)</summary>
+    private static bool IsRevisionPureHyperlink(XElement hyperlink) =>
+        hyperlink.Elements().All(c => c.Name == W.del || c.Name == W.ins);
+
+    /// <summary>True iff two <c>w:hyperlink</c> elements carry the same MEANINGFUL attribute set (name+value),
+    /// i.e. they target the same link — so their run content can be merged. Ignores namespace declarations and
+    /// Docxodus-internal <c>pt:</c> tracking attributes (notably the per-element <c>pt:Unid</c>, which is unique
+    /// per source node and stripped before output), since those don't affect link identity.</summary>
+    private static bool SameHyperlinkShell(XElement a, XElement b)
+    {
+        static List<XAttribute> Meaningful(XElement e) =>
+            e.Attributes()
+             .Where(at => !at.IsNamespaceDeclaration && at.Name.Namespace != PtOpenXml.pt && at.Name != PtOpenXml.Unid)
+             .ToList();
+
+        var aa = Meaningful(a);
+        var bb = Meaningful(b);
+        if (aa.Count != bb.Count)
+            return false;
+        foreach (var attr in aa)
+        {
+            var other = b.Attribute(attr.Name);
+            if (other == null || other.Value != attr.Value)
+                return false;
+        }
+        return true;
     }
 
     /// <summary>Concatenate the RAW token text over a half-open token-index span (empty span ⇒ "").</summary>
@@ -1476,6 +1986,15 @@ internal static class IrMarkupRenderer
     /// <summary>The number of <c>w:t</c> characters a rebuilt run carries (for advancing the char cursor).</summary>
     private static int RunTextLength(XElement run) =>
         run.Elements(W.t).Sum(t => t.Value.Length);
+
+    /// <summary>The <c>w:r</c> elements that should receive a <c>w:rPrChange</c> stamp for a FormatChanged span,
+    /// given an emitted run-level element: the element itself when it IS a run, otherwise its descendant runs (a
+    /// <c>w:hyperlink</c> wrapper holds its run(s) one level down). Non-run, run-less elements (bookmarks,
+    /// zero-width markers) yield nothing — stamping an rPr onto them is schema-invalid.</summary>
+    private static System.Collections.Generic.IEnumerable<XElement> RunsForFormatStamp(XElement runLevel) =>
+        runLevel.Name == W.r
+            ? new[] { runLevel }
+            : runLevel.Descendants(W.r);
 
     /// <summary>
     /// Stamp <paramref name="run"/> (a RIGHT-side run rebuilt over a FormatChanged span) with a
@@ -1608,7 +2127,7 @@ internal static class IrMarkupRenderer
         if ((op.RightAnchor?.StartsWith("sec:", StringComparison.Ordinal) ?? false) ||
             (op.LeftAnchor?.StartsWith("sec:", StringComparison.Ordinal) ?? false))
             return true;
-        return ResolveBlock(op.RightAnchor, state.Right) is IrSectionBreak ||
+        return ResolveBlock(op.RightAnchor, state.RightSource) is IrSectionBreak ||
                ResolveBlock(op.LeftAnchor, state.Left) is IrSectionBreak;
     }
 
@@ -1660,7 +2179,7 @@ internal static class IrMarkupRenderer
     /// ascending revision-id counter (no static state), and the live RIGHT-sourced clone roots whose media must
     /// be imported into the left package. One instance per call ⇒ concurrent renders never share a counter.
     /// </summary>
-    private sealed class RenderState
+    internal sealed class RenderState
     {
         private int _nextId = 1;
 
@@ -1668,6 +2187,7 @@ internal static class IrMarkupRenderer
         {
             Left = left;
             Right = right;
+            RightSource = right;   // two-way: the right source IS the right doc — never reassigned, so behavior is unchanged.
             Settings = settings;
         }
 
@@ -1675,17 +2195,42 @@ internal static class IrMarkupRenderer
         public IrDocument Right { get; }
         public IrDiffSettings Settings { get; }
 
-        /// <summary>RIGHT-sourced clone roots (in document order) that may carry image relationship references
-        /// the LEFT package cannot resolve. After they are placed in the new body (still the same XElement
-        /// instances), <see cref="WmlComparer.MoveRelatedPartsToDestination"/> walks each and remaps ids in
-        /// place. Only roots actually containing an r-namespace attribute are recorded, so the common
-        /// text-only case adds nothing.</summary>
-        public List<XElement> RightSourcedClones { get; } = new();
+        /// <summary>The document the CURRENTLY-emitting op draws inserted/modified ("right-side") block elements
+        /// and token text from. In a two-way render this is always <see cref="Right"/> (set once in the ctor and
+        /// never reassigned), so behavior is byte-identical to before this field existed. The composite renderer
+        /// switches it per op to the contributing reviewer's IR (or <see cref="Left"/>/base for a base-sourced
+        /// equal/delete) so the existing emit helpers can be reused per-reviewer.</summary>
+        public IrDocument RightSource { get; set; }
+
+        /// <summary>When non-null, overrides Settings.AuthorForRevisions for emitted revision attributes
+        /// (composite multi-author rendering). Null for normal two-way render → behavior unchanged.</summary>
+        public string? AuthorOverride { get; set; }
+
+        /// <summary>The bucket key of the CURRENTLY-active right source package, used to attribute media-bearing
+        /// clones to the package they must be imported FROM. Two-way uses the single key 0 (the right package);
+        /// the composite renderer sets it to the contributing reviewer's index per op so <see cref="Render"/>'s
+        /// media-import pass (composite path) can copy each clone's parts from the correct reviewer package.</summary>
+        public int RightSourceId { get; set; }
+
+        /// <summary>RIGHT-sourced clone roots that may carry image relationship references the base package cannot
+        /// resolve, BUCKETED by <see cref="RightSourceId"/> (the source package they were cloned from). After they
+        /// are placed in the new body (still the same XElement instances),
+        /// <see cref="WmlComparer.MoveRelatedPartsToDestination"/> walks each and remaps ids in place. Only roots
+        /// actually containing an r-namespace attribute are recorded, so the common text-only case adds nothing.
+        /// In a two-way render every clone lands in bucket 0 (the right package).</summary>
+        public Dictionary<int, List<XElement>> RightSourcedClonesBySource { get; } = new();
+
+        /// <summary>The two-way render's single clone bucket (bucket 0 = the right package). Preserves the original
+        /// flat-list API for the two-way <see cref="Render"/> media-import pass; equivalent to the bucket-0 list.
+        /// Returns a shared immutable empty sequence when bucket 0 is absent; callers only read (never mutate) the
+        /// returned value, so the shared-immutable pattern is safe and allocation-free.</summary>
+        public IReadOnlyList<XElement> RightSourcedClones =>
+            RightSourcedClonesBySource.TryGetValue(0, out var list) ? list : Array.Empty<XElement>();
 
         /// <summary>Fresh (author, id, date) attribute triple for one revision element; id ascends from 1.</summary>
         public object[] RevisionAttributes() => new object[]
         {
-            new XAttribute(W.author, Settings.AuthorForRevisions),
+            new XAttribute(W.author, AuthorOverride ?? Settings.AuthorForRevisions),
             new XAttribute(W.id, _nextId++),
             new XAttribute(W.date, Settings.DateTimeForRevisions),
         };
@@ -1711,11 +2256,16 @@ internal static class IrMarkupRenderer
         }
 
         /// <summary>Record a RIGHT-sourced clone for media import iff it references any relationship id (an
-        /// image embed/link). The recorded element is the live tree node; importing happens post-assembly.</summary>
+        /// image embed/link), into the bucket for the currently-active <see cref="RightSourceId"/>. The recorded
+        /// element is the live tree node; importing happens post-assembly. Two-way always records into bucket 0.</summary>
         public void RegisterMediaReferences(XElement clone)
         {
             if (clone.DescendantsAndSelf().Attributes().Any(a => a.Name.Namespace == R.r))
-                RightSourcedClones.Add(clone);
+            {
+                if (!RightSourcedClonesBySource.TryGetValue(RightSourceId, out var list))
+                    RightSourcedClonesBySource[RightSourceId] = list = new List<XElement>();
+                list.Add(clone);
+            }
         }
     }
 
@@ -1739,40 +2289,77 @@ internal static class IrMarkupRenderer
         /// twice across adjacent token ops. Keyed by reference identity.</summary>
         private readonly HashSet<XElement> _claimedZeroWidth = new();
 
+        /// <summary>0-based ordinal of each top-level source <c>w:hyperlink</c> element within this paragraph, in
+        /// document order, keyed by the source element's reference identity. The LEFT and RIGHT models walk their
+        /// paragraphs in the same order, so the Nth hyperlink on each side gets the SAME ordinal — a STABLE
+        /// per-source-link id that <see cref="CoalesceAdjacentHyperlinks"/> uses to rejoin ONLY the fragments of
+        /// ONE source link (an intra-anchor edit emits its Equal/del/ins pieces under one ordinal), and to keep
+        /// genuinely DISTINCT adjacent links (different ordinals) separate even when they share a target.</summary>
+        private readonly Dictionary<XElement, int> _hyperlinkOrdinal = new(ReferenceEqualityComparer.Instance);
+        private int _nextHyperlinkOrdinal;
+
         public SourceRunModel(XElement para)
         {
             int charOffset = 0;
             foreach (var child in para.Elements().Where(e => e.Name != W.pPr))
-                WalkRunLevel(child, ref charOffset);
+                WalkRunLevel(child, ref charOffset, ContainerChain.Empty);
         }
 
-        private void WalkRunLevel(XElement runLevel, ref int charOffset)
+        private void WalkRunLevel(XElement runLevel, ref int charOffset, ContainerChain chain)
         {
             if (runLevel.Name == W.r)
             {
-                WalkRun(runLevel, ref charOffset);
+                WalkRun(runLevel, ref charOffset, chain);
             }
-            else if (runLevel.Name == W.hyperlink || runLevel.Name == W.ins || runLevel.Name == W.del ||
+            else if (runLevel.Name == W.hyperlink)
+            {
+                // A w:hyperlink wrapping runs. We RECURSE into its run-level children rather than treating it as
+                // one atomic blob, recording the hyperlink in the owning chain so its WRAPPER is reconstructed in
+                // Slice exactly ONCE per contiguous run group it contributes — even when several token ops overlap
+                // its char span (an intra-anchor edit, e.g. changing one word of a multi-run anchor). Before this,
+                // the whole hyperlink was re-emitted per overlapping op, doubling/tripling the anchor on the
+                // accept/reject paths. A wrapper shell (the element with its attributes but WITHOUT inner content)
+                // rides on each leaf segment so the rebuilt runs are re-wrapped. The char span advances exactly as
+                // before (sum of descendant w:t lengths), so token char coordinates are unchanged. (Other
+                // containers — sdt/smartTag/ins/del — stay atomic but are now claim-tracked in Slice so they too
+                // emit once across overlapping ops; only the hyperlink needs intra-anchor splitting to round-trip.)
+                // Assign this hyperlink its document-order ordinal (nested hyperlinks are schema-invalid, so only
+                // top-level hyperlinks are numbered). Slice stamps the ordinal onto each emitted wrapper clone so
+                // the coalescer can rejoin only fragments of the SAME source link.
+                _hyperlinkOrdinal[runLevel] = _nextHyperlinkOrdinal++;
+                var childChain = chain.Append(runLevel);
+                bool anyChild = false;
+                foreach (var child in runLevel.Elements())
+                {
+                    anyChild = true;
+                    WalkRunLevel(child, ref charOffset, childChain);
+                }
+                // An empty hyperlink (no run-level children) still needs its wrapper preserved: emit a zero-width
+                // segment carrying the shell chain so Slice re-wraps it once.
+                if (!anyChild)
+                    _segments.Add(new Segment(runLevel, charOffset, charOffset, SegmentKind.ZeroWidth) { Chain = childChain });
+            }
+            else if (runLevel.Name == W.ins || runLevel.Name == W.del ||
                      runLevel.Name == W.sdt || runLevel.Name == W.smartTag)
             {
-                // Container of runs (hyperlink/sdt/smartTag/accepted ins-del wrapper): one ATOMIC segment spanning
-                // its full inner text. We do NOT recurse into separate inner segments — the container is emitted
-                // whole (so its wrapper survives) and a span boundary never splits inside it. Its char span is
-                // the sum of its descendant w:t lengths (mirroring the tokenizer's transparent recursion).
+                // Non-hyperlink container (sdt/smartTag/accepted ins-del wrapper): one ATOMIC segment spanning its
+                // full inner text, emitted whole. Its char span is the sum of its descendant w:t lengths
+                // (mirroring the tokenizer's transparent recursion). Claim-tracked in Slice so multiple
+                // overlapping ops emit it once.
                 int start = charOffset;
                 foreach (var t in runLevel.Descendants(W.t))
                     charOffset += t.Value.Length;
-                _segments.Add(new Segment(runLevel, start, charOffset, SegmentKind.Container));
+                _segments.Add(new Segment(runLevel, start, charOffset, SegmentKind.Container) { Chain = chain });
             }
             else
             {
                 // A non-run, non-container run-level element (bookmarkStart/End, proofErr, commentRangeStart…):
                 // zero-width, atomic, kept whole.
-                _segments.Add(new Segment(runLevel, charOffset, charOffset, SegmentKind.ZeroWidth));
+                _segments.Add(new Segment(runLevel, charOffset, charOffset, SegmentKind.ZeroWidth) { Chain = chain });
             }
         }
 
-        private void WalkRun(XElement run, ref int charOffset)
+        private void WalkRun(XElement run, ref int charOffset, ContainerChain chain)
         {
             // A run can contain multiple w:t / w:tab / w:br / drawing children. We emit one segment per child
             // so a span boundary inside the run splits at child granularity, and a w:t segment can split inside.
@@ -1785,7 +2372,7 @@ internal static class IrMarkupRenderer
                     string text = child.Value;
                     int start = charOffset;
                     charOffset += text.Length;
-                    _segments.Add(new Segment(run, start, charOffset, SegmentKind.RunText) { TextChild = child });
+                    _segments.Add(new Segment(run, start, charOffset, SegmentKind.RunText) { TextChild = child, Chain = chain });
                 }
                 else if (child.Name == W.fldSimple || IsContainer(child.Name))
                 {
@@ -1793,16 +2380,16 @@ internal static class IrMarkupRenderer
                     int start = charOffset;
                     foreach (var t in child.Descendants(W.t))
                         charOffset += t.Value.Length;
-                    _segments.Add(new Segment(run, start, charOffset, SegmentKind.RunOther) { OtherChild = child });
+                    _segments.Add(new Segment(run, start, charOffset, SegmentKind.RunOther) { OtherChild = child, Chain = chain });
                 }
                 else
                 {
                     // tab/break/drawing/noteref/sym/… — zero-width run child.
-                    _segments.Add(new Segment(run, charOffset, charOffset, SegmentKind.RunOther) { OtherChild = child });
+                    _segments.Add(new Segment(run, charOffset, charOffset, SegmentKind.RunOther) { OtherChild = child, Chain = chain });
                 }
             }
             if (!any)
-                _segments.Add(new Segment(run, charOffset, charOffset, SegmentKind.RunOther));
+                _segments.Add(new Segment(run, charOffset, charOffset, SegmentKind.RunOther) { Chain = chain });
         }
 
         private static bool IsContainer(XName n) =>
@@ -1815,16 +2402,67 @@ internal static class IrMarkupRenderer
         public List<XElement> Slice(int start, int end)
         {
             var result = new List<XElement>();
-            // Group consecutive RunText/RunOther segments that share the same source run into one rebuilt w:r.
+
+            // Two-level grouping. INNER: consecutive RunText/RunOther segments sharing the SAME source run are
+            // rebuilt into one w:r (so a split w:t and its siblings keep one run + its rPr). OUTER: consecutive
+            // run-level pieces sharing the SAME owning container chain (e.g. the same w:hyperlink, by reference
+            // identity) are collected and emitted under a SINGLE clone of that chain's wrapper shells. So a
+            // hyperlink's wrapper is reconstructed EXACTLY ONCE per contiguous run group it contributes to this
+            // slice — even when its anchor spans several source runs, and even when several token ops overlap its
+            // char span (an intra-anchor edit). Before this, the whole hyperlink was re-emitted per overlapping
+            // op, doubling/tripling the anchor on accept/reject.
+            ContainerChain groupChain = ContainerChain.Empty;
+            var groupChildren = new List<XElement>();          // run-level children to wrap in groupChain
             XElement? currentRun = null;
             XElement? rebuilt = null;
 
             void FlushRun()
             {
                 if (rebuilt != null && rebuilt.Elements().Any(e => e.Name != W.rPr))
-                    result.Add(rebuilt);
+                    groupChildren.Add(rebuilt);
                 rebuilt = null;
                 currentRun = null;
+            }
+
+            void FlushGroup()
+            {
+                FlushRun();
+                if (groupChildren.Count > 0)
+                {
+                    // Wrap the collected children in clones of each container shell (outermost first), so e.g.
+                    // <w:hyperlink …><w:r>our </w:r><w:r>website</w:r></w:hyperlink> with the original attributes.
+                    object content = groupChildren.ToArray();
+                    for (int i = groupChain.Count - 1; i >= 0; i--)
+                    {
+                        var shell = groupChain[i];
+                        var wrapper = new XElement(shell.Name, shell.Attributes(), content);
+                        // Tag a hyperlink wrapper with its source-link ordinal (a TRANSIENT pt: marker the
+                        // coalescer reads and then strips) so adjacent emitted fragments are rejoined ONLY when
+                        // they came from the SAME source w:hyperlink — never two distinct links sharing a target.
+                        if (shell.Name == W.hyperlink && _hyperlinkOrdinal.TryGetValue(shell, out int ord))
+                            wrapper.SetAttributeValue(SourceLinkId, ord);
+                        content = wrapper;
+                    }
+                    if (content is XElement single)
+                        result.Add(single);
+                    else
+                        foreach (var c in (XElement[])content)
+                            result.Add(c);
+                }
+                groupChildren = new List<XElement>();
+                groupChain = ContainerChain.Empty;
+            }
+
+            void StartGroupIfNeeded(ContainerChain chain)
+            {
+                // A change of owning chain ends the current wrapper group (so a run leaving/entering a hyperlink
+                // starts a fresh wrapper). The top-level (empty) chain groups plain runs together too.
+                if (groupChildren.Count > 0 || currentRun != null)
+                {
+                    if (!groupChain.SameAs(chain))
+                        FlushGroup();
+                }
+                groupChain = chain;
             }
 
             foreach (var seg in _segments)
@@ -1840,10 +2478,19 @@ internal static class IrMarkupRenderer
                 // paragraph: a given zero-width source node is sliced into exactly one output op (the first to
                 // claim it). A standalone ZeroWidth segment keys on its own Element; a RunOther zero-width keys
                 // on its OtherChild (so two distinct zero-width children of one run are not conflated).
-                if (overlaps && seg.IsZeroWidth)
+                if (overlaps && seg.IsZeroWidth && seg.Kind != SegmentKind.Container)
                 {
                     var key = seg.OtherChild ?? seg.Element;
                     if (key != null && !_claimedZeroWidth.Add(key))
+                        overlaps = false;
+                }
+
+                // An ATOMIC Container segment (sdt/smartTag/ins/del) spans a char range several token ops can
+                // overlap (an intra-container edit). Emitting it per op would double it, so claim it exactly once
+                // (the first op to overlap it wins); later overlapping ops skip it. Keyed by element identity.
+                if (overlaps && seg.Kind == SegmentKind.Container)
+                {
+                    if (!_claimedZeroWidth.Add(seg.Element))
                         overlaps = false;
                 }
 
@@ -1857,18 +2504,24 @@ internal static class IrMarkupRenderer
                 switch (seg.Kind)
                 {
                     case SegmentKind.ZeroWidth:
+                        // A zero-width marker (incl. an empty hyperlink shell) is its own run-level piece; it joins
+                        // its owning chain group so a bookmark inside a hyperlink stays inside the wrapper.
+                        StartGroupIfNeeded(seg.Chain);
                         FlushRun();
-                        result.Add(new XElement(seg.Element));
+                        groupChildren.Add(new XElement(seg.Element));
                         break;
 
                     case SegmentKind.Container:
+                        // Atomic non-hyperlink container: emitted whole under its own (parent) chain.
+                        StartGroupIfNeeded(seg.Chain);
                         FlushRun();
-                        result.Add(new XElement(seg.Element));
+                        groupChildren.Add(new XElement(seg.Element));
                         break;
 
                     case SegmentKind.RunText:
                     case SegmentKind.RunOther:
                     {
+                        StartGroupIfNeeded(seg.Chain);
                         if (!ReferenceEquals(currentRun, seg.Element))
                         {
                             FlushRun();
@@ -1898,7 +2551,7 @@ internal static class IrMarkupRenderer
                     }
                 }
             }
-            FlushRun();
+            FlushGroup();
             return result;
         }
 
@@ -1927,6 +2580,44 @@ internal static class IrMarkupRenderer
 
         private enum SegmentKind { RunText, RunOther, ZeroWidth, Container }
 
+        /// <summary>The (possibly empty) chain of run-level container wrappers — outermost first — owning a
+        /// segment, e.g. the <c>w:hyperlink</c> a run sits inside. Reference-identity based: two segments share a
+        /// chain iff they came from the SAME wrapper element(s), so Slice re-wraps runs from one hyperlink
+        /// together and starts a fresh wrapper for a different (or no) hyperlink. Immutable; <see cref="Empty"/>
+        /// is the no-wrapper chain. Cheap shells (only the chain depth matters; clones are minted in Slice).</summary>
+        private sealed class ContainerChain
+        {
+            public static readonly ContainerChain Empty = new(System.Array.Empty<XElement>());
+
+            private readonly XElement[] _wrappers;
+            private ContainerChain(XElement[] wrappers) => _wrappers = wrappers;
+
+            public int Count => _wrappers.Length;
+            public XElement this[int i] => _wrappers[i];
+
+            public ContainerChain Append(XElement wrapper)
+            {
+                var next = new XElement[_wrappers.Length + 1];
+                System.Array.Copy(_wrappers, next, _wrappers.Length);
+                next[^1] = wrapper;
+                return new ContainerChain(next);
+            }
+
+            /// <summary>True iff the two chains are the same length and reference the same wrapper elements in
+            /// order (reference identity) — so runs nested in the identical hyperlink group together.</summary>
+            public bool SameAs(ContainerChain other)
+            {
+                if (ReferenceEquals(this, other))
+                    return true;
+                if (_wrappers.Length != other._wrappers.Length)
+                    return false;
+                for (int i = 0; i < _wrappers.Length; i++)
+                    if (!ReferenceEquals(_wrappers[i], other._wrappers[i]))
+                        return false;
+                return true;
+            }
+        }
+
         private sealed class Segment
         {
             public Segment(XElement element, int start, int end, SegmentKind kind)
@@ -1943,6 +2634,7 @@ internal static class IrMarkupRenderer
             public SegmentKind Kind { get; }
             public XElement? TextChild { get; init; }
             public XElement? OtherChild { get; init; }
+            public ContainerChain Chain { get; init; } = ContainerChain.Empty;
             public bool IsZeroWidth => Start == End;
         }
     }

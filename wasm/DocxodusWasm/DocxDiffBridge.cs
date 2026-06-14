@@ -78,4 +78,80 @@ public static partial class DocxDiffBridge
             return DocumentConverter.SerializeError(ex.Message, ex.GetType().Name);
         }
     }
+
+    /// <summary>
+    /// Consolidate multiple reviewers' edits against a shared base DOCX and return
+    /// the merged redlined DOCX as bytes (native tracked-changes markup, per-author
+    /// attribution). Returns an empty array on error.
+    /// </summary>
+    /// <param name="baseBytes">The shared base/original document.</param>
+    /// <param name="reviewersJson">JSON array of reviewers ({name, bytes} pairs) mirroring the consolidate input.</param>
+    /// <param name="settingsJson">JSON object mirroring <c>DocxDiffSettings</c>; empty string for defaults.</param>
+    [JSExport]
+    public static byte[] Consolidate(byte[] baseBytes, string reviewersJson, string settingsJson)
+    {
+        try
+        {
+            return DocxDiffOps.Consolidate(baseBytes, reviewersJson, settingsJson);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"DocxDiff.Consolidate error: {ex.GetType().Name}: {ex.Message}");
+            return Array.Empty<byte>();
+        }
+    }
+
+    /// <summary>
+    /// Consolidate multiple reviewers' edits against a shared base DOCX and return
+    /// the merged anchor-addressed revision list as a JSON object
+    /// (<c>{"revisions":[…]}</c>), or a JSON error object.
+    /// </summary>
+    [JSExport]
+    public static string GetConsolidatedRevisionsJson(byte[] baseBytes, string reviewersJson, string settingsJson)
+    {
+        try
+        {
+            return DocxDiffOps.GetConsolidatedRevisionsJson(baseBytes, reviewersJson, settingsJson);
+        }
+        catch (Exception ex)
+        {
+            return DocumentConverter.SerializeError(ex.Message, ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
+    /// Consolidate multiple reviewers' edits against a shared base DOCX and return
+    /// the merged edit script as a JSON string (the diff-as-data differentiator),
+    /// or a JSON error object.
+    /// </summary>
+    [JSExport]
+    public static string GetConsolidatedEditScriptJson(byte[] baseBytes, string reviewersJson, string settingsJson)
+    {
+        try
+        {
+            return DocxDiffOps.GetConsolidatedEditScriptJson(baseBytes, reviewersJson, settingsJson);
+        }
+        catch (Exception ex)
+        {
+            return DocumentConverter.SerializeError(ex.Message, ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
+    /// Consolidate multiple reviewers' edits against a shared base DOCX and return
+    /// the detected conflicts (overlapping reviewer edits) as a JSON string, or a
+    /// JSON error object.
+    /// </summary>
+    [JSExport]
+    public static string GetConflictsJson(byte[] baseBytes, string reviewersJson, string settingsJson)
+    {
+        try
+        {
+            return DocxDiffOps.GetConflictsJson(baseBytes, reviewersJson, settingsJson);
+        }
+        catch (Exception ex)
+        {
+            return DocumentConverter.SerializeError(ex.Message, ex.GetType().Name);
+        }
+    }
 }
