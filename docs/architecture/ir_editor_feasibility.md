@@ -56,6 +56,47 @@ layout engine** in this stack. `pagination.ts` delivers *block-flow* pages
 exact; font-dependent). True line-exact WYSIWYG would require integrating an
 external renderer (e.g. LibreOffice headless) and is explicitly out of scope.
 
+## 1a. Proof status — PoC results (the gate is cleared)
+
+The single make-or-break unknown (§5 problem 1 / §6.1: *can a single block render
+faithfully out of whole-document context?*) is now **proven yes**, at two levels:
+
+- **C# unit (`Docxodus.Tests/HtmlConversionOpsTests.cs` `HCO050`)** — for HC006 and
+  HC001, `HtmlConversionOps.RenderBlockHtml(anchor)` produces an element whose tag
+  and visible text match the corresponding `data-anchor` element from a full render
+  (the oracle), across up to 12 paragraphs/headings per doc.
+- **Browser / WASM (`npm/tests/render-block.spec.ts`)** — the same equivalence holds
+  across the real WASM boundary in Chromium, using the actual DOM — i.e. the editor's
+  incremental per-block re-render path, verified end-to-end.
+
+What was built to clear it (committed):
+- `WmlToHtmlConverterSettings.StampAnchors` → stamps `data-anchor=Unid` on
+  `p`/`h*`/`li`/`table` (`WmlToHtmlConverter.cs`).
+- `HtmlConversionOps.RenderBlockHtml(bytes, anchor, options)` → renders one block via a
+  **throwaway document** that copies the source's styles / numbering / theme / font /
+  **settings** parts (the converter requires `DocumentSettingsPart`), then runs the
+  standard converter and extracts the stamped block.
+- WASM `DocumentConverter.RenderBlockHtml` + `stampAnchors` on `ConvertDocxToHtmlComplete`;
+  npm `renderBlockHtml()` + `ConversionOptions.stampAnchors`.
+
+Findings / refinements vs the original design:
+- **Unid authority must be singular.** The first attempt resolved the anchor via the
+  markdown projector while the full render stamped via `AssignToAllElementsDeterministic`
+  — the two unid schemes diverged. Fix: both the stamp and `RenderBlockHtml` assign Unids
+  with the **identical call** (`AssignToAllElementsDeterministic` over the main-document
+  root); `RenderBlockHtml` then resolves by the `Unid` attribute directly (keying on the
+  anchor's unid tail, so a bare unid or a full `kind:scope:unid` both work).
+- **`data-anchor` carries the bare unid** today; the editor passes it straight back to
+  `renderBlockHtml`. (If DocxSession-style `kind:scope:unid` is wanted in the DOM later,
+  stamp the full id — `RenderBlockHtml` already accepts both.)
+- **Confirmed degradations (acceptable PoC limits, see §8):** a list item rendered in
+  isolation loses numbering *continuation*; an inline image loses its (uncopied) image
+  part. The oracle test targets text paragraphs/headings and skips image blocks.
+- **Latency:** not yet profiled on a large doc. `RenderBlockHtml` currently re-opens the
+  bytes and re-assigns Unids over the whole document per call — fine on small docs, but
+  Plan 2 should offer a **session-attached** render (reuse the live `DocxSession` doc) to
+  avoid the per-call whole-doc Unid pass.
+
 ## 2. Locked decisions
 
 | Decision | Choice | Consequence |
