@@ -4038,4 +4038,92 @@ public class DocxSessionTests
         Assert.Equal(s1A, s2A);    // A unchanged → same id
         Assert.NotEqual(s1B, s2B); // B's text changed → new id
     }
+
+    // ─── DS314/DS315/DS316: note references survive ReplaceText (issue B3) ──────
+    //
+    // ReplaceText replaces a whole block's visible text. A footnote/endnote
+    // reference is a zero-width, semantically-significant marker that points into
+    // the FootnotesPart/EndnotesPart — dropping it on a text edit silently orphans
+    // the note definition (the destructive-accept symptom seen in the consolidate
+    // footnotes-survive battery). These assert the body-side <w:footnoteReference>
+    // (and endnote) survive the edit, on both the default (accept) and tracked paths.
+
+    private static int BodyNoteRefCount<T>(byte[] bytes)
+        where T : OpenXmlElement
+    {
+        using var s = new MemoryStream(bytes);
+        using var d = WordprocessingDocument.Open(s, false);
+        return d.MainDocumentPart!.Document.Body!.Descendants<T>().Count();
+    }
+
+    [Fact]
+    public void DS314_ReplaceText_PreservesFootnoteReference_AcceptMode()
+    {
+        var baseBytes = BuildDS140_FootnoteFixture(); // "Main text"[fnRef]" continued."
+        Assert.Equal(1, BodyNoteRefCount<FootnoteReference>(baseBytes));
+
+        using var s = new DocxSession(baseBytes);
+        var para = s.Project().AnchorIndex.Values.Single(t => t.Anchor.Kind == "p" && t.Anchor.Scope == "body");
+        var r = s.ReplaceText(para.Anchor.Id, "Main text EDITED continued.");
+        Assert.True(r.Success, r.Error?.Message);
+
+        var saved = s.Save();
+        Assert.Equal("Main text EDITED continued.", string.Join("\n",
+            BodyParagraphTexts(saved)));
+        // The body-side footnote reference survives the whole-block replace.
+        Assert.Equal(1, BodyNoteRefCount<FootnoteReference>(saved));
+    }
+
+    [Fact]
+    public void DS315_ReplaceText_PreservesFootnoteReference_TrackedMode()
+    {
+        var baseBytes = BuildDS140_FootnoteFixture();
+
+        var settings = new DocxSessionSettings
+        {
+            TrackedChanges = TrackedChangeMode.RenderInline,
+            RevisionAuthor = "Tester",
+        };
+        using var s = new DocxSession(baseBytes, settings);
+        var para = s.Project().AnchorIndex.Values.Single(t => t.Anchor.Kind == "p" && t.Anchor.Scope == "body");
+        var r = s.ReplaceText(para.Anchor.Id, "Main text EDITED continued.");
+        Assert.True(r.Success, r.Error?.Message);
+
+        var saved = s.Save();
+        // The note ref must NOT be swept into the w:del: it survives on both sides.
+        Assert.Equal(1, BodyNoteRefCount<FootnoteReference>(saved));
+
+        var accepted = RevisionProcessor.AcceptRevisions(new WmlDocument("a.docx", saved));
+        var rejected = RevisionProcessor.RejectRevisions(new WmlDocument("r.docx", saved));
+        Assert.Equal("Main text EDITED continued.", string.Join("\n",
+            BodyParagraphTexts(accepted.DocumentByteArray)));
+        Assert.Equal("Main text continued.", string.Join("\n",
+            BodyParagraphTexts(rejected.DocumentByteArray)));
+        Assert.Equal(1, BodyNoteRefCount<FootnoteReference>(accepted.DocumentByteArray));
+        Assert.Equal(1, BodyNoteRefCount<FootnoteReference>(rejected.DocumentByteArray));
+    }
+
+    [Fact]
+    public void DS316_ReplaceText_PreservesEndnoteReference_AcceptMode()
+    {
+        var baseBytes = BuildDS141_EndnoteFixture(); // "Body text"[enRef]
+        Assert.Equal(1, BodyNoteRefCount<EndnoteReference>(baseBytes));
+
+        using var s = new DocxSession(baseBytes);
+        var para = s.Project().AnchorIndex.Values.Single(t => t.Anchor.Kind == "p" && t.Anchor.Scope == "body");
+        var r = s.ReplaceText(para.Anchor.Id, "Body text EDITED");
+        Assert.True(r.Success, r.Error?.Message);
+
+        var saved = s.Save();
+        Assert.Equal("Body text EDITED", string.Join("\n", BodyParagraphTexts(saved)));
+        Assert.Equal(1, BodyNoteRefCount<EndnoteReference>(saved));
+    }
+
+    private static System.Collections.Generic.List<string> BodyParagraphTexts(byte[] bytes)
+    {
+        using var s = new MemoryStream(bytes);
+        using var d = WordprocessingDocument.Open(s, false);
+        return d.MainDocumentPart!.Document.Body!.Descendants<Paragraph>()
+            .Select(p => p.InnerText).ToList();
+    }
 }

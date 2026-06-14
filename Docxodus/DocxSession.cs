@@ -4201,19 +4201,47 @@ public sealed class DocxSession : IDisposable
         W.proofErr,
     };
 
+    // Inline references that point into another document part (the footnotes/endnotes
+    // part). Like comment references, they are zero-width but semantically significant:
+    // dropping the body-side <w:footnoteReference w:id="N"/> orphans the note definition
+    // and silently loses content on a text edit (issue B3). Unlike the bare-child markers
+    // above, these live inside a <w:r>, so they are detected via IsNoteRefOnlyRun.
+    private static readonly HashSet<XName> NoteReferenceNames = new()
+    {
+        W.footnoteReference, W.endnoteReference,
+    };
+
+    // True for a run whose only meaningful (non-rPr) content is a footnote/endnote
+    // reference — i.e. it carries no visible text. Such a run is a preserved marker;
+    // a run that mixes a note ref with text is ordinary content and is replaced.
+    private static bool IsNoteRefOnlyRun(XElement e)
+    {
+        if (e.Name != W.r) return false;
+        bool sawNoteRef = false;
+        foreach (var child in e.Elements())
+        {
+            if (child.Name == W.rPr) continue;
+            if (NoteReferenceNames.Contains(child.Name)) { sawNoteRef = true; continue; }
+            return false; // any other content (w:t, w:tab, w:br, …) ⇒ ordinary run
+        }
+        return sawNoteRef;
+    }
+
     private static (List<XElement> pre, List<XElement> post) ExtractWrappingMarkers(XElement paragraph)
     {
         var children = paragraph.Elements().Where(e => e.Name != W.pPr).ToList();
-        int firstRunIdx = children.FindIndex(IsInlineChild);
-        int lastRunIdx = children.FindLastIndex(IsInlineChild);
+        // Position note-ref-only runs relative to the runs that actually carry text, so a
+        // leading reference sorts before the replacement and a trailing one after it.
+        int firstTextIdx = children.FindIndex(c => IsInlineChild(c) && !IsNoteRefOnlyRun(c));
+        int lastTextIdx = children.FindLastIndex(c => IsInlineChild(c) && !IsNoteRefOnlyRun(c));
         var pre = new List<XElement>();
         var post = new List<XElement>();
         for (int i = 0; i < children.Count; i++)
         {
             var c = children[i];
-            if (!PreservedMarkerNames.Contains(c.Name)) continue;
-            if (firstRunIdx < 0 || i < firstRunIdx) pre.Add(c);
-            else if (i > lastRunIdx) post.Add(c);
+            if (!PreservedMarkerNames.Contains(c.Name) && !IsNoteRefOnlyRun(c)) continue;
+            if (firstTextIdx < 0 || i < firstTextIdx) pre.Add(c);
+            else if (i > lastTextIdx) post.Add(c);
             else pre.Add(c); // interleaved → wrap from the start (best-effort)
         }
         return (pre, post);
@@ -4259,11 +4287,25 @@ public sealed class DocxSession : IDisposable
         var author = _settings.RevisionAuthor ?? "docxodus";
         var date = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-        // Wrap existing runs in w:del (converting w:t to w:delText).
+        // Note references (footnote/endnote) are zero-width, semantically-significant
+        // markers that must survive the edit on BOTH accept and reject — they must not
+        // be swept into the w:del (issue B3). Pull the note-ref-only runs out (recording
+        // whether each sat before or after the visible text) so we can replace them
+        // around the del/ins. Bare-child markers (bookmark/comment ranges) are left in
+        // place, exactly as before. ExtractWrappingMarkers gives us the leading/trailing
+        // split relative to the text runs.
+        var (preMarkers, postMarkers) = ExtractWrappingMarkers(paragraph);
+        var preNoteRefs = preMarkers.Where(IsNoteRefOnlyRun).ToList();
+        var postNoteRefs = postMarkers.Where(IsNoteRefOnlyRun).ToList();
+        foreach (var m in preNoteRefs) m.Remove();
+        foreach (var m in postNoteRefs) m.Remove();
+
+        // Wrap remaining existing runs (the visible text) in w:del (converting w:t to w:delText).
         var existingRuns = paragraph.Elements(W.r).ToList();
+        XElement? del = null;
         if (existingRuns.Count > 0)
         {
-            var del = new XElement(W.del,
+            del = new XElement(W.del,
                 new XAttribute(W.id, NextRevisionId()),
                 new XAttribute(W.author, author),
                 new XAttribute(W.date, date));
@@ -4279,19 +4321,23 @@ public sealed class DocxSession : IDisposable
                 }
                 del.Add(run);
             }
-            paragraph.Add(del);
         }
 
+        XElement? ins = null;
         if (blocks.Count > 0 && blocks[0].RunElements.Count > 0)
         {
-            var ins = new XElement(W.ins,
+            ins = new XElement(W.ins,
                 new XAttribute(W.id, NextRevisionId()),
                 new XAttribute(W.author, author),
                 new XAttribute(W.date, date));
             foreach (var run in blocks[0].RunElements)
                 ins.Add(new XElement(run));
-            paragraph.Add(ins);
         }
+
+        foreach (var m in preNoteRefs) paragraph.Add(m);
+        if (del is not null) paragraph.Add(del);
+        if (ins is not null) paragraph.Add(ins);
+        foreach (var m in postNoteRefs) paragraph.Add(m);
     }
 
     private void WrapRunsInDel(XElement element)
