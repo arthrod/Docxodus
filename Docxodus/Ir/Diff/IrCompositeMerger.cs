@@ -556,7 +556,7 @@ internal static class IrCompositeMerger
         if (touched.Count == 1)
         {
             var (rev, op) = touched[0];
-            ops.Add(new IrCompositeOp(op, reviewers[rev].Author, rev));
+            ops.Add(EmitOp(op, reviewers[rev].Author, rev));
             return;
         }
 
@@ -574,8 +574,8 @@ internal static class IrCompositeMerger
             conflicts.Add(new IrConflict(nextConflictId++, anchor, 0, 0, policy,
                 IrNodeList.From(touched.Select(e =>
                     new IrConflictCompetitor(reviewers[e.Reviewer].Author,
-                        BlockResultText(e.Op, reviewers[e.Reviewer].Ir, settings))))));
-            ops.Add(new IrCompositeOp(touched[0].Op, reviewers[touched[0].Reviewer].Author, touched[0].Reviewer));
+                        ContestedBlockText(e.Op, baseIr, settings))))));
+            ops.Add(EmitOp(touched[0].Op, reviewers[touched[0].Reviewer].Author, touched[0].Reviewer));
             return;
         }
 
@@ -589,7 +589,7 @@ internal static class IrCompositeMerger
                 !(touched.Count > 1 && touched.Any(e => IsUncomparableModify(e.Op))),
                 "Multi-reviewer uncomparable edit reached consensus emit — a non-paragraph edit is being silently dropped.");
             var (rev, op) = touched[0];
-            ops.Add(new IrCompositeOp(op, reviewers[rev].Author, rev));
+            ops.Add(EmitOp(op, reviewers[rev].Author, rev));
             return;
         }
         if (touched.All(e => e.Op.Kind == IrEditOpKind.ModifyBlock && e.Op.TokenDiff != null)
@@ -630,7 +630,7 @@ internal static class IrCompositeMerger
             case Docxodus.ConflictResolution.BaseWins:
                 ops.Add(EqualOp(anchor)); break;
             case Docxodus.ConflictResolution.FirstReviewerWins:
-                ops.Add(new IrCompositeOp(touched[0].Op, reviewers[touched[0].Reviewer].Author, touched[0].Reviewer, null, cid)); break;
+                ops.Add(EmitOp(touched[0].Op, reviewers[touched[0].Reviewer].Author, touched[0].Reviewer, cid)); break;
             case Docxodus.ConflictResolution.StackAll:
                 EmitStackAllBlockConflict(anchor, touched, reviewers, cid, ops);
                 break;
@@ -661,8 +661,10 @@ internal static class IrCompositeMerger
         // (O(emitted) per call) rather than rescanning the whole accumulated stream (O(N) → O(N²) over the doc).
         int priorCount = ops.Count;
 
-        // touched[0] stays base-anchored verbatim (lowest reviewer index — base-consuming on reject).
-        ops.Add(new IrCompositeOp(touched[0].Op, reviewers[touched[0].Reviewer].Author, touched[0].Reviewer, null, cid));
+        // touched[0] stays base-anchored verbatim (lowest reviewer index — base-consuming on reject), but
+        // CONTRACT-CLEANED: if it is a lowered move-source DeleteBlock its internal relocation marker must
+        // not leak into the emitted op (EmitOp strips MoveGroupId/IsMoveSource for Delete/Insert).
+        ops.Add(EmitOp(touched[0].Op, reviewers[touched[0].Reviewer].Author, touched[0].Reviewer, cid));
 
         // Every other competitor that carries right content becomes a base-anchorless InsertBlock (its
         // reviewer's right block), so it adds NOTHING on reject. Pure deletes (no right) are skipped.
@@ -686,6 +688,35 @@ internal static class IrCompositeMerger
     /// <summary>A base-sourced EqualBlock op for <paramref name="anchor"/> (Author "", reviewer -1).</summary>
     private static IrCompositeOp EqualOp(string anchor) =>
         new(new IrEditOp(IrEditOpKind.EqualBlock, anchor, anchor, null, null, null), "", -1);
+
+    /// <summary>
+    /// Build the FINAL emitted <see cref="IrCompositeOp"/> for a base-block dispatch, stripping the
+    /// internal relocation marker (<see cref="IrEditOp.MoveGroupId"/>/<see cref="IrEditOp.IsMoveSource"/>)
+    /// that <see cref="LowerStructuralOps"/> retains on a lowered move-source <see cref="IrEditOpKind.DeleteBlock"/>.
+    /// <para><b>Why.</b> The marker exists ONLY so <see cref="MergeOneBaseBlock"/>'s contested-relocation
+    /// detection can tell a relocation-delete from a plain removal — it is read off the GROUPED (pre-emit)
+    /// <c>touched</c>/byBase ops. The documented <see cref="IrEditOp"/> field-presence contract says a
+    /// <see cref="IrEditOpKind.DeleteBlock"/>/<see cref="IrEditOpKind.InsertBlock"/> carries NULL move
+    /// fields, and the public edit-script JSON (<see cref="IrCompositeScriptJson"/>) is the differentiator
+    /// — so the op that actually lands in the emitted <see cref="IrCompositeScript"/> must be contract-clean.
+    /// Every block-level emit site that may carry a marked delete routes through here; the detection still
+    /// reads the marker off the grouped ops, not the emitted one.</para>
+    /// </summary>
+    private static IrCompositeOp EmitOp(
+        IrEditOp op, string author, int sourceReviewer, int? conflictId = null) =>
+        new(StripRelocationMarker(op), author, sourceReviewer, null, conflictId);
+
+    /// <summary>
+    /// Return <paramref name="op"/> with the relocation marker cleared when it is a Delete/Insert that
+    /// (illegally for the public contract) carries move fields; otherwise return it unchanged. Only a
+    /// lowered move-source DeleteBlock ever carries the marker today, but Insert is covered too for
+    /// belt-and-suspenders so no future lowering can leak it.
+    /// </summary>
+    private static IrEditOp StripRelocationMarker(IrEditOp op) =>
+        op.Kind is (IrEditOpKind.DeleteBlock or IrEditOpKind.InsertBlock)
+            && (op.MoveGroupId is not null || op.IsMoveSource is not null)
+            ? op with { MoveGroupId = null, IsMoveSource = null }
+            : op;
 
     /// <summary>
     /// Index every reviewer's right-only <see cref="IrEditOpKind.InsertBlock"/> op by the base anchor it
@@ -727,7 +758,7 @@ internal static class IrCompositeMerger
     {
         if (!insertsAfter.TryGetValue(anchor, out var list)) return;
         foreach (var (rev, op) in list)
-            ops.Add(new IrCompositeOp(op, reviewers[rev].Author, rev));
+            ops.Add(EmitOp(op, reviewers[rev].Author, rev));
     }
 
     // ---- Task 1.4: result-equivalence + tokenization helpers ----
@@ -865,6 +896,34 @@ internal static class IrCompositeMerger
                 // (rather than ""): concatenate each cell's paragraph text, cells separated by '␟' (unit
                 // separator) and rows by '␞' (record separator) so two differently-edited tables produce
                 // distinguishable strings. v1 does not compose table cells; this text is for conflict reporting.
+                AppendTableText(tbl, sb, settings);
+                break;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The conflict-competitor text for a CONTESTED RELOCATION (2+ reviewers each relocated the same base
+    /// block to different places). The competing ops are lowered move-source DeleteBlocks with a NULL
+    /// RightAnchor, so <see cref="BlockResultText"/> would return "" for every competitor — leaving the
+    /// recorded conflict unable to identify WHICH block is contested. Source the text from the contested
+    /// block's LEFT content instead (the base block being relocated, resolved via the op's
+    /// <see cref="IrEditOp.LeftAnchor"/>), so the conflict names the relocated block. All competitors share
+    /// the same base block, so they all report the same (identifying) text — the disagreement is the
+    /// destination, recorded by the per-reviewer routing of the relocating inserts, not the text here.
+    /// </summary>
+    private static string ContestedBlockText(IrEditOp op, IrDocument baseIr, IrDiffSettings settings)
+    {
+        if (op.LeftAnchor is not { } la || !baseIr.AnchorIndex.TryGetValue(la, out var block))
+            return "";
+        var sb = new System.Text.StringBuilder();
+        switch (block)
+        {
+            case IrParagraph p:
+                foreach (var t in IrDiffTokenizer.Tokenize(p, settings))
+                    sb.Append(t.Text);
+                break;
+            case IrTable tbl:
                 AppendTableText(tbl, sb, settings);
                 break;
         }

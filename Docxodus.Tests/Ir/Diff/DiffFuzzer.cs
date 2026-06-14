@@ -266,7 +266,20 @@ internal static class DiffFuzzer
     public static CompositeFuzzCase GenerateCompositeWithStructure(int seed, int reviewerCount) =>
         GenerateComposite(seed, reviewerCount, keepStructure: true);
 
-    private static CompositeFuzzCase GenerateComposite(int seed, int reviewerCount, bool keepStructure)
+    /// <summary>
+    /// Like <see cref="GenerateComposite(int,int)"/>, but the reviewer mutation pool ADDITIONALLY includes
+    /// the STRUCTURAL kinds (<see cref="MutationKind.RelocateParagraph"/> / <see cref="MutationKind.SplitParagraph"/>
+    /// / <see cref="MutationKind.MergeParagraphs"/>) so a consolidate exercises the merger's
+    /// <c>LowerStructuralOps</c> lowering + contested-relocation branch — paths the paragraph-only pool never
+    /// reaches. The base stays paragraph-only (no table/footnote, like the default composite set) so the
+    /// body-text apply-verifier oracle applies. Consumed by the structural-op composite fuzz test, which
+    /// asserts reject ≡ base AND no content loss on accept (the apply-verifier).
+    /// </summary>
+    public static CompositeFuzzCase GenerateCompositeWithStructuralOps(int seed, int reviewerCount) =>
+        GenerateComposite(seed, reviewerCount, keepStructure: false, keepStructuralOps: true);
+
+    private static CompositeFuzzCase GenerateComposite(
+        int seed, int reviewerCount, bool keepStructure, bool keepStructuralOps = false)
     {
         var rng = new Random(seed);
 
@@ -311,7 +324,7 @@ internal static class DiffFuzzer
             var applied = new List<Mutation>();
             for (int k = 0; k < count; k++)
             {
-                var m = PickCompositeMutation(rng, model, i, reviewerCount);
+                var m = PickCompositeMutation(rng, model, i, reviewerCount, keepStructuralOps);
                 if (m is { } mut && Apply(model, mut))
                     applied.Add(mut);
             }
@@ -328,18 +341,31 @@ internal static class DiffFuzzer
     /// partition (<c>paraIndex % reviewerCount == reviewer</c>). A small deliberate-collision chance instead
     /// targets a foreign paragraph so the oracle is also exercised under occasional cross-reviewer overlap.
     /// Returns null when no paragraph can be targeted (an empty partition), which the caller treats as a
-    /// skipped slot. The v1 composite pool is paragraph-only (EditWord / InsertParagraph / DeleteParagraph) —
-    /// EditTableCell and EditFootnote are excluded (see <see cref="GenerateComposite"/>).
+    /// skipped slot. The default composite pool is paragraph-only (EditWord / InsertParagraph /
+    /// DeleteParagraph) — EditTableCell and EditFootnote are excluded (see <see cref="GenerateComposite"/>).
+    /// <para>When <paramref name="keepStructuralOps"/> is true the pool ALSO includes the structural kinds
+    /// (RelocateParagraph / SplitParagraph / MergeParagraphs), so a consolidate exercises the merger's
+    /// structural-op lowering + contested-relocation branch. Their operands are resolved against the
+    /// reviewer's partition paragraph; <see cref="Apply"/> clamps every index into range (and no-ops a
+    /// mutation that cannot apply, e.g. a split of a &lt;4-word paragraph), so an out-of-shape pick is simply
+    /// skipped.</para>
     /// </summary>
-    private static Mutation? PickCompositeMutation(Random rng, DocModel model, int reviewer, int reviewerCount)
+    private static Mutation? PickCompositeMutation(
+        Random rng, DocModel model, int reviewer, int reviewerCount, bool keepStructuralOps = false)
     {
-        var pool = new[]
+        var pool = new List<MutationKind>
         {
             MutationKind.EditWord, MutationKind.EditWord,
             MutationKind.InsertParagraph,
             MutationKind.DeleteParagraph,
         };
-        var kind = pool[rng.Next(pool.Length)];
+        if (keepStructuralOps)
+        {
+            pool.Add(MutationKind.RelocateParagraph);
+            pool.Add(MutationKind.SplitParagraph);
+            pool.Add(MutationKind.MergeParagraphs);
+        }
+        var kind = pool[rng.Next(pool.Count)];
 
         // 1-in-8 deliberate collision: target a foreign paragraph; otherwise this reviewer's partition.
         bool collide = rng.Next(8) == 0;
@@ -353,6 +379,16 @@ internal static class DiffFuzzer
             MutationKind.InsertParagraph =>
                 new Mutation(kind, Index: para, Payload: BankWord(rng)),
             MutationKind.DeleteParagraph =>
+                new Mutation(kind, Index: para),
+            // Relocate FROM the partition paragraph to a seeded destination (Apply resolves both modulo
+            // and re-targets when from == to, so a valid move always results when ≥3 paragraphs exist).
+            MutationKind.RelocateParagraph =>
+                new Mutation(kind, Index: para, Target: rng.Next(0, 1_000)),
+            // Split the partition paragraph at a seeded word boundary (Apply no-ops if it has <4 words).
+            MutationKind.SplitParagraph =>
+                new Mutation(kind, Index: para, Target: rng.Next(0, 1_000)),
+            // Merge the partition paragraph with its successor (Apply resolves the index modulo Count-1).
+            MutationKind.MergeParagraphs =>
                 new Mutation(kind, Index: para),
             _ => null,
         };

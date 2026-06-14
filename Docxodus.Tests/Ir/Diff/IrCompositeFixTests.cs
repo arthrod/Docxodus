@@ -211,11 +211,16 @@ public class IrCompositeFixTests
 
     /// <summary>
     /// BUG 1 (move-disjoint). Base [P1,P2,P3,P4]; Alice relocates P2 to the end; Bob edits a word in P1.
-    /// On accept the moved paragraph P2 must survive (it was dropped before the lowering fix) and every
-    /// paragraph must be present; reject ≡ base.
+    /// Alice and Bob touch DIFFERENT base blocks (P2 vs P1), so there is no block conflict and BOTH edits
+    /// apply under every policy. On accept the moved paragraph P2 must survive (it was dropped before the
+    /// lowering fix) and every paragraph must be present; reject ≡ base. Parameterized over all three
+    /// policies (the disjoint edits make the result policy-invariant).
     /// </summary>
-    [Fact]
-    public void Move_disjoint_accept_preserves_moved_paragraph()
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Move_disjoint_accept_preserves_moved_paragraph(ConflictResolution policy)
     {
         const string p1 = "First paragraph alpha bravo";
         const string p2 = "Second paragraph charlie delta";
@@ -226,7 +231,7 @@ public class IrCompositeFixTests
         var alice = Docs.Para(p1, p3, p4, p2);                       // P2 relocated to the end (a move)
         var bob = Docs.Para("First paragraph alpha EDITED", p2, p3, p4); // edits a word in P1, in place
 
-        var merged = Consolidate(baseDoc, ConflictResolution.StackAll, ("Alice", alice), ("Bob", bob));
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
         var accept = PlainAccept(merged);
 
         // The moved paragraph P2 must NOT be lost on accept (the key bug).
@@ -295,22 +300,27 @@ public class IrCompositeFixTests
     /// Bob's edit (the original two paragraphs, Alice's merge silently gone) with conflicts==0 (data loss).
     /// After lowering, Alice's merge becomes deletes (of the base blocks) + an insert (the merged result);
     /// the deleted base block Bob also edited is contested → a recorded conflict, and Alice's merged
-    /// paragraph survives accept. Either way: NO silent drop. reject ≡ base.
+    /// paragraph survives accept under EVERY policy (the merged result is a base-anchorless insert that no
+    /// block-conflict policy suppresses). Either way: NO silent drop. reject ≡ base. Parameterized over all
+    /// three policies.
     /// </summary>
-    [Fact]
-    public void Merge_vs_edit_accept_preserves_merge()
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Merge_vs_edit_accept_preserves_merge(ConflictResolution policy)
     {
         var baseDoc = Docs.Para("Alpha alpha words here", "Beta beta words here");
         var alice = Docs.Para("Alpha alpha words here Beta beta words here"); // merges the two into one
         var bob = Docs.Para("Alpha alpha EDITED here", "Beta beta words here"); // edits a word in para 1
 
-        var merged = Consolidate(baseDoc, ConflictResolution.StackAll, ("Alice", alice), ("Bob", bob));
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
         var accept = PlainAccept(merged);
 
         // Alice's merge must NOT be silently dropped: a conflict is recorded (the merge contends with Bob's
         // edit of the same base block). conflicts == 0 with the merge missing was the original data-loss bug.
         Assert.True(
-            Conflicts(baseDoc, ConflictResolution.StackAll, ("Alice", alice), ("Bob", bob)).Count > 0,
+            Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)).Count > 0,
             "Alice's merge was silently dropped (no conflict recorded, merge absent from output).");
 
         // Alice's merged single paragraph (both halves contiguous on ONE line) survives accept — a state
@@ -328,21 +338,123 @@ public class IrCompositeFixTests
     /// BUG 4 (split-vs-edit regression guard). Base one paragraph; Alice splits it into two; Bob edits a
     /// word. Accept must preserve all content; reject ≡ base. SplitBlock carries a LeftAnchor so it reached
     /// the byBase path even before the fix — this guards that lowering split to delete+inserts does not
-    /// regress content preservation.
+    /// regress content preservation. Parameterized over all three policies (the split's two inserted
+    /// members are base-anchorless and survive accept under every policy).
     /// </summary>
-    [Fact]
-    public void Split_vs_edit_accept_preserves_content()
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Split_vs_edit_accept_preserves_content(ConflictResolution policy)
     {
         var baseDoc = Docs.Para("Alpha alpha words here Beta beta words here");
         var alice = Docs.Para("Alpha alpha words here", "Beta beta words here"); // splits into two
         var bob = Docs.Para("Alpha alpha EDITED here Beta beta words here");     // edits a word in place
 
-        var merged = Consolidate(baseDoc, ConflictResolution.StackAll, ("Alice", alice), ("Bob", bob));
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
         var accept = PlainAccept(merged);
 
         // Split content survives accept.
         Assert.Contains("Alpha alpha", accept);
         Assert.Contains("Beta beta words here", accept);
+
+        // reject ≡ base.
+        Assert.Equal(Docs.PlainText(baseDoc),
+            Docs.PlainText(RevisionProcessor.RejectRevisions(merged)));
+    }
+
+    // ---- Fix 3: novel-branch committed tests (3-reviewer contested relocation + MoveModify) ----
+
+    /// <summary>
+    /// THREE reviewers each relocate the SAME base block P2 to THREE DIFFERENT positions. This drives the
+    /// contested-relocation branch with 3 competing move-source deletes anchored at P2 (and 3 independently
+    /// routed relocating inserts). Under EVERY policy: no content loss on accept (every base paragraph's
+    /// content present — P2 relocated, never dropped), a PLACEMENT conflict is recorded (the reviewers agree
+    /// P2 leaves its origin but disagree where it lands — deliberately NOT policy-resolved into the op
+    /// stream), and reject ≡ base. The rigid P1,P3,P4,P5 spine makes P2 the unambiguous mover for all three.
+    /// </summary>
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Three_reviewers_move_same_block_records_conflict_no_loss(ConflictResolution policy)
+    {
+        const string p1 = "First paragraph alpha bravo";
+        const string p2 = "Second paragraph charlie delta";
+        const string p3 = "Third paragraph echo foxtrot";
+        const string p4 = "Fourth paragraph golf hotel";
+        const string p5 = "Fifth paragraph india juliet";
+
+        var baseDoc = Docs.Para(p1, p2, p3, p4, p5);
+        var alice = Docs.Para(p1, p3, p2, p4, p5);  // P2 → between P3 and P4
+        var bob = Docs.Para(p1, p3, p4, p2, p5);    // P2 → between P4 and P5
+        var carol = Docs.Para(p1, p3, p4, p5, p2);  // P2 → the very end
+
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob), ("Carol", carol));
+        var accept = PlainAccept(merged);
+
+        // No content loss on accept — every base paragraph present (P2's content relocated, not dropped).
+        Assert.Contains("First paragraph alpha bravo", accept);
+        Assert.Contains("Second paragraph charlie delta", accept);
+        Assert.Contains("Third paragraph echo foxtrot", accept);
+        Assert.Contains("Fourth paragraph golf hotel", accept);
+        Assert.Contains("Fifth paragraph india juliet", accept);
+
+        // A placement conflict is recorded (three reviewers disagree on P2's destination). The recorded
+        // conflict identifies the contested block by its LEFT (base) content — see ContestedBlockText.
+        var conflicts = Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob), ("Carol", carol));
+        Assert.True(conflicts.Count > 0,
+            "Three reviewers relocating the same base block must record a placement conflict.");
+
+        // Fix 3 (competitor text): the contested-relocation conflict's competitors must NAME the contested
+        // block via its LEFT (base) content — before the fix every competitor's ResultText was "" (the
+        // lowered move-source DeleteBlock has no RightAnchor), leaving the conflict unable to say WHICH
+        // block is contested. Find the placement conflict (a block-span [0,0) conflict whose competitors all
+        // carry the relocated base block P2's text) and assert it identifies P2.
+        var placement = conflicts.FirstOrDefault(c =>
+            c.Competitors.Count >= 2 &&
+            c.Competitors.All(comp => comp.ResultText.Contains("Second paragraph charlie delta")));
+        Assert.True(placement is not null,
+            "Contested-relocation conflict competitors must carry the relocated base block's LEFT content " +
+            "(identifying P2), not empty result text.");
+
+        // reject ≡ base under every policy.
+        Assert.Equal(Docs.PlainText(baseDoc),
+            Docs.PlainText(RevisionProcessor.RejectRevisions(merged)));
+    }
+
+    /// <summary>
+    /// MoveModify (move-AND-edit by one reviewer). Base [P1,P2,P3,P4]; Alice relocates P2 to the end AND
+    /// edits a word inside it in the same move (a fuzzy move-and-edit → an IR MovedModified alignment, whose
+    /// destination op carries an in-move TokenDiff). The lowering drops the in-move TokenDiff and inserts the
+    /// whole EDITED destination block while the paired source delete removes the original — so on accept the
+    /// moved+edited content lands and the original is removed; reject ≡ base. Single-reviewer, so policy is
+    /// irrelevant (StackAll exercises the single-touched path).
+    /// </summary>
+    [Fact]
+    public void MoveModify_single_reviewer_lands_moved_and_edited_content()
+    {
+        const string p1 = "First paragraph alpha bravo";
+        const string p2 = "Second paragraph charlie delta";
+        const string p3 = "Third paragraph echo foxtrot";
+        const string p4 = "Fourth paragraph golf hotel";
+
+        var baseDoc = Docs.Para(p1, p2, p3, p4);
+        // P2 relocated to the end AND a word edited inside it (charlie -> CHARLIE) — a move-and-edit.
+        var alice = Docs.Para(p1, p3, p4, "Second paragraph CHARLIE delta");
+
+        var merged = Consolidate(baseDoc, ConflictResolution.StackAll, ("Alice", alice));
+        var accept = PlainAccept(merged);
+
+        // The moved+edited content lands on accept (the edited token present, the moved block survives).
+        Assert.Contains("CHARLIE", accept);
+        Assert.Contains("Second paragraph", accept);
+        // The ORIGINAL (un-edited) P2 is removed — its pre-edit token must not survive on accept.
+        Assert.DoesNotContain("charlie delta", accept);
+        // The untouched paragraphs survive.
+        Assert.Contains("First paragraph alpha bravo", accept);
+        Assert.Contains("Third paragraph echo foxtrot", accept);
+        Assert.Contains("Fourth paragraph golf hotel", accept);
 
         // reject ≡ base.
         Assert.Equal(Docs.PlainText(baseDoc),

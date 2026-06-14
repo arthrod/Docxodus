@@ -118,8 +118,16 @@ internal static class IrCompositeScriptJson
         writer.WriteString("kind", op.Kind.ToString());
         if (op.LeftAnchor is { } left) writer.WriteString("leftAnchor", left);
         if (op.RightAnchor is { } right) writer.WriteString("rightAnchor", right);
-        if (op.MoveGroupId is { } group) writer.WriteNumber("moveGroupId", group);
-        if (op.IsMoveSource is { } source) writer.WriteBoolean("isMoveSource", source);
+        // Move fields belong ONLY to MoveBlock/MoveModifyBlock per the IrEditOp field-presence contract
+        // (IrEditScript.cs). The composite merger lowers reviewer moves to Insert/Delete and RETAINS the
+        // MoveGroupId/IsMoveSource marker on a lowered move-source DeleteBlock for its internal
+        // contested-relocation detection (IrCompositeMerger.LowerStructuralOps); that marker is stripped
+        // before emission (IrCompositeMerger.EmitOp), so a Delete/Insert reaching here should already be
+        // clean. This kind gate is the belt-and-suspenders second line of defence: only Move* kinds ever
+        // serialize move fields, so no lowering can leak them into the public edit-script JSON.
+        bool isMoveKind = op.Kind is IrEditOpKind.MoveBlock or IrEditOpKind.MoveModifyBlock;
+        if (isMoveKind && op.MoveGroupId is { } group) writer.WriteNumber("moveGroupId", group);
+        if (isMoveKind && op.IsMoveSource is { } source) writer.WriteBoolean("isMoveSource", source);
         if (op.TokenDiff is { } diff)
         {
             writer.WritePropertyName("tokenDiff");
