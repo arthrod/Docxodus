@@ -576,6 +576,95 @@ public class IrMarkupRendererTests
         Assert.NotEqual("rId4", rightRel.Id);
     }
 
+    // ----------------------------------------------------------------- hyperlink-internal edits (B1)
+
+    private const string RelsNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+    /// <summary>
+    /// Build a one-paragraph body: "Visit " + a <c>w:hyperlink</c> (r:id "rIdLink") wrapping the supplied
+    /// run-level XML + " for details." — so the hyperlink anchor is editable independently of the surrounding
+    /// text. <paramref name="anchorRunsXml"/> is the inner XML of the hyperlink (one or more <c>w:r</c>).
+    /// </summary>
+    private static WmlDocument HyperlinkPara(string anchorRunsXml)
+    {
+        const string preserve = " xml:space=\"preserve\"";
+        var body =
+            "<w:p>" +
+            $"<w:r><w:t{preserve}>Visit </w:t></w:r>" +
+            $"<w:hyperlink r:id=\"rIdLink\" xmlns:r=\"{RelsNs}\">{anchorRunsXml}</w:hyperlink>" +
+            $"<w:r><w:t{preserve}> for details.</w:t></w:r>" +
+            "</w:p>";
+        return Docxodus.Tests.Ir.IrTestDocuments.FromBodyXmlWithHyperlinks(
+            body, ("rIdLink", "https://example.com"));
+    }
+
+    /// <summary>
+    /// B1 regression: editing a WORD INSIDE a multi-run <c>w:hyperlink</c> anchor must round-trip. The base
+    /// anchor is two runs "our "/"website"; the right edits the second run to "homepage". Before the fix the
+    /// 2-way <see cref="DocxDiff.Compare"/> output re-emitted the whole hyperlink once per overlapping token op,
+    /// so reject yielded a doubled/tripled anchor ("Visit our websitethe homepageour website for details.")
+    /// instead of restoring the base. Invariants: reject ≡ left, accept ≡ right (body text).
+    /// </summary>
+    [Fact]
+    public void Hyperlink_internal_text_edit_round_trips_2way()
+    {
+        var left = HyperlinkPara("<w:r><w:t xml:space=\"preserve\">our </w:t></w:r><w:r><w:t>website</w:t></w:r>");
+        var right = HyperlinkPara("<w:r><w:t xml:space=\"preserve\">our </w:t></w:r><w:r><w:t>homepage</w:t></w:r>");
+
+        var rl = DocxDiff.Compare(left, right);
+
+        Assert.Equal(Docs.PlainText(left), Docs.PlainText(RevisionProcessor.RejectRevisions(rl)));   // reject ≡ left
+        Assert.Equal(Docs.PlainText(right), Docs.PlainText(RevisionAccepter.AcceptRevisions(rl)));   // accept ≡ right
+        // The full content-hash + format + note invariant (the renderer gate).
+        AssertRoundTrip(left, right, label: "hyperlink-internal-multi-run");
+    }
+
+    /// <summary>
+    /// B1 sibling: editing the anchor of a SINGLE-run hyperlink ("our website" → "the homepage" in one run)
+    /// must also round-trip — the same overlapping-token-op walk applies when the single run is split by the
+    /// intra-anchor edit. (WC019, the prior whole-anchor single-run replace, must not regress; this is the
+    /// partial-edit variant of that shape.)
+    /// </summary>
+    [Fact]
+    public void Hyperlink_internal_single_run_anchor_edit_round_trips_2way()
+    {
+        var left = HyperlinkPara("<w:r><w:t xml:space=\"preserve\">our website</w:t></w:r>");
+        var right = HyperlinkPara("<w:r><w:t xml:space=\"preserve\">the homepage</w:t></w:r>");
+
+        var rl = DocxDiff.Compare(left, right);
+
+        Assert.Equal(Docs.PlainText(left), Docs.PlainText(RevisionProcessor.RejectRevisions(rl)));   // reject ≡ left
+        Assert.Equal(Docs.PlainText(right), Docs.PlainText(RevisionAccepter.AcceptRevisions(rl)));   // accept ≡ right
+        AssertRoundTrip(left, right, label: "hyperlink-internal-single-run");
+    }
+
+    /// <summary>
+    /// B1 control: editing a word OUTSIDE the hyperlink (in the same paragraph that contains a multi-run
+    /// hyperlink) must stay clean — the hyperlink is untouched, the edit lands on the surrounding run, and the
+    /// document round-trips. Guards against the dedup fix over-claiming and dropping an untouched hyperlink.
+    /// </summary>
+    [Fact]
+    public void Hyperlink_present_edit_outside_anchor_round_trips_2way()
+    {
+        var left = HyperlinkPara("<w:r><w:t xml:space=\"preserve\">our </w:t></w:r><w:r><w:t>website</w:t></w:r>");
+        // Edit the trailing text only ("for details." → "for info."); anchor identical.
+        var leftDoc = left;
+        var rightBody =
+            "<w:p>" +
+            "<w:r><w:t xml:space=\"preserve\">Visit </w:t></w:r>" +
+            $"<w:hyperlink r:id=\"rIdLink\" xmlns:r=\"{RelsNs}\"><w:r><w:t xml:space=\"preserve\">our </w:t></w:r><w:r><w:t>website</w:t></w:r></w:hyperlink>" +
+            "<w:r><w:t xml:space=\"preserve\"> for info.</w:t></w:r>" +
+            "</w:p>";
+        var right = Docxodus.Tests.Ir.IrTestDocuments.FromBodyXmlWithHyperlinks(
+            rightBody, ("rIdLink", "https://example.com"));
+
+        var rl = DocxDiff.Compare(leftDoc, right);
+
+        Assert.Equal(Docs.PlainText(leftDoc), Docs.PlainText(RevisionProcessor.RejectRevisions(rl)));   // reject ≡ left
+        Assert.Equal(Docs.PlainText(right), Docs.PlainText(RevisionAccepter.AcceptRevisions(rl)));      // accept ≡ right
+        AssertRoundTrip(leftDoc, right, label: "hyperlink-present-edit-outside");
+    }
+
     [Fact]
     [Trait("Category", "Corpus")]
     public void Render_endnote_edit_lands_markup_inside_endnotes_part_and_round_trips()

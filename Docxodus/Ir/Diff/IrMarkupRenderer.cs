@@ -1040,7 +1040,7 @@ internal static class IrMarkupRenderer
                 }
             }
         }
-        newPara.Add(content);
+        newPara.Add(CoalesceAdjacentHyperlinks(content));
         return newPara;
     }
 
@@ -1518,15 +1518,17 @@ internal static class IrMarkupRenderer
                         {
                             state.RegisterMediaReferences(r);
                             // Only a w:r carries run formatting — bookmarks/zero-width markers pass through
-                            // untouched (stamping an rPr onto them is schema-invalid).
-                            if (r.Name == W.r)
+                            // untouched (stamping an rPr onto them is schema-invalid). A w:hyperlink wrapper holds
+                            // its w:r(s) one level down, so stamp each contained run at its aligned left char and
+                            // advance the cursor per-run (descending into the wrapper preserves char alignment).
+                            foreach (var innerRun in RunsForFormatStamp(r))
                             {
                                 int leftChar = ls + (cursor - rs);
                                 var oldRPr = leftRuns.RPrAtChar(leftChar);
-                                ApplyRPrChange(r, oldRPr, state);
+                                ApplyRPrChange(innerRun, oldRPr, state);
+                                cursor += RunTextLength(innerRun);
                             }
                             content.Add(r);
-                            cursor += RunTextLength(r);
                         }
                     }
                     else
@@ -1556,7 +1558,107 @@ internal static class IrMarkupRenderer
             }
         }
 
-        return content;
+        return CoalesceAdjacentHyperlinks(content);
+    }
+
+    /// <summary>
+    /// Merge consecutive <c>w:hyperlink</c> siblings that are PIECES OF ONE SOURCE LINK back into a single
+    /// <c>w:hyperlink</c>. The token-op walk slices a hyperlink whose anchor is edited INTERNALLY into one wrapper
+    /// per overlapping op (e.g. Equal "our " then del "website" then ins "homepage"), all bearing the same link
+    /// attributes; without re-joining them the rendered structure would be N adjacent links instead of the
+    /// source's one, so accept/reject would match only at the text level, not the block ContentHash level.
+    ///
+    /// The merge is GATED to never join two links that may be DIFFERENT targets. A wrapper is "revision-pure"
+    /// when all its run-level children are <c>w:del</c>/<c>w:ins</c> (no plain <c>w:r</c>). The whole-anchor
+    /// retarget case (WC019: a link's text AND href both change → pure <c>w:del</c>-link of the OLD target
+    /// followed by a pure <c>w:ins</c>-link of the NEW target, the new id remapped post-assembly) is exactly a
+    /// revision-pure-followed-by-revision-pure adjacency — those MUST stay separate so the remap and the
+    /// empty-shell-drop on accept restore the right/left link each side. An intra-anchor edit always carries an
+    /// Equal (plain-run) piece that anchors the group, so its del/ins pieces fold into a link that already holds
+    /// a plain run — the gate lets that through. Same-shell, same-target: semantics-preserving when merged.
+    /// </summary>
+    private static List<XElement> CoalesceAdjacentHyperlinks(List<XElement> content)
+    {
+        var merged = new List<XElement>();
+        int i = 0;
+        while (i < content.Count)
+        {
+            var el = content[i];
+            if (el.Name != W.hyperlink)
+            {
+                merged.Add(el);
+                i++;
+                continue;
+            }
+
+            // Gather the maximal run of adjacent same-shell hyperlinks starting here. They are pieces of the same
+            // token-op walk over one source-link char span; the slicer emits one wrapper per overlapping op.
+            int j = i + 1;
+            while (j < content.Count && content[j].Name == W.hyperlink && SameHyperlinkShell(el, content[j]))
+                j++;
+
+            int runLen = j - i;
+            // Coalesce the run into ONE w:hyperlink IFF it carries at least one plain (Equal/unchanged) run — the
+            // signal that the link is the SAME target on both sides (the diff matched some anchor text, so the
+            // tokenizer's target-suffixed keys agreed). A run with NO plain piece is a pure del→ins retarget
+            // (WC019: text AND href both change → del-link of the OLD target, ins-link of the NEW target, the new
+            // id remapped post-assembly) — those MUST stay separate so the remap + empty-shell-drop restore the
+            // right/left link on each side. (Adjacent DISTINCT same-shell source links are rare and, when the
+            // run carries a plain anchor, merging them is semantics-preserving anyway: same attributes, same
+            // target string.)
+            bool anyPlainRun = false;
+            for (int k = i; k < j; k++)
+                if (!IsRevisionPureHyperlink(content[k]))
+                {
+                    anyPlainRun = true;
+                    break;
+                }
+
+            if (runLen > 1 && anyPlainRun)
+            {
+                var combined = new XElement(el);                 // clone the first (carries the shell attributes)
+                for (int k = i + 1; k < j; k++)
+                    combined.Add(content[k].Elements());
+                merged.Add(combined);
+            }
+            else
+            {
+                for (int k = i; k < j; k++)
+                    merged.Add(content[k]);
+            }
+            i = j;
+        }
+        return merged;
+    }
+
+    /// <summary>True iff a <c>w:hyperlink</c> carries no plain (Equal/unchanged) run — every run-level child is a
+    /// revision wrapper (<c>w:del</c>/<c>w:ins</c>), or it is empty. (An empty link has no anchoring plain content
+    /// either, so it counts as revision-pure for the coalescing gate.)</summary>
+    private static bool IsRevisionPureHyperlink(XElement hyperlink) =>
+        hyperlink.Elements().All(c => c.Name == W.del || c.Name == W.ins);
+
+    /// <summary>True iff two <c>w:hyperlink</c> elements carry the same MEANINGFUL attribute set (name+value),
+    /// i.e. they target the same link — so their run content can be merged. Ignores namespace declarations and
+    /// Docxodus-internal <c>pt:</c> tracking attributes (notably the per-element <c>pt:Unid</c>, which is unique
+    /// per source node and stripped before output), since those don't affect link identity.</summary>
+    private static bool SameHyperlinkShell(XElement a, XElement b)
+    {
+        static List<XAttribute> Meaningful(XElement e) =>
+            e.Attributes()
+             .Where(at => !at.IsNamespaceDeclaration && at.Name.Namespace != PtOpenXml.pt && at.Name != PtOpenXml.Unid)
+             .ToList();
+
+        var aa = Meaningful(a);
+        var bb = Meaningful(b);
+        if (aa.Count != bb.Count)
+            return false;
+        foreach (var attr in aa)
+        {
+            var other = b.Attribute(attr.Name);
+            if (other == null || other.Value != attr.Value)
+                return false;
+        }
+        return true;
     }
 
     /// <summary>Concatenate the RAW token text over a half-open token-index span (empty span ⇒ "").</summary>
@@ -1611,6 +1713,15 @@ internal static class IrMarkupRenderer
     /// <summary>The number of <c>w:t</c> characters a rebuilt run carries (for advancing the char cursor).</summary>
     private static int RunTextLength(XElement run) =>
         run.Elements(W.t).Sum(t => t.Value.Length);
+
+    /// <summary>The <c>w:r</c> elements that should receive a <c>w:rPrChange</c> stamp for a FormatChanged span,
+    /// given an emitted run-level element: the element itself when it IS a run, otherwise its descendant runs (a
+    /// <c>w:hyperlink</c> wrapper holds its run(s) one level down). Non-run, run-less elements (bookmarks,
+    /// zero-width markers) yield nothing — stamping an rPr onto them is schema-invalid.</summary>
+    private static System.Collections.Generic.IEnumerable<XElement> RunsForFormatStamp(XElement runLevel) =>
+        runLevel.Name == W.r
+            ? new[] { runLevel }
+            : runLevel.Descendants(W.r);
 
     /// <summary>
     /// Stamp <paramref name="run"/> (a RIGHT-side run rebuilt over a FormatChanged span) with a
@@ -1909,36 +2020,60 @@ internal static class IrMarkupRenderer
         {
             int charOffset = 0;
             foreach (var child in para.Elements().Where(e => e.Name != W.pPr))
-                WalkRunLevel(child, ref charOffset);
+                WalkRunLevel(child, ref charOffset, ContainerChain.Empty);
         }
 
-        private void WalkRunLevel(XElement runLevel, ref int charOffset)
+        private void WalkRunLevel(XElement runLevel, ref int charOffset, ContainerChain chain)
         {
             if (runLevel.Name == W.r)
             {
-                WalkRun(runLevel, ref charOffset);
+                WalkRun(runLevel, ref charOffset, chain);
             }
-            else if (runLevel.Name == W.hyperlink || runLevel.Name == W.ins || runLevel.Name == W.del ||
+            else if (runLevel.Name == W.hyperlink)
+            {
+                // A w:hyperlink wrapping runs. We RECURSE into its run-level children rather than treating it as
+                // one atomic blob, recording the hyperlink in the owning chain so its WRAPPER is reconstructed in
+                // Slice exactly ONCE per contiguous run group it contributes — even when several token ops overlap
+                // its char span (an intra-anchor edit, e.g. changing one word of a multi-run anchor). Before this,
+                // the whole hyperlink was re-emitted per overlapping op, doubling/tripling the anchor on the
+                // accept/reject paths. A wrapper shell (the element with its attributes but WITHOUT inner content)
+                // rides on each leaf segment so the rebuilt runs are re-wrapped. The char span advances exactly as
+                // before (sum of descendant w:t lengths), so token char coordinates are unchanged. (Other
+                // containers — sdt/smartTag/ins/del — stay atomic but are now claim-tracked in Slice so they too
+                // emit once across overlapping ops; only the hyperlink needs intra-anchor splitting to round-trip.)
+                var childChain = chain.Append(runLevel);
+                bool anyChild = false;
+                foreach (var child in runLevel.Elements())
+                {
+                    anyChild = true;
+                    WalkRunLevel(child, ref charOffset, childChain);
+                }
+                // An empty hyperlink (no run-level children) still needs its wrapper preserved: emit a zero-width
+                // segment carrying the shell chain so Slice re-wraps it once.
+                if (!anyChild)
+                    _segments.Add(new Segment(runLevel, charOffset, charOffset, SegmentKind.ZeroWidth) { Chain = childChain });
+            }
+            else if (runLevel.Name == W.ins || runLevel.Name == W.del ||
                      runLevel.Name == W.sdt || runLevel.Name == W.smartTag)
             {
-                // Container of runs (hyperlink/sdt/smartTag/accepted ins-del wrapper): one ATOMIC segment spanning
-                // its full inner text. We do NOT recurse into separate inner segments — the container is emitted
-                // whole (so its wrapper survives) and a span boundary never splits inside it. Its char span is
-                // the sum of its descendant w:t lengths (mirroring the tokenizer's transparent recursion).
+                // Non-hyperlink container (sdt/smartTag/accepted ins-del wrapper): one ATOMIC segment spanning its
+                // full inner text, emitted whole. Its char span is the sum of its descendant w:t lengths
+                // (mirroring the tokenizer's transparent recursion). Claim-tracked in Slice so multiple
+                // overlapping ops emit it once.
                 int start = charOffset;
                 foreach (var t in runLevel.Descendants(W.t))
                     charOffset += t.Value.Length;
-                _segments.Add(new Segment(runLevel, start, charOffset, SegmentKind.Container));
+                _segments.Add(new Segment(runLevel, start, charOffset, SegmentKind.Container) { Chain = chain });
             }
             else
             {
                 // A non-run, non-container run-level element (bookmarkStart/End, proofErr, commentRangeStart…):
                 // zero-width, atomic, kept whole.
-                _segments.Add(new Segment(runLevel, charOffset, charOffset, SegmentKind.ZeroWidth));
+                _segments.Add(new Segment(runLevel, charOffset, charOffset, SegmentKind.ZeroWidth) { Chain = chain });
             }
         }
 
-        private void WalkRun(XElement run, ref int charOffset)
+        private void WalkRun(XElement run, ref int charOffset, ContainerChain chain)
         {
             // A run can contain multiple w:t / w:tab / w:br / drawing children. We emit one segment per child
             // so a span boundary inside the run splits at child granularity, and a w:t segment can split inside.
@@ -1951,7 +2086,7 @@ internal static class IrMarkupRenderer
                     string text = child.Value;
                     int start = charOffset;
                     charOffset += text.Length;
-                    _segments.Add(new Segment(run, start, charOffset, SegmentKind.RunText) { TextChild = child });
+                    _segments.Add(new Segment(run, start, charOffset, SegmentKind.RunText) { TextChild = child, Chain = chain });
                 }
                 else if (child.Name == W.fldSimple || IsContainer(child.Name))
                 {
@@ -1959,16 +2094,16 @@ internal static class IrMarkupRenderer
                     int start = charOffset;
                     foreach (var t in child.Descendants(W.t))
                         charOffset += t.Value.Length;
-                    _segments.Add(new Segment(run, start, charOffset, SegmentKind.RunOther) { OtherChild = child });
+                    _segments.Add(new Segment(run, start, charOffset, SegmentKind.RunOther) { OtherChild = child, Chain = chain });
                 }
                 else
                 {
                     // tab/break/drawing/noteref/sym/… — zero-width run child.
-                    _segments.Add(new Segment(run, charOffset, charOffset, SegmentKind.RunOther) { OtherChild = child });
+                    _segments.Add(new Segment(run, charOffset, charOffset, SegmentKind.RunOther) { OtherChild = child, Chain = chain });
                 }
             }
             if (!any)
-                _segments.Add(new Segment(run, charOffset, charOffset, SegmentKind.RunOther));
+                _segments.Add(new Segment(run, charOffset, charOffset, SegmentKind.RunOther) { Chain = chain });
         }
 
         private static bool IsContainer(XName n) =>
@@ -1981,16 +2116,61 @@ internal static class IrMarkupRenderer
         public List<XElement> Slice(int start, int end)
         {
             var result = new List<XElement>();
-            // Group consecutive RunText/RunOther segments that share the same source run into one rebuilt w:r.
+
+            // Two-level grouping. INNER: consecutive RunText/RunOther segments sharing the SAME source run are
+            // rebuilt into one w:r (so a split w:t and its siblings keep one run + its rPr). OUTER: consecutive
+            // run-level pieces sharing the SAME owning container chain (e.g. the same w:hyperlink, by reference
+            // identity) are collected and emitted under a SINGLE clone of that chain's wrapper shells. So a
+            // hyperlink's wrapper is reconstructed EXACTLY ONCE per contiguous run group it contributes to this
+            // slice — even when its anchor spans several source runs, and even when several token ops overlap its
+            // char span (an intra-anchor edit). Before this, the whole hyperlink was re-emitted per overlapping
+            // op, doubling/tripling the anchor on accept/reject.
+            ContainerChain groupChain = ContainerChain.Empty;
+            var groupChildren = new List<XElement>();          // run-level children to wrap in groupChain
             XElement? currentRun = null;
             XElement? rebuilt = null;
 
             void FlushRun()
             {
                 if (rebuilt != null && rebuilt.Elements().Any(e => e.Name != W.rPr))
-                    result.Add(rebuilt);
+                    groupChildren.Add(rebuilt);
                 rebuilt = null;
                 currentRun = null;
+            }
+
+            void FlushGroup()
+            {
+                FlushRun();
+                if (groupChildren.Count > 0)
+                {
+                    // Wrap the collected children in clones of each container shell (outermost first), so e.g.
+                    // <w:hyperlink …><w:r>our </w:r><w:r>website</w:r></w:hyperlink> with the original attributes.
+                    object content = groupChildren.ToArray();
+                    for (int i = groupChain.Count - 1; i >= 0; i--)
+                    {
+                        var shell = groupChain[i];
+                        content = new XElement(shell.Name, shell.Attributes(), content);
+                    }
+                    if (content is XElement single)
+                        result.Add(single);
+                    else
+                        foreach (var c in (XElement[])content)
+                            result.Add(c);
+                }
+                groupChildren = new List<XElement>();
+                groupChain = ContainerChain.Empty;
+            }
+
+            void StartGroupIfNeeded(ContainerChain chain)
+            {
+                // A change of owning chain ends the current wrapper group (so a run leaving/entering a hyperlink
+                // starts a fresh wrapper). The top-level (empty) chain groups plain runs together too.
+                if (groupChildren.Count > 0 || currentRun != null)
+                {
+                    if (!groupChain.SameAs(chain))
+                        FlushGroup();
+                }
+                groupChain = chain;
             }
 
             foreach (var seg in _segments)
@@ -2006,10 +2186,19 @@ internal static class IrMarkupRenderer
                 // paragraph: a given zero-width source node is sliced into exactly one output op (the first to
                 // claim it). A standalone ZeroWidth segment keys on its own Element; a RunOther zero-width keys
                 // on its OtherChild (so two distinct zero-width children of one run are not conflated).
-                if (overlaps && seg.IsZeroWidth)
+                if (overlaps && seg.IsZeroWidth && seg.Kind != SegmentKind.Container)
                 {
                     var key = seg.OtherChild ?? seg.Element;
                     if (key != null && !_claimedZeroWidth.Add(key))
+                        overlaps = false;
+                }
+
+                // An ATOMIC Container segment (sdt/smartTag/ins/del) spans a char range several token ops can
+                // overlap (an intra-container edit). Emitting it per op would double it, so claim it exactly once
+                // (the first op to overlap it wins); later overlapping ops skip it. Keyed by element identity.
+                if (overlaps && seg.Kind == SegmentKind.Container)
+                {
+                    if (!_claimedZeroWidth.Add(seg.Element))
                         overlaps = false;
                 }
 
@@ -2023,18 +2212,24 @@ internal static class IrMarkupRenderer
                 switch (seg.Kind)
                 {
                     case SegmentKind.ZeroWidth:
+                        // A zero-width marker (incl. an empty hyperlink shell) is its own run-level piece; it joins
+                        // its owning chain group so a bookmark inside a hyperlink stays inside the wrapper.
+                        StartGroupIfNeeded(seg.Chain);
                         FlushRun();
-                        result.Add(new XElement(seg.Element));
+                        groupChildren.Add(new XElement(seg.Element));
                         break;
 
                     case SegmentKind.Container:
+                        // Atomic non-hyperlink container: emitted whole under its own (parent) chain.
+                        StartGroupIfNeeded(seg.Chain);
                         FlushRun();
-                        result.Add(new XElement(seg.Element));
+                        groupChildren.Add(new XElement(seg.Element));
                         break;
 
                     case SegmentKind.RunText:
                     case SegmentKind.RunOther:
                     {
+                        StartGroupIfNeeded(seg.Chain);
                         if (!ReferenceEquals(currentRun, seg.Element))
                         {
                             FlushRun();
@@ -2064,7 +2259,7 @@ internal static class IrMarkupRenderer
                     }
                 }
             }
-            FlushRun();
+            FlushGroup();
             return result;
         }
 
@@ -2093,6 +2288,44 @@ internal static class IrMarkupRenderer
 
         private enum SegmentKind { RunText, RunOther, ZeroWidth, Container }
 
+        /// <summary>The (possibly empty) chain of run-level container wrappers — outermost first — owning a
+        /// segment, e.g. the <c>w:hyperlink</c> a run sits inside. Reference-identity based: two segments share a
+        /// chain iff they came from the SAME wrapper element(s), so Slice re-wraps runs from one hyperlink
+        /// together and starts a fresh wrapper for a different (or no) hyperlink. Immutable; <see cref="Empty"/>
+        /// is the no-wrapper chain. Cheap shells (only the chain depth matters; clones are minted in Slice).</summary>
+        private sealed class ContainerChain
+        {
+            public static readonly ContainerChain Empty = new(System.Array.Empty<XElement>());
+
+            private readonly XElement[] _wrappers;
+            private ContainerChain(XElement[] wrappers) => _wrappers = wrappers;
+
+            public int Count => _wrappers.Length;
+            public XElement this[int i] => _wrappers[i];
+
+            public ContainerChain Append(XElement wrapper)
+            {
+                var next = new XElement[_wrappers.Length + 1];
+                System.Array.Copy(_wrappers, next, _wrappers.Length);
+                next[^1] = wrapper;
+                return new ContainerChain(next);
+            }
+
+            /// <summary>True iff the two chains are the same length and reference the same wrapper elements in
+            /// order (reference identity) — so runs nested in the identical hyperlink group together.</summary>
+            public bool SameAs(ContainerChain other)
+            {
+                if (ReferenceEquals(this, other))
+                    return true;
+                if (_wrappers.Length != other._wrappers.Length)
+                    return false;
+                for (int i = 0; i < _wrappers.Length; i++)
+                    if (!ReferenceEquals(_wrappers[i], other._wrappers[i]))
+                        return false;
+                return true;
+            }
+        }
+
         private sealed class Segment
         {
             public Segment(XElement element, int start, int end, SegmentKind kind)
@@ -2109,6 +2342,7 @@ internal static class IrMarkupRenderer
             public SegmentKind Kind { get; }
             public XElement? TextChild { get; init; }
             public XElement? OtherChild { get; init; }
+            public ContainerChain Chain { get; init; } = ContainerChain.Empty;
             public bool IsZeroWidth => Start == End;
         }
     }
