@@ -963,6 +963,12 @@ export interface DocxodusWasmExports {
     CloseSession: (handle: number) => void;
     Project: (handle: number) => string;
     ProjectAnchor: (handle: number, anchorId: string, depth: number) => string;
+    RenderBlockHtml: (
+      handle: number,
+      anchorId: string,
+      cssPrefix: string,
+      fabricateClasses: boolean
+    ) => string;
     ReplaceText: (handle: number, anchor: string, md: string) => string;
     DeleteBlock: (handle: number, anchor: string) => string;
     DeleteRange: (handle: number, fromAnchorId: string, toAnchorIdExclusive: string) => string;

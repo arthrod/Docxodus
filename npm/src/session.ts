@@ -79,6 +79,31 @@ export class DocxSession {
     ) as DocxSessionProjection;
   }
 
+  /**
+   * Render a single block to faithful HTML from the live session — the editor's
+   * incremental per-block re-render after an edit. Resolves against the in-memory
+   * document (no Save round-trip). `anchorId` is a block anchor (`kind:scope:unid`)
+   * or the bare unid carried by a `data-anchor` attribute. Returns the block's HTML
+   * element (no `<html>`/`<head>` wrapper).
+   */
+  renderBlock(
+    anchorId: string,
+    options?: { cssPrefix?: string; fabricateClasses?: boolean },
+  ): string {
+    const html = this.wasm.RenderBlockHtml(
+      this.handle,
+      anchorId,
+      options?.cssPrefix ?? "docx-",
+      options?.fabricateClasses ?? false,
+    );
+    // Rendered HTML always begins with '<'; a leading '{' signals an error object.
+    if (html.charCodeAt(0) === 0x7b /* '{' */) {
+      const err = JSON.parse(html) as { error?: string };
+      throw new Error(`renderBlock failed: ${err.error ?? "unknown error"}`);
+    }
+    return html;
+  }
+
   // ─── Tier A: text CRUD ───────────────────────────────────────────────
 
   replaceText(anchorId: string, markdown: string): EditResult {

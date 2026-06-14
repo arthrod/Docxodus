@@ -30,6 +30,15 @@ internal static class DocxSessionOps
     public static string ProjectAnchor(int handle, string anchorId, ProjectionDepth depth) =>
         DocxSessionJson.SerializeProjection(SessionRegistry.Get(handle).ProjectAnchor(anchorId, depth));
 
+    /// <summary>
+    /// Render a single block from the live session to faithful HTML — the editor's
+    /// incremental per-block re-render. Resolves against the live document (no Save /
+    /// byte round-trip). Returns the block's HTML element (no html/head wrapper).
+    /// </summary>
+    public static string RenderBlockHtml(int handle, string anchorId, string cssPrefix, bool fabricateClasses) =>
+        HtmlConversionOps.RenderBlockHtml(SessionRegistry.Get(handle), anchorId,
+            new HtmlConversionOptions { CssClassPrefix = cssPrefix ?? "docx-", FabricateCssClasses = fabricateClasses });
+
     public static string Grep(int handle, string pattern, RegexOptions regexOpts,
         ProjectionScopes scope, int contextChars, WhitespaceMode whitespace, ContextBoundary boundary) =>
         DocxSessionJson.SerializeMatches(

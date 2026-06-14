@@ -69,4 +69,43 @@ test.describe('RenderBlockHtml (WASM bridge) — incremental block render', () =
       expect(c.blockText).toBe(c.fullText);
     }
   });
+
+  // The actual editor incremental-edit loop, end-to-end in the browser:
+  //   full render (data-anchor) → open session → edit that block via DocxSession
+  //   → re-render ONLY that block from the live session → the edit is visible.
+  // Also exercises the anchor-changes-on-edit reality: ReplaceText returns the new
+  // anchor in EditResult.modified, which is what the re-render must use.
+  test('edit a block then session.renderBlock shows the edit', async ({ page }) => {
+    const bytes = readTestFile('HC006-Test-01.docx');
+
+    const out = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const sb = (window as any).Docxodus.DocxSessionBridge;
+
+      const handle: number = sb.OpenSession(bin, '');
+      try {
+        // The editor holds the session projection; pick a body paragraph anchor
+        // (full kind:scope:unid) with real text — the DocxSession addressing form.
+        const proj = JSON.parse(sb.Project(handle));
+        const idx: Record<string, any> = proj.anchorIndex;
+        const anchorId = Object.keys(idx).find((id) => {
+          const t = idx[id];
+          return t.kind === 'p' && t.scope === 'body' && (t.textPreview || '').trim().length > 5;
+        }) as string;
+
+        const edit = JSON.parse(sb.ReplaceText(handle, anchorId, 'EDITEDMARKER42 replaced text.'));
+        // The edited block's own anchor changes (content-hashed) — re-render the new one.
+        const newAnchor =
+          edit.modified && edit.modified[0] ? edit.modified[0].id : anchorId;
+        const blockHtml: string = sb.RenderBlockHtml(handle, newAnchor, 'docx-', false);
+        return { pickedAnchor: anchorId, editSuccess: edit.success === true, blockHtml };
+      } finally {
+        sb.CloseSession(handle);
+      }
+    }, Array.from(bytes));
+
+    expect(out.pickedAnchor).toBeTruthy();
+    expect(out.editSuccess).toBe(true);
+    expect(out.blockHtml).toContain('EDITEDMARKER42');
+  });
 });

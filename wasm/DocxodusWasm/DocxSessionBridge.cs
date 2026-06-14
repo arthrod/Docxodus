@@ -43,6 +43,19 @@ public static partial class DocxSessionBridge
     public static string ProjectAnchor(int h, string anchorId, int depth) =>
         DocxSessionOps.ProjectAnchor(h, anchorId, (ProjectionDepth)depth);
 
+    /// <summary>
+    /// Render a single block from the live session to faithful HTML — the editor's
+    /// incremental per-block re-render. Returns the block's HTML element, or a JSON
+    /// <c>{"error": "..."}</c> object on failure (rendered HTML always begins with
+    /// '&lt;', so the leading character disambiguates success from error).
+    /// </summary>
+    [JSExport]
+    public static string RenderBlockHtml(int h, string anchorId, string cssPrefix, bool fabricateClasses)
+    {
+        try { return DocxSessionOps.RenderBlockHtml(h, anchorId, cssPrefix, fabricateClasses); }
+        catch (System.Exception ex) { return JsonSerializer.Serialize(new { error = ex.Message }); }
+    }
+
     [JSExport]
     public static string ReplaceText(int h, string anchor, string md) =>
         DocxSessionOps.ReplaceText(h, anchor, md);
