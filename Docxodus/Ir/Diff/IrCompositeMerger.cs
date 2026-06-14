@@ -50,13 +50,36 @@ internal static class IrCompositeMerger
         var ops = new List<IrCompositeOp>();
         var conflicts = new List<IrConflict>();
         var nextConflictId = 1;
+        MergeBlockStream(baseOrder, byBase, insertsAfter, reviewers, baseIr, policy, settings,
+            ops, conflicts, ref nextConflictId);
+        return new IrCompositeScript(IrNodeList.From(ops), IrNodeList.From(conflicts));
+    }
+
+    /// <summary>
+    /// The reusable per-block dispatch loop: walk <paramref name="baseOrder"/> (the base block anchors in
+    /// document order), merging each via <see cref="MergeOneBaseBlock"/> and slotting each reviewer's
+    /// right-only inserts after the preceding base anchor (<see cref="EmitInsertsAt"/>). Factored out of
+    /// <see cref="Merge"/> so the SAME grouping+dispatch runs over a cell's mini-body during per-cell table
+    /// composition (FOLLOW-ON B): a cell's paragraph blocks are themselves a base-anchored block stream.
+    /// </summary>
+    private static void MergeBlockStream(
+        IReadOnlyList<string> baseOrder,
+        IReadOnlyDictionary<string, List<(int Reviewer, IrEditOp Op)>> byBase,
+        IReadOnlyDictionary<string, List<(int Reviewer, IrEditOp Op)>> insertsAfter,
+        IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
+        IrDocument baseIr,
+        Docxodus.ConflictResolution policy,
+        IrDiffSettings settings,
+        List<IrCompositeOp> ops,
+        List<IrConflict> conflicts,
+        ref int nextConflictId)
+    {
         EmitInsertsAt(insertsAfter, "", reviewers, ops);
         foreach (var anchor in baseOrder)
         {
             MergeOneBaseBlock(anchor, byBase, reviewers, baseIr, policy, settings, ops, conflicts, ref nextConflictId);
             EmitInsertsAt(insertsAfter, anchor, reviewers, ops);
         }
-        return new IrCompositeScript(IrNodeList.From(ops), IrNodeList.From(conflicts));
     }
 
     // ---- FOLLOW-ON A: native move composition planning ----
@@ -770,6 +793,35 @@ internal static class IrCompositeMerger
                 IrNodeList.From(sourceRightAnchors)));
             return;
         }
+        // TABLE COMPOSITION (FOLLOW-ON B): 2+ reviewers edited the SAME base table. DISJOINT cross-reviewer
+        // cell edits compose inline (each lands, authored); SAME-cell edits by 2+ reviewers conflict per
+        // policy. Fires only when every toucher is a table ModifyBlock AND the v1 gates pass (no reviewer
+        // MovedRow, column structure stable) — otherwise we FALL BACK to the block-level conflict (no silent
+        // loss; the base table is kept under BaseWins and the disagreement is recorded under every policy).
+        if (touched.All(e => e.Op.Kind == IrEditOpKind.ModifyBlock && e.Op.TableDiff != null)
+            && baseIr.AnchorIndex.TryGetValue(anchor, out var baseBlk) && baseBlk is IrTable baseTable
+            && NoReviewerHasMovedRow(touched)
+            && AllColumnStructureStable(touched))
+        {
+            var reviewerTableDiffs = touched
+                .Select(e => (e.Reviewer, reviewers[e.Reviewer].Author, e.Op.TableDiff!))
+                .ToList();
+            var merged = ComposeTableDiffs(
+                anchor, baseTable, reviewerTableDiffs, reviewers, baseIr, policy, settings,
+                ref nextConflictId, out var tableConflicts, out var authoredRows);
+            conflicts.AddRange(tableConflicts);
+
+            System.Diagnostics.Debug.Assert(AssertTilesBaseTable(authoredRows, baseTable),
+                "ComposeTableDiffs: authored rows/cells must tile the base table's rows/cells exactly once.");
+
+            var structOp = touched[0].Op with { TableDiff = merged };
+            ops.Add(new IrCompositeOp(structOp, "", touched[0].Reviewer,
+                AuthoredTokens: null,
+                ConflictId: tableConflicts.Count > 0 ? tableConflicts[0].Id : (int?)null,
+                SourceRightAnchors: null,
+                AuthoredRows: IrNodeList.From(authoredRows)));
+            return;
+        }
         // BLOCK-LEVEL CONFLICT
         var cid = nextConflictId++;
         conflicts.Add(new IrConflict(cid, anchor, 0, 0, policy,
@@ -1112,5 +1164,436 @@ internal static class IrCompositeMerger
                 }
             }
         }
+    }
+
+    // ---- FOLLOW-ON B: per-cell table composition ----
+
+    /// <summary>
+    /// STOP-boundary gate: true when NO reviewer's table diff contains a <see cref="IrRowOpKind.MovedRow"/>.
+    /// A row move (off-spine exact-hash relocation) is not composable per-cell in v1 — the per-cell aligner
+    /// pairs rows by BASE row anchor, and a moved row's content lands at a different position — so any reviewer
+    /// MovedRow forces a FALL BACK to the whole-table block conflict (documented, rare). No silent loss: the
+    /// block-conflict branch keeps the base table and records the disagreement.
+    /// </summary>
+    private static bool NoReviewerHasMovedRow(List<(int Reviewer, IrEditOp Op)> touched)
+    {
+        foreach (var (_, op) in touched)
+            if (op.TableDiff is { } td)
+                foreach (var rowOp in td.RowOps)
+                    if (rowOp.Kind == IrRowOpKind.MovedRow)
+                        return false;
+        return true;
+    }
+
+    /// <summary>
+    /// STOP-boundary gate (the table analogue of <see cref="ParagraphPropsUnchanged"/>): true when every
+    /// reviewer left the table COLUMN STRUCTURE stable — no unpaired cell (column add/remove) within any
+    /// ModifyRow. The per-cell render path clones the BASE row's cell skeleton POSITIONALLY (count-stable v1),
+    /// so a column add/remove cannot be composed and the table FALLS BACK to the whole-table block conflict
+    /// (documented non-goal; no silent loss — the base table is kept and the disagreement is recorded).
+    /// <para>Detection: <see cref="IrTableDiffer"/> pairs cells POSITIONALLY, so a column add/remove surfaces
+    /// as an <see cref="IrCellOp"/> with ONE null anchor (an unpaired cell) within a ModifyRow. This is the
+    /// signal the IR actually models: gridSpan/vMerge and <c>w:tcPr</c> width changes are NOT folded into any
+    /// cell/row/table hash, so a pure cell-props change leaves every IR hash identical — the reviewer's table
+    /// then reads as <c>EqualBlock</c> (no touch) and never reaches this branch. The only column-structure
+    /// change the IR surfaces is a genuine cell-count difference, caught here.</para>
+    /// </summary>
+    private static bool AllColumnStructureStable(List<(int Reviewer, IrEditOp Op)> touched)
+    {
+        foreach (var (_, op) in touched)
+        {
+            if (op.TableDiff is not { } td)
+                return false;
+            foreach (var rowOp in td.RowOps)
+            {
+                if (rowOp.Kind != IrRowOpKind.ModifyRow || rowOp.CellOps is not { } cellOps)
+                    continue;
+                foreach (var cellOp in cellOps)
+                    // An unpaired cell (column add/remove) → not column-stable.
+                    if (cellOp.LeftCellAnchor is null || cellOp.RightCellAnchor is null)
+                        return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Compose N reviewers' table diffs (all against the SAME base table) into a MERGED
+    /// <see cref="IrTableDiff"/> (the apply/JSON truth) plus a parallel <paramref name="authoredRows"/> view
+    /// (renderer/revision attribution). Rows align by BASE row anchor; per base row 0 touch → EqualRow,
+    /// 1 ModifyRow → that reviewer's cells (authored), 1 DeleteRow (others equal) → DeleteRow, ≥2 ModifyRow →
+    /// per-cell compose (the recursion), delete-vs-modify same row → row-level conflict (policy-resolved),
+    /// ≥2 deletes same row → consensus delete. InsertRows by different reviewers route by preceding base-row
+    /// anchor (both appear, authored, no conflict). Cell conflict ids ascend from
+    /// <paramref name="nextConflictId"/>.
+    /// </summary>
+    private static IrTableDiff ComposeTableDiffs(
+        string tableAnchor,
+        IrTable baseTable,
+        List<(int Reviewer, string Author, IrTableDiff Diff)> reviewerDiffs,
+        IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
+        IrDocument baseIr,
+        Docxodus.ConflictResolution policy,
+        IrDiffSettings settings,
+        ref int nextConflictId,
+        out List<IrConflict> conflicts,
+        out List<IrAuthoredRowOp> authoredRows)
+    {
+        conflicts = new List<IrConflict>();
+        authoredRows = new List<IrAuthoredRowOp>();
+        var mergedRowOps = new List<IrRowOp>();
+
+        // Index each reviewer's row ops by BASE row anchor, and collect their right-only InsertRows keyed by
+        // the preceding base row anchor (or "" before the first base row).
+        var byBaseRow = new Dictionary<string, List<(int Reviewer, string Author, IrRowOp Op)>>();
+        var insertRowsAfter = new Dictionary<string, List<(int Reviewer, string Author, IrRowOp Op)>>();
+        foreach (var (reviewer, author, diff) in reviewerDiffs)
+        {
+            string preceding = "";
+            foreach (var rowOp in diff.RowOps)
+            {
+                if (rowOp.Kind == IrRowOpKind.InsertRow)
+                {
+                    if (!insertRowsAfter.TryGetValue(preceding, out var il)) insertRowsAfter[preceding] = il = new();
+                    il.Add((reviewer, author, rowOp));
+                    continue;
+                }
+                if (rowOp.LeftRowAnchor is { } la)
+                {
+                    if (!byBaseRow.TryGetValue(la, out var bl)) byBaseRow[la] = bl = new();
+                    bl.Add((reviewer, author, rowOp));
+                    preceding = la;
+                }
+            }
+        }
+
+        EmitComposedInsertRows(insertRowsAfter, "", mergedRowOps, authoredRows);
+        foreach (var baseRow in baseTable.Rows)
+        {
+            string rowAnchor = baseRow.Anchor.ToString();
+            ComposeOneBaseRow(rowAnchor, baseRow, byBaseRow, reviewers, baseIr, policy, settings,
+                ref nextConflictId, conflicts, mergedRowOps, authoredRows);
+            EmitComposedInsertRows(insertRowsAfter, rowAnchor, mergedRowOps, authoredRows);
+        }
+
+        return new IrTableDiff(IrNodeList.From(mergedRowOps));
+    }
+
+    /// <summary>Emit every reviewer's InsertRows slotted after <paramref name="anchor"/> (reviewer order):
+    /// both the merged row op and its authored view. Disjoint inserted rows from different reviewers all
+    /// appear — no insert-vs-insert row conflict (block-insert convention).</summary>
+    private static void EmitComposedInsertRows(
+        IReadOnlyDictionary<string, List<(int Reviewer, string Author, IrRowOp Op)>> insertRowsAfter,
+        string anchor, List<IrRowOp> mergedRowOps, List<IrAuthoredRowOp> authoredRows)
+    {
+        if (!insertRowsAfter.TryGetValue(anchor, out var list)) return;
+        foreach (var (reviewer, author, op) in list)
+        {
+            mergedRowOps.Add(op);
+            authoredRows.Add(new IrAuthoredRowOp(
+                IrRowOpKind.InsertRow, null, reviewer, author, null, op.RightRowAnchor));
+        }
+    }
+
+    /// <summary>Dispatch one base row across reviewers (see <see cref="ComposeTableDiffs"/>).</summary>
+    private static void ComposeOneBaseRow(
+        string rowAnchor, IrRow baseRow,
+        IReadOnlyDictionary<string, List<(int Reviewer, string Author, IrRowOp Op)>> byBaseRow,
+        IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
+        IrDocument baseIr, Docxodus.ConflictResolution policy, IrDiffSettings settings,
+        ref int nextConflictId, List<IrConflict> conflicts,
+        List<IrRowOp> mergedRowOps, List<IrAuthoredRowOp> authoredRows)
+    {
+        // The reviewers who did something non-Equal to this base row.
+        var touched = byBaseRow.TryGetValue(rowAnchor, out var entries)
+            ? entries.Where(e => e.Op.Kind != IrRowOpKind.EqualRow).ToList()
+            : new List<(int Reviewer, string Author, IrRowOp Op)>();
+
+        if (touched.Count == 0)
+        {
+            // Untouched (every reviewer Equal / absent) → base row verbatim.
+            mergedRowOps.Add(new IrRowOp(IrRowOpKind.EqualRow, rowAnchor, rowAnchor, null));
+            authoredRows.Add(new IrAuthoredRowOp(IrRowOpKind.EqualRow, rowAnchor, -1, "", null));
+            return;
+        }
+
+        var modifiers = touched.Where(e => e.Op.Kind == IrRowOpKind.ModifyRow).ToList();
+        var deleters = touched.Where(e => e.Op.Kind == IrRowOpKind.DeleteRow).ToList();
+
+        // delete-vs-modify SAME row → row-level conflict (policy-resolved like the block conflict).
+        if (deleters.Count > 0 && modifiers.Count > 0)
+        {
+            int cid = nextConflictId++;
+            conflicts.Add(new IrConflict(cid, rowAnchor, 0, 0, policy,
+                IrNodeList.From(touched.Select(e => new IrConflictCompetitor(
+                    e.Author, RowResultText(baseRow, settings))))));
+            switch (policy)
+            {
+                case Docxodus.ConflictResolution.BaseWins:
+                    mergedRowOps.Add(new IrRowOp(IrRowOpKind.EqualRow, rowAnchor, rowAnchor, null));
+                    authoredRows.Add(new IrAuthoredRowOp(IrRowOpKind.EqualRow, rowAnchor, -1, "", null));
+                    break;
+                case Docxodus.ConflictResolution.FirstReviewerWins:
+                {
+                    // Lowest reviewer index wins: emit that reviewer's row op (modify or delete).
+                    var winner = touched.OrderBy(e => e.Reviewer).First();
+                    EmitWinnerRow(winner, rowAnchor, baseRow, reviewers, baseIr, policy, settings,
+                        ref nextConflictId, conflicts, mergedRowOps, authoredRows);
+                    break;
+                }
+                case Docxodus.ConflictResolution.StackAll:
+                {
+                    // A row can be consumed/restored on reject by only ONE op: emit the lowest-index toucher's
+                    // row (modify or delete). The competing edit is captured in the recorded conflict; emitting
+                    // a second base-anchored row op would duplicate the base row on reject.
+                    var winner = touched.OrderBy(e => e.Reviewer).First();
+                    EmitWinnerRow(winner, rowAnchor, baseRow, reviewers, baseIr, policy, settings,
+                        ref nextConflictId, conflicts, mergedRowOps, authoredRows);
+                    break;
+                }
+            }
+            return;
+        }
+
+        // ≥2 deletes (no modify) → consensus delete (delete the base row once, authored to the first deleter).
+        if (deleters.Count >= 1 && modifiers.Count == 0)
+        {
+            var first = deleters.OrderBy(e => e.Reviewer).First();
+            mergedRowOps.Add(new IrRowOp(IrRowOpKind.DeleteRow, rowAnchor, null, null));
+            authoredRows.Add(new IrAuthoredRowOp(IrRowOpKind.DeleteRow, rowAnchor, first.Reviewer, first.Author, null));
+            return;
+        }
+
+        // 1 ModifyRow → that reviewer's cells, authored (single-source row).
+        if (modifiers.Count == 1)
+        {
+            var (reviewer, author, op) = modifiers[0];
+            mergedRowOps.Add(op);
+            var authoredCells = AuthoredCellsForSingleReviewer(op, baseRow, reviewer, author);
+            authoredRows.Add(new IrAuthoredRowOp(IrRowOpKind.ModifyRow, rowAnchor, reviewer, author, IrNodeList.From(authoredCells)));
+            return;
+        }
+
+        // ≥2 ModifyRow → PER-CELL compose (the recursion).
+        var composedCells = new List<IrAuthoredCellOp>();
+        var mergedCellOps = new List<IrCellOp>();
+        ComposeRowCells(rowAnchor, baseRow, modifiers, reviewers, baseIr, policy, settings,
+            ref nextConflictId, conflicts, mergedCellOps, composedCells);
+        mergedRowOps.Add(new IrRowOp(IrRowOpKind.ModifyRow, rowAnchor, rowAnchor, IrNodeList.From(mergedCellOps)));
+        authoredRows.Add(new IrAuthoredRowOp(IrRowOpKind.ModifyRow, rowAnchor, -1, "", IrNodeList.From(composedCells)));
+    }
+
+    /// <summary>Emit the winning row of a row-level conflict (its merged row op + authored view).</summary>
+    private static void EmitWinnerRow(
+        (int Reviewer, string Author, IrRowOp Op) winner, string rowAnchor, IrRow baseRow,
+        IReadOnlyList<(string Author, IrDocument Ir)> reviewers, IrDocument baseIr,
+        Docxodus.ConflictResolution policy, IrDiffSettings settings,
+        ref int nextConflictId, List<IrConflict> conflicts,
+        List<IrRowOp> mergedRowOps, List<IrAuthoredRowOp> authoredRows)
+    {
+        if (winner.Op.Kind == IrRowOpKind.DeleteRow)
+        {
+            mergedRowOps.Add(new IrRowOp(IrRowOpKind.DeleteRow, rowAnchor, null, null));
+            authoredRows.Add(new IrAuthoredRowOp(IrRowOpKind.DeleteRow, rowAnchor, winner.Reviewer, winner.Author, null));
+        }
+        else // ModifyRow winner
+        {
+            mergedRowOps.Add(winner.Op);
+            var cells = AuthoredCellsForSingleReviewer(winner.Op, baseRow, winner.Reviewer, winner.Author);
+            authoredRows.Add(new IrAuthoredRowOp(IrRowOpKind.ModifyRow, rowAnchor, winner.Reviewer, winner.Author,
+                IrNodeList.From(cells)));
+        }
+    }
+
+    /// <summary>
+    /// The authored-cell view of ONE reviewer's ModifyRow: each changed cell (BlockOps non-null) becomes an
+    /// <see cref="IrAuthoredCellOp"/> whose composed block ops are that reviewer's BlockOps wrapped as
+    /// single-source composite ops (author = the reviewer); an unchanged cell (BlockOps null) is a base
+    /// passthrough (ComposedBlockOps null). Keyed by BASE cell anchor.
+    /// </summary>
+    private static List<IrAuthoredCellOp> AuthoredCellsForSingleReviewer(
+        IrRowOp op, IrRow baseRow, int reviewer, string author)
+    {
+        var result = new List<IrAuthoredCellOp>();
+        var cellOps = op.CellOps;
+        for (int i = 0; i < baseRow.Cells.Count; i++)
+        {
+            string baseCellAnchor = baseRow.Cells[i].Anchor.ToString();
+            IrCellOp? cellOp = cellOps != null && i < cellOps.Count ? cellOps[i] : null;
+            if (cellOp?.BlockOps is { } blockOps)
+            {
+                var composed = blockOps.Select(b => EmitOp(b, author, reviewer)).ToList();
+                result.Add(new IrAuthoredCellOp(baseCellAnchor, IrNodeList.From(composed)));
+            }
+            else
+            {
+                result.Add(new IrAuthoredCellOp(baseCellAnchor, null));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// PER-CELL compose (the recursion): cells pair positionally by BASE cell index. Per base cell: 0
+    /// reviewers changed it → base passthrough; 1 → that reviewer's BlockOps authored; ≥2 identical → consensus;
+    /// ≥2 different → RECURSE into the body block/token composition over the cell's mini-body (the per-reviewer
+    /// cell BlockOps as block streams against the base cell's block anchors). Cell conflicts ascend from
+    /// <paramref name="nextConflictId"/> with BaseAnchor = the base cell-paragraph anchor.
+    /// </summary>
+    private static void ComposeRowCells(
+        string rowAnchor, IrRow baseRow,
+        List<(int Reviewer, string Author, IrRowOp Op)> modifiers,
+        IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
+        IrDocument baseIr, Docxodus.ConflictResolution policy, IrDiffSettings settings,
+        ref int nextConflictId, List<IrConflict> conflicts,
+        List<IrCellOp> mergedCellOps, List<IrAuthoredCellOp> composedCells)
+    {
+        int cellCount = baseRow.Cells.Count;
+        for (int ci = 0; ci < cellCount; ci++)
+        {
+            var baseCell = baseRow.Cells[ci];
+            string baseCellAnchor = baseCell.Anchor.ToString();
+
+            // The reviewers who CHANGED this cell (their ModifyRow's cell-op at index ci has non-null BlockOps).
+            var cellEditors = new List<(int Reviewer, string Author, IrCellOp CellOp)>();
+            foreach (var (reviewer, author, rowOp) in modifiers)
+            {
+                if (rowOp.CellOps is { } cops && ci < cops.Count && cops[ci].BlockOps is not null)
+                    cellEditors.Add((reviewer, author, cops[ci]));
+            }
+
+            if (cellEditors.Count == 0)
+            {
+                // Base passthrough.
+                mergedCellOps.Add(new IrCellOp(baseCellAnchor, baseCellAnchor, null));
+                composedCells.Add(new IrAuthoredCellOp(baseCellAnchor, null));
+                continue;
+            }
+
+            if (cellEditors.Count == 1)
+            {
+                var (reviewer, author, cellOp) = cellEditors[0];
+                mergedCellOps.Add(cellOp);
+                var composed = cellOp.BlockOps!.Select(b => EmitOp(b, author, reviewer)).ToList();
+                composedCells.Add(new IrAuthoredCellOp(baseCellAnchor, IrNodeList.From(composed)));
+                continue;
+            }
+
+            // ≥2 reviewers changed this cell — recurse into block/token composition over the cell mini-body.
+            var cellOps = new List<IrCompositeOp>();
+            var cellConflicts = new List<IrConflict>();
+            ComposeCellMiniBody(baseCell, cellEditors, reviewers, baseIr, policy, settings,
+                ref nextConflictId, cellConflicts, cellOps);
+            conflicts.AddRange(cellConflicts);
+            mergedCellOps.Add(new IrCellOp(baseCellAnchor, baseCellAnchor,
+                IrNodeList.From(cellOps.Select(c => c.Op))));
+            composedCells.Add(new IrAuthoredCellOp(baseCellAnchor, IrNodeList.From(cellOps)));
+        }
+    }
+
+    /// <summary>
+    /// Recurse the body merge over ONE cell's paragraph blocks: build a per-reviewer cell script from each
+    /// editor's <see cref="IrCellOp.BlockOps"/>, group by base anchor + preceding-anchor inserts exactly as
+    /// the body does, and run the shared <see cref="MergeBlockStream"/> dispatch over the base cell's block
+    /// anchors. The cell's paragraph anchors live in the SAME global <see cref="IrDocument.AnchorIndex"/>, so
+    /// the body's tokenization/format gates apply unchanged. Cell-local conflicts carry the base cell-paragraph
+    /// anchor (which resolves in <paramref name="baseIr"/>'s index).
+    /// </summary>
+    private static void ComposeCellMiniBody(
+        IrCell baseCell,
+        List<(int Reviewer, string Author, IrCellOp CellOp)> cellEditors,
+        IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
+        IrDocument baseIr, Docxodus.ConflictResolution policy, IrDiffSettings settings,
+        ref int nextConflictId, List<IrConflict> conflicts, List<IrCompositeOp> ops)
+    {
+        // The base cell's block anchors in document order = the mini-body's base order.
+        var baseOrder = baseCell.Blocks.Select(b => b.Anchor.ToString()).ToList();
+
+        // Build one IrEditScript per editing reviewer from its cell BlockOps. Reviewer indices must match the
+        // outer reviewers list (so MergeOneBaseBlock's reviewers[e.Reviewer] resolves correctly); a reviewer
+        // that did NOT edit this cell contributes an empty script (all base blocks Equal — represented by
+        // absence, which MergeOneBaseBlock treats as untouched). We therefore build a FULL-length script list
+        // indexed by reviewer, with empty scripts for non-editors.
+        var scripts = new List<IrEditScript>(reviewers.Count);
+        for (int r = 0; r < reviewers.Count; r++)
+            scripts.Add(new IrEditScript(IrNodeList.From(System.Array.Empty<IrEditOp>())));
+        foreach (var (reviewer, _, cellOp) in cellEditors)
+            scripts[reviewer] = new IrEditScript(cellOp.BlockOps!);
+
+        var byBase = GroupByBaseAnchor(scripts);
+        var insertsAfter = GroupInsertsByPrecedingAnchor(scripts);
+
+        MergeBlockStream(baseOrder, byBase, insertsAfter, reviewers, baseIr, policy, settings,
+            ops, conflicts, ref nextConflictId);
+    }
+
+    /// <summary>The flat text a row op's competitor carries, for delete-vs-modify ROW conflict reporting. A
+    /// row is not an <see cref="IrBlock"/> (so it is not in <see cref="IrDocument.AnchorIndex"/>) and the
+    /// merger reads without source elements, so a reviewer's right-row text cannot be resolved by anchor here;
+    /// the competitor names the CONTESTED row by its BASE cell text instead (all competitors share the same
+    /// base row, so the disagreement — delete vs modify — is recorded by the conflict's existence, not the
+    /// text). Mirrors <see cref="ContestedBlockText"/>'s "name the contested block by its left content" rule.</summary>
+    private static string RowResultText(IrRow baseRow, IrDiffSettings settings)
+    {
+        var sb = new System.Text.StringBuilder();
+        AppendRowText(baseRow, sb, settings);
+        return sb.ToString();
+    }
+
+    /// <summary>Append a row's cell text (cell-delimited) to <paramref name="sb"/>.</summary>
+    private static void AppendRowText(IrRow row, System.Text.StringBuilder sb, IrDiffSettings settings)
+    {
+        bool firstCell = true;
+        foreach (var cell in row.Cells)
+        {
+            if (!firstCell) sb.Append('␟');
+            firstCell = false;
+            foreach (var b in cell.Blocks)
+            {
+                if (b is IrParagraph cp)
+                    foreach (var t in IrDiffTokenizer.Tokenize(cp, settings))
+                        sb.Append(t.Text);
+                else if (b is IrTable nested)
+                    AppendTableText(nested, sb, settings);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Debug-only totality guard for a composed table (analogous to <see cref="AssertTilesBase"/>): the
+    /// authored rows must tile the base table's rows (every base row consumed exactly once — by an EqualRow,
+    /// a ModifyRow, or a DeleteRow — plus any whole InsertRows which carry a null base anchor), and each
+    /// composed ModifyRow's cells must tile the base row's cells exactly once.
+    /// </summary>
+    private static bool AssertTilesBaseTable(List<IrAuthoredRowOp> authoredRows, IrTable baseTable)
+    {
+        var baseRowAnchors = baseTable.Rows.Select(r => r.Anchor.ToString()).ToList();
+        var consumed = new List<string>();
+        foreach (var rowOp in authoredRows)
+        {
+            if (rowOp.Kind == IrRowOpKind.InsertRow)
+            {
+                if (rowOp.BaseRowAnchor != null) return false; // an inserted row has no base counterpart
+                continue;
+            }
+            if (rowOp.BaseRowAnchor is not { } ra) return false;
+            consumed.Add(ra);
+
+            if (rowOp.Kind == IrRowOpKind.ModifyRow && rowOp.ComposedCells is { } cells)
+            {
+                var baseRow = baseTable.Rows.FirstOrDefault(r => r.Anchor.ToString() == ra);
+                if (baseRow == null) return false;
+                var baseCells = baseRow.Cells.Select(c => c.Anchor.ToString()).ToList();
+                var cellAnchors = cells.Select(c => c.BaseCellAnchor).Where(a => a != null).ToList();
+                if (cellAnchors.Count != baseCells.Count) return false;
+                for (int i = 0; i < baseCells.Count; i++)
+                    if (cellAnchors[i] != baseCells[i]) return false;
+            }
+        }
+        // Every base row consumed exactly once, in order.
+        if (consumed.Count != baseRowAnchors.Count) return false;
+        for (int i = 0; i < baseRowAnchors.Count; i++)
+            if (consumed[i] != baseRowAnchors[i]) return false;
+        return true;
     }
 }

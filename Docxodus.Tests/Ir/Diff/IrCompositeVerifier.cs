@@ -68,7 +68,10 @@ internal static class IrCompositeVerifier
                     break;
 
                 case IrEditOpKind.ModifyBlock:
-                    blocks.Add(ReconstructModify(cop, baseIr, revIr, diff));
+                    if (cop.AuthoredRows is not null)
+                        blocks.AddRange(ReconstructComposedTable(cop, baseIr, revIr, diff));
+                    else
+                        blocks.Add(ReconstructModify(cop, baseIr, revIr, diff));
                     break;
 
                 case IrEditOpKind.MoveBlock:
@@ -158,6 +161,106 @@ internal static class IrCompositeVerifier
             }
         }
         return result.ToString();
+    }
+
+    /// <summary>
+    /// Reconstruct a COMPOSED multi-reviewer table's accepted cell text (FOLLOW-ON B) from the op's
+    /// <see cref="IrCompositeOp.AuthoredRows"/>, one fragment PER CELL in row → cell order (matching
+    /// <see cref="Docs.PlainTextWithTables"/>'s table projection): EqualRow → each base cell's text;
+    /// DeleteRow → nothing (row removed on accept); InsertRow → each inserted-row cell's reviewer text;
+    /// ModifyRow → per cell base passthrough (base cell text) or the cell's composed block ops reconstructed
+    /// and joined. This proves the table compose for all policies (conflicts are pre-resolved into the
+    /// authored cell-block ops by the merger).
+    /// </summary>
+    private static List<string> ReconstructComposedTable(
+        IrCompositeOp cop, IrDocument baseIr,
+        IReadOnlyList<(string Author, IrDocument Ir)> revIr, IrDiffSettings settings)
+    {
+        var fragments = new List<string>();
+        var baseTable = Resolve(baseIr, cop.Op.LeftAnchor!) as IrTable;
+        Assert.NotNull(baseTable);
+
+        foreach (var rowOp in cop.AuthoredRows!)
+        {
+            switch (rowOp.Kind)
+            {
+                case IrRowOpKind.EqualRow:
+                {
+                    var baseRow = baseTable!.Rows.First(r => r.Anchor.ToString() == rowOp.BaseRowAnchor);
+                    foreach (var cell in baseRow.Cells)
+                        fragments.Add(CellText(cell, settings));
+                    break;
+                }
+                case IrRowOpKind.DeleteRow:
+                    break; // row removed on accept
+                case IrRowOpKind.InsertRow:
+                {
+                    var ir = revIr[rowOp.SourceReviewer].Ir;
+                    var row = FindRow(ir, rowOp.RightRowAnchor!);
+                    Assert.NotNull(row);
+                    foreach (var cell in row!.Cells)
+                        fragments.Add(CellText(cell, settings));
+                    break;
+                }
+                case IrRowOpKind.ModifyRow:
+                {
+                    var baseRow = baseTable!.Rows.First(r => r.Anchor.ToString() == rowOp.BaseRowAnchor);
+                    var cells = rowOp.ComposedCells!;
+                    for (int i = 0; i < baseRow.Cells.Count; i++)
+                    {
+                        var cellOp = i < cells.Count ? cells[i] : null;
+                        if (cellOp?.ComposedBlockOps is { } blockOps)
+                        {
+                            var sb = new System.Text.StringBuilder();
+                            foreach (var b in blockOps)
+                                sb.Append(ReconstructCompositeBlock(b, baseIr, revIr, settings));
+                            fragments.Add(sb.ToString());
+                        }
+                        else
+                        {
+                            fragments.Add(CellText(baseRow.Cells[i], settings)); // base passthrough
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        return fragments;
+    }
+
+    /// <summary>Reconstruct ONE composite block's accepted text (a cell paragraph block): Equal/FormatOnly →
+    /// base text; Insert → reviewer text; Modify → <see cref="ReconstructModify"/>; Delete → nothing.</summary>
+    private static string ReconstructCompositeBlock(
+        IrCompositeOp cop, IrDocument baseIr,
+        IReadOnlyList<(string Author, IrDocument Ir)> revIr, IrDiffSettings settings) =>
+        cop.Op.Kind switch
+        {
+            IrEditOpKind.EqualBlock or IrEditOpKind.FormatOnlyBlock => BaseBlockText(baseIr, cop.Op.LeftAnchor!, settings),
+            IrEditOpKind.DeleteBlock => string.Empty,
+            IrEditOpKind.InsertBlock => ReviewerBlockText(revIr, cop.SourceReviewer, cop.Op.RightAnchor!, settings),
+            IrEditOpKind.ModifyBlock => ReconstructModify(cop, baseIr, revIr, settings),
+            _ => string.Empty,
+        };
+
+    /// <summary>The concatenated paragraph text of a cell (diff-tokenizer view).</summary>
+    private static string CellText(IrCell cell, IrDiffSettings settings)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var b in cell.Blocks)
+            if (b is IrParagraph p)
+                sb.Append(string.Concat(IrEditScriptVerifier.Tokens(p, settings)));
+        return sb.ToString();
+    }
+
+    /// <summary>The row in <paramref name="ir"/> whose anchor matches (rows are not in AnchorIndex).</summary>
+    private static IrRow? FindRow(IrDocument ir, string rowAnchor)
+    {
+        foreach (var block in ir.AnchorIndex.Values)
+            if (block is IrTable tbl)
+                foreach (var row in tbl.Rows)
+                    if (row.Anchor.ToString() == rowAnchor)
+                        return row;
+        return null;
     }
 
     private static string BaseBlockText(IrDocument baseIr, string anchor, IrDiffSettings settings) =>

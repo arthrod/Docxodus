@@ -99,4 +99,38 @@ public class CompositeFuzzTests
             IrCompositeVerifier.Verify(baseDoc, revs, ConflictResolution.BaseWins, acceptedText);
         }
     }
+
+    /// <summary>
+    /// FOLLOW-ON B per-cell table composition fuzz: DIFFERENT reviewers edit DIFFERENT table cells/rows (the
+    /// disjoint composed-table happy path). For every (seed, reviewerCount) the consolidated table must satisfy
+    /// (a) reject ≡ base STRUCTURALLY (table-aware, incl. row/cell content) — the composed table restores the
+    /// base table exactly — and (b) the table-aware apply-verifier (cell ops applied to the base table) matches
+    /// the rendered accepted body. A future refactor that breaks the per-cell compose, the recursion, or the
+    /// composed-table renderer would fail one of these on some seed even with the rest of the suite green.
+    /// </summary>
+    [Theory]
+    [InlineData(2)] [InlineData(3)] [InlineData(4)]
+    public void Composite_disjoint_table_cells_round_trip(int reviewerCount)
+    {
+        for (int seed = 0; seed < 60; seed++)
+        {
+            var fc = DiffFuzzer.GenerateCompositeDisjointTableCells(seed, reviewerCount);
+            var baseDoc = new WmlDocument("b.docx", fc.Base);
+            var revs = fc.Reviewers
+                .Select(r => (r.Author, (WmlDocument)new WmlDocument("r.docx", r.Doc)))
+                .ToList();
+            var dd = revs.Select(r => new DocxDiffReviewer { Document = r.Item2, Author = r.Author }).ToList();
+
+            var merged = DocxDiff.Consolidate(
+                baseDoc, dd, new DocxDiffConsolidateSettings { ConflictResolution = ConflictResolution.BaseWins });
+
+            // (a) reject ≡ base, table-aware (StructuralBody descends rows/cells).
+            Assert.Equal(
+                Docs.StructuralBody(baseDoc),
+                Docs.StructuralBody(RevisionProcessor.RejectRevisions(merged)));
+
+            // (b) table-aware apply-verifier: the composed table's cell ops reconstruct the rendered accept.
+            IrCompositeVerifier.Verify(baseDoc, revs, ConflictResolution.BaseWins, Docs.AcceptStructuralBody(merged));
+        }
+    }
 }

@@ -106,19 +106,23 @@ public class IrCompositeFixTests
     [InlineData(ConflictResolution.BaseWins)]
     [InlineData(ConflictResolution.FirstReviewerWins)]
     [InlineData(ConflictResolution.StackAll)]
-    public void Multireviewer_disjoint_table_cell_edits_record_conflict_not_silent_drop(ConflictResolution policy)
+    public void Multireviewer_disjoint_table_cell_edits_compose_no_drop(ConflictResolution policy)
     {
         var baseDoc = TableBase();
         var alice = TableVariant("a ALICE", "b two", "c three", "d four"); // edits cell (0,0)
         var bob = TableVariant("a one", "b two", "c three", "d BOB");      // edits cell (1,1) — disjoint
 
-        // Both reviewers' table edits must be SEEN: a recorded conflict, not a silent drop.
-        Assert.True(
-            Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)).Count >= 1,
-            "Multi-reviewer table cell edits were silently dropped (conflictCount == 0).");
+        // FOLLOW-ON B: disjoint cross-reviewer cell edits now COMPOSE inline — both land, NO conflict
+        // (the prior behavior recorded a whole-table conflict; the deeper IrCompositeTableTests cover the
+        // composed-content + per-reviewer attribution in detail).
+        Assert.Empty(Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)));
 
-        // reject ≡ base must hold for the table-conflict output under every policy.
         var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        var accept = Docs.StructuralBody(RevisionAccepter.AcceptRevisions(merged));
+        Assert.Contains("a ALICE", accept);
+        Assert.Contains("d BOB", accept);
+
+        // reject ≡ base must hold under every policy.
         Assert.Equal(Docs.StructuralBody(baseDoc),
             Docs.StructuralBody(RevisionProcessor.RejectRevisions(merged)));
     }

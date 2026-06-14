@@ -78,6 +78,50 @@ internal static class Docs
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Body text INCLUDING table cell text, in document order: each body <c>w:p</c>'s run text, and each
+    /// body <c>w:tbl</c>'s cell text (row → cell → the cell's paragraph text), all joined by newlines.
+    /// Unlike <see cref="PlainText"/> (which skips tables) this surfaces table content, so an accept that
+    /// composes table-cell edits is observable. Reads only direct children of <c>w:body</c>; nested tables
+    /// surface through their parent cell's text.
+    /// </summary>
+    public static string PlainTextWithTables(WmlDocument d)
+    {
+        var ns = (XNamespace)IrTestDocuments.W;
+        var doc = XDocument.Parse(MainPartXml(d));
+        var body = doc.Root?.Element(ns + "body");
+        if (body is null)
+            return string.Empty;
+
+        var sb = new StringBuilder();
+        foreach (var block in body.Elements())
+        {
+            if (block.Name == ns + "p")
+            {
+                sb.Append(string.Concat(block.Descendants(ns + "t").Select(t => t.Value))).Append('\n');
+            }
+            else if (block.Name == ns + "tbl")
+            {
+                foreach (var tr in block.Elements(ns + "tr"))
+                    foreach (var tc in tr.Elements(ns + "tc"))
+                        sb.Append(string.Concat(tc.Descendants(ns + "t").Select(t => t.Value))).Append('\n');
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Apply all tracked revisions (accept) to <paramref name="merged"/> and project the resulting body to
+    /// the SAME table-aware text shape <see cref="IrCompositeVerifier"/> reconstructs from the composite
+    /// script — so the verifier's apply-reconstruction can be checked against the rendered accepted body for
+    /// table-bearing documents. The shape: one fragment per body block (a paragraph's text; a table's cell
+    /// text in row → cell order), joined by newlines. Whitespace is later collapsed by
+    /// <see cref="RevisionEquivalence.Normalize"/> on both sides, so intra-table delimiters need only match
+    /// loosely.
+    /// </summary>
+    public static string AcceptStructuralBody(WmlDocument merged) =>
+        PlainTextWithTables(RevisionAccepter.AcceptRevisions(merged));
+
     /// <summary>The main document part XML as a string.</summary>
     public static string MainPartXml(WmlDocument d)
     {

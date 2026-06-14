@@ -159,6 +159,44 @@ internal static class IrCompositeMarkupRenderer
             return;
         }
 
+        // Composed multi-reviewer TABLE (FOLLOW-ON B): per-row/per-cell authorship from AuthoredRows.
+        // Delegates to the two-way renderer's composed-table builder, which recursively renders each composed
+        // cell-block via the shared RenderOneCompositeBlock helper below.
+        if (compositeOp.AuthoredRows != null)
+        {
+            IrMarkupRenderer.RenderComposedTable(compositeOp, baseIr, reviewerIrs, state, sink,
+                RenderOneCompositeBlock);
+            return;
+        }
+
+        RenderOneCompositeBlock(compositeOp, baseIr, reviewerIrs, state, sink);
+    }
+
+    /// <summary>
+    /// Render ONE composite op into <paramref name="sink"/> by pointing the shared
+    /// <see cref="IrMarkupRenderer.RenderState"/> at the contributing reviewer (author override + right source
+    /// IR + media bucket) and reusing the two-way per-op dispatch — OR, for a composed paragraph
+    /// (<see cref="IrCompositeOp.AuthoredTokens"/> non-null), delegating to
+    /// <see cref="IrMarkupRenderer.RenderComposedParagraph"/>. Shared by the body loop
+    /// (<see cref="EmitCompositeOp"/>) and the per-cell recursion inside
+    /// <see cref="IrMarkupRenderer.RenderComposedTable"/>: a composed table cell's block ops are themselves
+    /// composite ops (single-source or composed paragraph), rendered here exactly as a body block would be.
+    /// </summary>
+    internal static void RenderOneCompositeBlock(
+        IrCompositeOp compositeOp,
+        IrDocument baseIr,
+        IReadOnlyList<IrDocument> reviewerIrs,
+        IrMarkupRenderer.RenderState state,
+        List<XElement> sink)
+    {
+        // A composed paragraph nested in a cell: per-span authorship (recursion proof for same-cell-paragraph
+        // token composition).
+        if (compositeOp.AuthoredTokens != null)
+        {
+            IrMarkupRenderer.RenderComposedParagraph(compositeOp, baseIr, reviewerIrs, state, sink);
+            return;
+        }
+
         var op = compositeOp.Op;
         int sourceReviewer = compositeOp.SourceReviewer;
 
@@ -166,10 +204,20 @@ internal static class IrCompositeMarkupRenderer
         // base IR and there is no author override. A reviewer-sourced op points RightSource at that reviewer's IR
         // and overrides the author to the reviewer; media-bearing clones land in that reviewer's bucket.
         bool baseSourced = sourceReviewer < 0;
+        var savedAuthor = state.AuthorOverride;
+        var savedRightSource = state.RightSource;
+        var savedRightSourceId = state.RightSourceId;
+
         state.AuthorOverride = baseSourced ? null : compositeOp.Author;
         state.RightSource = baseSourced ? baseIr : reviewerIrs[sourceReviewer];
         state.RightSourceId = sourceReviewer;
 
         IrMarkupRenderer.RenderBlockOp(op, state, sink);
+
+        // Restore the shared state so a CELL recursion does not leak its per-op source into the surrounding
+        // table-row render (the body loop reassigns these every op, so the restore is inert there).
+        state.AuthorOverride = savedAuthor;
+        state.RightSource = savedRightSource;
+        state.RightSourceId = savedRightSourceId;
     }
 }

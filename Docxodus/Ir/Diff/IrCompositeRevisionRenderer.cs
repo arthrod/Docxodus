@@ -67,12 +67,116 @@ internal static class IrCompositeRevisionRenderer
         var result = new List<(IrRevision, string, int?)>();
         foreach (var op in script.Operations)
         {
-            if (op.AuthoredTokens != null)
+            if (op.AuthoredRows != null)
+                RenderComposedTable(op, baseIr, reviewers, settings, script.Conflicts, moveSourceOp, result);
+            else if (op.AuthoredTokens != null)
                 RenderComposed(op, baseIr, reviewers, settings, script.Conflicts, result);
             else
                 RenderSingleSource(op, baseIr, reviewers, settings, moveSourceOp, result);
         }
         return result;
+    }
+
+    // ------------------------------------------------------------------ composed multi-reviewer table
+
+    /// <summary>
+    /// Project a COMPOSED multi-reviewer table (FOLLOW-ON B): walk its <see cref="IrCompositeOp.AuthoredRows"/>,
+    /// projecting each cell-block's composite op through the SAME per-block projection the body uses
+    /// (<see cref="RenderComposed"/> for a composed paragraph, <see cref="RenderSingleSource"/> otherwise), so
+    /// each revision is attributed to its cell-block reviewer and stamped with any cell-level conflict id. An
+    /// EqualRow and a base-passthrough cell emit nothing; an InsertRow/DeleteRow projects its whole row through
+    /// the single-source path.
+    /// </summary>
+    private static void RenderComposedTable(
+        IrCompositeOp op,
+        IrDocument baseIr,
+        IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
+        IrDiffSettings settings,
+        IrNodeList<IrConflict> conflicts,
+        IReadOnlyDictionary<int, IrEditOp> moveSourceOp,
+        List<(IrRevision, string, int?)> sink)
+    {
+        foreach (var rowOp in op.AuthoredRows!)
+        {
+            switch (rowOp.Kind)
+            {
+                case IrRowOpKind.EqualRow:
+                    break; // unchanged base row → no revision
+
+                case IrRowOpKind.InsertRow:
+                {
+                    // A reviewer-inserted whole row: one Inserted revision per cell paragraph, authored to the
+                    // inserting reviewer. The merged TableDiff carries the right row anchor; we surface a
+                    // coarse row-level Inserted revision (text from the reviewer's right row) so the row is not
+                    // invisible to consumers. Row text is resolved from the reviewer's IR by the right anchor.
+                    if (rowOp.SourceReviewer >= 0 && rowOp.SourceReviewer < reviewers.Count
+                        && rowOp.RightRowAnchor is { } rra)
+                    {
+                        string text = RowText(reviewers[rowOp.SourceReviewer].Ir, rra, settings);
+                        if (text.Length > 0)
+                            sink.Add((
+                                new IrRevision(IrRevisionType.Inserted, text, rowOp.Author,
+                                    settings.DateTimeForRevisions, RightAnchor: rra),
+                                rowOp.Author, op.ConflictId));
+                    }
+                    break;
+                }
+
+                case IrRowOpKind.DeleteRow:
+                {
+                    // A reviewer-deleted whole base row: one Deleted revision (text from the base row).
+                    if (rowOp.BaseRowAnchor is { } bra)
+                    {
+                        string text = RowText(baseIr, bra, settings);
+                        if (text.Length > 0)
+                            sink.Add((
+                                new IrRevision(IrRevisionType.Deleted, text, rowOp.Author,
+                                    settings.DateTimeForRevisions, LeftAnchor: bra),
+                                rowOp.Author, op.ConflictId));
+                    }
+                    break;
+                }
+
+                case IrRowOpKind.ModifyRow:
+                {
+                    if (rowOp.ComposedCells is not { } cells)
+                        break;
+                    foreach (var cellOp in cells)
+                    {
+                        if (cellOp.ComposedBlockOps is not { } blockOps)
+                            continue; // base passthrough → no revision
+                        foreach (var cellBlock in blockOps)
+                        {
+                            if (cellBlock.AuthoredTokens != null)
+                                RenderComposed(cellBlock, baseIr, reviewers, settings, conflicts, sink);
+                            else
+                                RenderSingleSource(cellBlock, baseIr, reviewers, settings, moveSourceOp, sink);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// <summary>The concatenated cell text of a row resolved by anchor, for whole-row insert/delete revision
+    /// text. A row is not in <see cref="IrDocument.AnchorIndex"/>, so walk the document's tables.</summary>
+    private static string RowText(IrDocument ir, string rowAnchor, IrDiffSettings settings)
+    {
+        foreach (var block in ir.AnchorIndex.Values)
+            if (block is IrTable tbl)
+                foreach (var row in tbl.Rows)
+                    if (row.Anchor.ToString() == rowAnchor)
+                    {
+                        var sb = new StringBuilder();
+                        foreach (var cell in row.Cells)
+                            foreach (var b in cell.Blocks)
+                                if (b is IrParagraph p)
+                                    foreach (var t in IrDiffTokenizer.Tokenize(p, settings))
+                                        sb.Append(t.Text);
+                        return sb.ToString();
+                    }
+        return string.Empty;
     }
 
     // ------------------------------------------------------------------ single-source ops

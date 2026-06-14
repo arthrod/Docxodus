@@ -641,6 +641,239 @@ internal static class IrMarkupRenderer
             MarkWholeParagraph(p, kind, state);
     }
 
+    // ----------------------------------------------------------------- composed multi-reviewer table (FOLLOW-ON B)
+
+    /// <summary>
+    /// Render a COMPOSED multi-reviewer table from <see cref="IrCompositeOp.AuthoredRows"/> (FOLLOW-ON B): a
+    /// SINGLE <c>w:tbl</c> built on the BASE table's tblPr/tblGrid, with each row emitted per its
+    /// <see cref="IrAuthoredRowOp"/>:
+    /// <list type="bullet">
+    /// <item><b>EqualRow</b> → the base row verbatim (no revision markup).</item>
+    /// <item><b>InsertRow / DeleteRow</b> → swap state to the relocating reviewer and reuse the whole-row
+    /// insert/delete markup (the same <see cref="MarkWholeRow"/> the two-way path uses).</item>
+    /// <item><b>ModifyRow</b> → a new <c>w:tr</c> from the BASE row's trPr + base cell skeletons
+    /// (count-stable; v1 clones the base cell tcPr — guaranteed by the column-structure gate). Per
+    /// <see cref="IrAuthoredCellOp"/>: a base passthrough (ComposedBlockOps null) keeps the base cell content
+    /// verbatim; otherwise each cell-block composite op renders into the cell sink via
+    /// <paramref name="renderOneCompositeBlock"/> (the shared composite-block dispatch — this recursion handles
+    /// disjoint multi-author cell paragraphs AND same-cell-paragraph token composition).</item>
+    /// </list>
+    /// The callback breaks the layering cycle: <see cref="IrCompositeMarkupRenderer"/> owns the composite-op
+    /// dispatch and supplies it here so the two-way renderer needs no reference to the composite renderer.
+    /// </summary>
+    internal static void RenderComposedTable(
+        IrCompositeOp op,
+        IrDocument baseIr,
+        IReadOnlyList<IrDocument> reviewerIrs,
+        RenderState state,
+        List<XElement> sink,
+        Action<IrCompositeOp, IrDocument, IReadOnlyList<IrDocument>, RenderState, List<XElement>> renderOneCompositeBlock)
+    {
+        var authoredRows = op.AuthoredRows
+            ?? throw new DocxodusException("RenderComposedTable requires op.AuthoredRows.");
+
+        var baseTblBlock = ResolveBlock(op.Op.LeftAnchor, baseIr) as IrTable;
+        var baseTbl = SourceElement(op.Op.LeftAnchor, baseIr);
+        if (baseTblBlock == null || baseTbl == null || baseTbl.Name != W.tbl)
+        {
+            // Defensive: a composed table op should always resolve its base table. Fall back to the merged
+            // diff via the single-reviewer modify path so the op is not silently dropped.
+            if (op.Op.TableDiff is { } td)
+            {
+                var savedAuthor0 = state.AuthorOverride;
+                var savedSource0 = state.RightSource;
+                var savedId0 = state.RightSourceId;
+                state.AuthorOverride = null;
+                state.RightSource = baseIr;
+                state.RightSourceId = -1;
+                RenderModifyBlock(op.Op, state, sink);
+                state.AuthorOverride = savedAuthor0;
+                state.RightSource = savedSource0;
+                state.RightSourceId = savedId0;
+            }
+            return;
+        }
+
+        // Base row + cell source lookups (cell anchors are NOT in AnchorIndex, so map from the base table IR).
+        var baseRowsByAnchor = IndexRows(baseTblBlock);
+        var baseCellsByAnchor = IndexBaseCells(baseTblBlock);
+
+        var newTbl = new XElement(W.tbl);
+        foreach (var pre in baseTbl.Elements().Where(e => e.Name != W.tr))
+            newTbl.Add(StripUnids(new XElement(pre)));
+
+        foreach (var rowOp in authoredRows)
+        {
+            switch (rowOp.Kind)
+            {
+                case IrRowOpKind.EqualRow:
+                {
+                    if (rowOp.BaseRowAnchor is { } ra && baseRowsByAnchor.TryGetValue(ra, out var src))
+                        newTbl.Add(StripUnids(new XElement(src)));
+                    break;
+                }
+                case IrRowOpKind.InsertRow:
+                {
+                    // A reviewer-inserted whole row: source it from that reviewer's table at the merged
+                    // op's matching InsertRow right anchor.
+                    EmitComposedInsertOrDeleteRow(op, rowOp, reviewerIrs, baseIr, state, newTbl, RevKind.Ins);
+                    break;
+                }
+                case IrRowOpKind.DeleteRow:
+                {
+                    EmitComposedInsertOrDeleteRow(op, rowOp, reviewerIrs, baseIr, state, newTbl, RevKind.Del);
+                    break;
+                }
+                case IrRowOpKind.ModifyRow:
+                {
+                    EmitComposedModifyRow(rowOp, baseRowsByAnchor, baseCellsByAnchor, baseIr, reviewerIrs,
+                        state, newTbl, renderOneCompositeBlock);
+                    break;
+                }
+            }
+        }
+
+        sink.Add(newTbl);
+    }
+
+    /// <summary>Emit a composed whole-row insert/delete: resolve the row's source <c>w:tr</c> (a reviewer's
+    /// inserted row from the merged TableDiff's matching InsertRow right anchor, or the base row for a delete)
+    /// under the relocating reviewer's state, whole-mark it, and append it.</summary>
+    private static void EmitComposedInsertOrDeleteRow(
+        IrCompositeOp op, IrAuthoredRowOp rowOp, IReadOnlyList<IrDocument> reviewerIrs, IrDocument baseIr,
+        RenderState state, XElement newTbl, RevKind kind)
+    {
+        var savedAuthor = state.AuthorOverride;
+        var savedSource = state.RightSource;
+        var savedId = state.RightSourceId;
+        try
+        {
+            if (kind == RevKind.Del)
+            {
+                // Delete: source the base row by its base anchor.
+                if (rowOp.BaseRowAnchor is { } ra)
+                {
+                    var baseTbl = ResolveBlock(op.Op.LeftAnchor, baseIr) as IrTable;
+                    var src = baseTbl?.Rows.FirstOrDefault(r => r.Anchor.ToString() == ra)?.Source.Element;
+                    if (src != null)
+                    {
+                        var row = StripUnids(new XElement(src));
+                        state.AuthorOverride = rowOp.Author;
+                        state.RightSourceId = rowOp.SourceReviewer;
+                        MarkWholeRow(row, RevKind.Del, state);
+                        newTbl.Add(row);
+                    }
+                }
+                return;
+            }
+
+            // Insert: source the reviewer's inserted row directly by its right anchor (carried on the authored
+            // row op).
+            int reviewer = rowOp.SourceReviewer;
+            if (reviewer < 0 || reviewer >= reviewerIrs.Count || rowOp.RightRowAnchor is not { } rra)
+                return;
+            var reviewerIr = reviewerIrs[reviewer];
+            var rowSrc = FindRowSource(reviewerIr, rra);
+            if (rowSrc == null)
+                return;
+            var newRow = StripUnids(new XElement(rowSrc));
+            state.AuthorOverride = rowOp.Author;
+            state.RightSource = reviewerIr;
+            state.RightSourceId = reviewer;
+            state.RegisterMediaReferences(newRow);
+            MarkWholeRow(newRow, RevKind.Ins, state);
+            newTbl.Add(newRow);
+        }
+        finally
+        {
+            state.AuthorOverride = savedAuthor;
+            state.RightSource = savedSource;
+            state.RightSourceId = savedId;
+        }
+    }
+
+    /// <summary>The source <c>w:tr</c> a row anchor resolves to in <paramref name="ir"/>, or null.</summary>
+    private static XElement? FindRowSource(IrDocument ir, string rowAnchor)
+    {
+        foreach (var block in ir.AnchorIndex.Values)
+            if (block is IrTable tbl)
+                foreach (var row in tbl.Rows)
+                    if (row.Anchor.ToString() == rowAnchor)
+                        return row.Source.Element;
+        return null;
+    }
+
+    /// <summary>Emit a composed ModifyRow: a new <c>w:tr</c> from the BASE row's trPr + per-cell content (base
+    /// passthrough or per-cell-block composite render).</summary>
+    private static void EmitComposedModifyRow(
+        IrAuthoredRowOp rowOp,
+        Dictionary<string, XElement> baseRowsByAnchor,
+        Dictionary<string, XElement> baseCellsByAnchor,
+        IrDocument baseIr, IReadOnlyList<IrDocument> reviewerIrs, RenderState state, XElement newTbl,
+        Action<IrCompositeOp, IrDocument, IReadOnlyList<IrDocument>, RenderState, List<XElement>> renderOneCompositeBlock)
+    {
+        if (rowOp.BaseRowAnchor is not { } rowAnchor || !baseRowsByAnchor.TryGetValue(rowAnchor, out var baseRowSrc))
+            return;
+
+        var newRow = new XElement(W.tr);
+        foreach (var pre in baseRowSrc.Elements().Where(e => e.Name != W.tc))
+            newRow.Add(StripUnids(new XElement(pre)));
+
+        if (rowOp.ComposedCells is not { } cells)
+        {
+            // No per-cell view: keep the base row verbatim (defensive).
+            newTbl.Add(StripUnids(new XElement(baseRowSrc)));
+            return;
+        }
+
+        foreach (var cellOp in cells)
+        {
+            XElement? baseCellSrc = cellOp.BaseCellAnchor != null
+                && baseCellsByAnchor.TryGetValue(cellOp.BaseCellAnchor, out var bc) ? bc : null;
+            if (baseCellSrc == null)
+                continue;
+
+            var newCell = new XElement(W.tc);
+            foreach (var pre in baseCellSrc.Elements().Where(e => e.Name != W.p && e.Name != W.tbl))
+                newCell.Add(StripUnids(new XElement(pre)));
+
+            if (cellOp.ComposedBlockOps is { } blockOps)
+            {
+                var cellSink = new List<XElement>();
+                foreach (var cellBlock in blockOps)
+                    renderOneCompositeBlock(cellBlock, baseIr, reviewerIrs, state, cellSink);
+                if (cellSink.Count == 0)
+                    foreach (var b in baseCellSrc.Elements().Where(e => e.Name == W.p || e.Name == W.tbl))
+                        cellSink.Add(StripUnids(new XElement(b)));
+                newCell.Add(cellSink);
+            }
+            else
+            {
+                // Base passthrough: the base cell's content verbatim.
+                foreach (var b in baseCellSrc.Elements().Where(e => e.Name == W.p || e.Name == W.tbl))
+                    newCell.Add(StripUnids(new XElement(b)));
+            }
+            newRow.Add(newCell);
+        }
+
+        state.RegisterMediaReferences(newRow);
+        newTbl.Add(newRow);
+    }
+
+    /// <summary>Map each base cell's anchor to its source <c>w:tc</c> (cells are not in AnchorIndex).</summary>
+    private static Dictionary<string, XElement> IndexBaseCells(IrTable table)
+    {
+        var map = new Dictionary<string, XElement>(StringComparer.Ordinal);
+        foreach (var row in table.Rows)
+            foreach (var cell in row.Cells)
+            {
+                var src = cell.Source.Element;
+                if (src != null)
+                    map[cell.Anchor.ToString()] = src;
+            }
+        return map;
+    }
+
     /// <summary>Index a table's rows by their anchor string for source-row lookup during table rendering.</summary>
     private static Dictionary<string, XElement> IndexRows(IrTable? table)
     {

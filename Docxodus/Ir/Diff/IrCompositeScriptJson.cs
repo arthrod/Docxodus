@@ -106,6 +106,49 @@ internal static class IrCompositeScriptJson
             writer.WriteEndArray();
         }
 
+        // Additive composed-table attribution (FOLLOW-ON B): the merged tableDiff above is the apply/JSON
+        // truth; authoredRows is the renderer/revision attribution view. Absent (null) for all non-table ops,
+        // so existing JSON tests are byte-unaffected.
+        if (compositeOp.AuthoredRows is { } authoredRows)
+        {
+            writer.WriteStartArray("authoredRows");
+            foreach (var rowOp in authoredRows)
+                WriteAuthoredRowOp(writer, rowOp);
+            writer.WriteEndArray();
+        }
+
+        writer.WriteEndObject();
+    }
+
+    /// <summary>Write one composed-table authored row: kind/baseRowAnchor/author/sourceReviewer + (for an
+    /// InsertRow) rightRowAnchor + (for a ModifyRow) nested composedCells → composedBlockOps (recursive
+    /// composite-op writer).</summary>
+    private static void WriteAuthoredRowOp(Utf8JsonWriter writer, IrAuthoredRowOp rowOp)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("kind", rowOp.Kind.ToString());
+        if (rowOp.BaseRowAnchor is { } bra) writer.WriteString("baseRowAnchor", bra);
+        if (rowOp.RightRowAnchor is { } rra) writer.WriteString("rightRowAnchor", rra);
+        writer.WriteString("author", rowOp.Author);
+        writer.WriteNumber("sourceReviewer", rowOp.SourceReviewer);
+        if (rowOp.ComposedCells is { } cells)
+        {
+            writer.WriteStartArray("composedCells");
+            foreach (var cell in cells)
+            {
+                writer.WriteStartObject();
+                if (cell.BaseCellAnchor is { } bca) writer.WriteString("baseCellAnchor", bca);
+                if (cell.ComposedBlockOps is { } blockOps)
+                {
+                    writer.WriteStartArray("composedBlockOps");
+                    foreach (var blockOp in blockOps)
+                        WriteCompositeOp(writer, blockOp);
+                    writer.WriteEndArray();
+                }
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+        }
         writer.WriteEndObject();
     }
 

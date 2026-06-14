@@ -278,6 +278,90 @@ internal static class DiffFuzzer
     public static CompositeFuzzCase GenerateCompositeWithStructuralOps(int seed, int reviewerCount) =>
         GenerateComposite(seed, reviewerCount, keepStructure: false, keepStructuralOps: true);
 
+    /// <summary>
+    /// FOLLOW-ON B structural-fuzz generator: a base WITH a multi-row/-cell table, where DIFFERENT reviewers
+    /// edit DIFFERENT table cells (and occasionally append a row), so each consolidate drives the per-cell
+    /// table-composition path — disjoint cross-reviewer cell edits composing inline. Each reviewer's edits are
+    /// confined to its CELL partition (cell linear index <c>row*cols+col % reviewerCount == reviewer</c>) so
+    /// edits stay disjoint (the composed-table happy path); a row append by one reviewer routes by preceding
+    /// base row. The base carries NO footnote (the composite path does not merge notes) but DOES keep its
+    /// table; the body also has paragraphs so the surrounding structure is exercised. Consumed by the
+    /// composite table fuzz test, which asserts reject ≡ base (structural, table-aware) AND the table-aware
+    /// apply-verifier over the composed table.
+    /// </summary>
+    public static CompositeFuzzCase GenerateCompositeDisjointTableCells(int seed, int reviewerCount)
+    {
+        var rng = new Random(seed);
+        var baseModel = GenerateBase(rng, out _, out _);
+        baseModel.FootnoteText = null; // notes are not composed in the consolidate path
+
+        // Force a table sized so every reviewer gets at least one cell in its partition. Columns are fixed at
+        // 2 to match the fuzzer's InsertRow apply (which appends a 2-cell row) — a non-2 column count would
+        // produce a ragged table when a reviewer appends a row, which is a separate (column-structure) path.
+        // Rows are chosen so rows*2 >= reviewerCount, with multi-word cells (so cell edits are meaningful).
+        const int cols = 2;
+        int rows = Math.Max(2, (reviewerCount + 1) / cols + rng.Next(1, 3));
+        var table = new Table();
+        for (int r = 0; r < rows; r++)
+        {
+            var row = new List<string>();
+            for (int c = 0; c < cols; c++)
+                row.Add(string.Join(" ", SoupWords(rng, rng.Next(2, 5))));
+            table.Rows.Add(row);
+        }
+        baseModel.Table = table;
+
+        var baseBytes = Serialize(baseModel).DocumentByteArray;
+
+        var reviewers = new (string Author, byte[] Doc)[reviewerCount];
+        var appliedPerReviewer = new List<IReadOnlyList<Mutation>>(reviewerCount);
+        for (int i = 0; i < reviewerCount; i++)
+        {
+            var model = baseModel.Clone();
+            var applied = new List<Mutation>();
+            int count = rng.Next(1, 4);
+            for (int k = 0; k < count; k++)
+            {
+                var m = PickDisjointTableMutation(rng, model, i, reviewerCount);
+                if (m is { } mut && Apply(model, mut))
+                    applied.Add(mut);
+            }
+            reviewers[i] = ($"Reviewer{i + 1}", Serialize(model).DocumentByteArray);
+            appliedPerReviewer.Add(applied);
+        }
+        return new CompositeFuzzCase(seed, baseBytes, reviewers, appliedPerReviewer);
+    }
+
+    /// <summary>
+    /// Pick one DISJOINT table mutation for reviewer <paramref name="reviewer"/>: an EditTableCell confined to
+    /// a cell in this reviewer's partition (cell linear index <c>% reviewerCount == reviewer</c>), or — less
+    /// often — an InsertRow (routed by preceding base row, so two reviewers' inserted rows both land without
+    /// conflict). Returns null when no partition cell exists. Stays disjoint so the composed-table happy path
+    /// is exercised (no same-cell conflict).
+    /// </summary>
+    private static Mutation? PickDisjointTableMutation(Random rng, DocModel model, int reviewer, int reviewerCount)
+    {
+        if (model.Table is not { Rows.Count: > 0 } t)
+            return null;
+        int cols = t.Cols;
+        int rowsN = t.Rows.Count;
+
+        // 1-in-6: append a row (disjoint by construction — both reviewers' new rows both appear).
+        if (rng.Next(6) == 0)
+            return new Mutation(MutationKind.InsertRow, Index: rowsN /* append at end */, Payload: BankWord(rng));
+
+        // Otherwise pick a cell in this reviewer's partition.
+        var partitionCells = new List<(int Row, int Col)>();
+        for (int r = 0; r < rowsN; r++)
+            for (int c = 0; c < cols; c++)
+                if ((r * cols + c) % reviewerCount == reviewer)
+                    partitionCells.Add((r, c));
+        if (partitionCells.Count == 0)
+            return null;
+        var (ri, ci) = partitionCells[rng.Next(partitionCells.Count)];
+        return new Mutation(MutationKind.EditTableCell, Index: ri, Target: ci, Payload: BankWord(rng));
+    }
+
     private static CompositeFuzzCase GenerateComposite(
         int seed, int reviewerCount, bool keepStructure, bool keepStructuralOps = false)
     {
