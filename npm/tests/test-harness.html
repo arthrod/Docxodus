@@ -13,6 +13,9 @@
          window.DocxodusSession so specs can exercise the typed API, not just the
          raw [JSExport] bridge. Built by `npm run build:session-bundle`. -->
     <script src="./session.bundle.js"></script>
+    <!-- Framework-agnostic DocxEditor (Option B block editor), IIFE-bundled to
+         window.DocxodusEditor. Built by `npm run build:editor-bundle`. -->
+    <script src="./editor.bundle.js"></script>
 
     <script type="module">
         import { dotnet } from './_framework/dotnet.js';
@@ -36,7 +39,9 @@
             openTypedSession: (bytes, settingsJson) => new window.DocxodusSession.DocxSession(
                 exports.DocxodusWasm.DocxSessionBridge.OpenSession(bytes, settingsJson || ''),
                 exports.DocxodusWasm.DocxSessionBridge
-            )
+            ),
+            // Framework-agnostic block editor (Option B). open(container, bytes, exports, opts).
+            DocxEditor: window.DocxodusEditor.DocxEditor
         };
 
         // Test helper functions

@@ -153,6 +153,9 @@ export type {
 
 export { PaginationEngine, paginateHtml } from "./pagination.js";
 
+export { DocxEditor } from "./editor.js";
+export type { DocxEditorOptions, DocxEditorExports } from "./editor.js";
+
 export type {
   ConversionOptions,
   CompareOptions,
