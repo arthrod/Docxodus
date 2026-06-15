@@ -371,6 +371,7 @@ Detailed design docs for the major subsystems live in `docs/architecture/`. Read
 - `ir_diff_engine.md` — DocxDiff (IR diff engine) public surface, pipeline, edit script, settings, parity status, relationship to WmlComparer
 - `docx_mutation_api.md` — DocxSession surface, anchor lifecycle, error catalog, supported markdown subset
 - `ir_editor_feasibility.md` — IR-powered browser DOCX editor: architecture (Option B — DocxSession is model-of-record, IR/anchors are addressing), RenderBlockHtml + DocxEditor surface, measured results, findings
+- `ir_editor_roadmap.md` — sequenced, impact-ordered roadmap for the editor (M1 rich in-block editing → M9 render fidelity); architecture invariants to preserve
 - `python_docxodus.md` — planned Python wrapper for DocxSession; wire protocol, type mapping, distribution
 - `skiasharp-removal-plan.md`, `wasm-optimization-plan.md`, `ui_responsiveness.md`, `profiling-results.md` — WASM/browser work
 

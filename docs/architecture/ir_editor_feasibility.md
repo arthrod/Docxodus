@@ -111,11 +111,9 @@ This satisfies the original "render pages and populate with editable blocks" goa
 editor wires only the visible page container (pagination clones blocks; hidden originals
 stay in `#pagination-staging`).
 
-**Still Plan 2 (not yet built):** worker offload of the editing surface (the MVP runs on
-the main thread; fine for debounced per-block edits, needed for heavy docs); re-paginate
-on edit (overflow reflow — the MVP patches a block in place without reflowing its page);
-rich in-block formatting on edit (the MVP replaces an edited block from plain text);
-table-cell editing (`ReplaceCellContent`); and a React wrapper.
+**Remaining work is tracked, prioritized by impact, in `ir_editor_roadmap.md`** (M1 rich
+in-block editing → M2 structural editing → M3 worker offload → M4 re-paginate-on-edit →
+M5 toolbar/undo → M6 tracked-changes → M7 tables → M8 React → M9 render fidelity).
 
 What was built to clear it (committed):
 - `WmlToHtmlConverterSettings.StampAnchors` → stamps `data-anchor=Unid` on
