@@ -103,10 +103,19 @@ re-renders → save (39 KB) reopens with the edit persisted **and** untouched co
   `ReplaceText` path, so the editor only makes projection-addressable blocks editable;
   table-cell editing (via `ReplaceCellContent`) is future work.
 
+**Block-flow pagination DONE.** `DocxEditor { paginated: true }` renders via the
+converter's `PaginationMode` + `pagination.ts` so blocks flow into real `.page-box` page
+boxes (margins/headers), and those page blocks stay editable with the same incremental
+re-render loop (browser test confirms page boxes render + an in-page edit re-renders).
+This satisfies the original "render pages and populate with editable blocks" goal — the
+editor wires only the visible page container (pagination clones blocks; hidden originals
+stay in `#pagination-staging`).
+
 **Still Plan 2 (not yet built):** worker offload of the editing surface (the MVP runs on
-the main thread; fine for debounced per-block edits, needed for heavy docs), block-flow
-**pagination** integration (page boxes via `pagination.ts`), rich in-block formatting on
-edit (the MVP replaces an edited block from plain text), and a React wrapper.
+the main thread; fine for debounced per-block edits, needed for heavy docs); re-paginate
+on edit (overflow reflow — the MVP patches a block in place without reflowing its page);
+rich in-block formatting on edit (the MVP replaces an edited block from plain text);
+table-cell editing (`ReplaceCellContent`); and a React wrapper.
 
 What was built to clear it (committed):
 - `WmlToHtmlConverterSettings.StampAnchors` → stamps `data-anchor=Unid` on
