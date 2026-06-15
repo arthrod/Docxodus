@@ -402,4 +402,49 @@ test.describe('DocxEditor — block editor end-to-end', () => {
     expect(out.marginLeft).toBeGreaterThan(0); // indent applied + rendered
     expect(out.superFound).toBe(true); // superscript applied + rendered
   });
+
+  // Mlists: bullets / numbered lists — promote a plain paragraph to a list item
+  // (synthesizing a numbering definition), confirm membership, remove it; plus the
+  // editor toggleList wiring re-renders the block.
+  test('Mlists: ApplyListFormat promotes a paragraph + editor toggle', async ({ page }) => {
+    const bytes = readTestFile('HC031-Complicated-Document.docx');
+
+    const out = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const D = (window as any).Docxodus;
+      const norm = (s: string) => (s || '').replace(/\s+/g, ' ').trim();
+
+      // --- through the raw bridge (full WASM stack) ---
+      const h: number = D.DocxSessionBridge.OpenSession(bin, '');
+      const proj = JSON.parse(D.DocxSessionBridge.Project(h));
+      const pAnchor = Object.keys(proj.anchorIndex).find((k) => k.startsWith('p:')) as string;
+      const r = JSON.parse(D.DocxSessionBridge.ApplyListFormat(h, pAnchor, 'bullet'));
+      const liId = r.modified[0].id as string;
+      const lm = JSON.parse(D.DocxSessionBridge.GetListMembership(h, liId));
+      const bridgeBullet = !!lm && typeof lm.format === 'string' && lm.format.toLowerCase().startsWith('bullet');
+      const r2 = JSON.parse(D.DocxSessionBridge.ApplyListFormat(h, liId, 'none'));
+      const lm2raw = D.DocxSessionBridge.GetListMembership(h, r2.modified[0].id);
+      const removed = lm2raw === 'null' || JSON.parse(lm2raw) === null;
+      D.DocxSessionBridge.CloseSession(h);
+
+      // --- editor toggleList wiring ---
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const editor = D.DocxEditor.open(container, bin, D, {});
+      const tgt = (Array.from(container.querySelectorAll('p[data-anchor][contenteditable="true"]')) as HTMLElement[])
+        .find((e) => norm(e.textContent || '').length > 10)!;
+      tgt.focus();
+      editor.toggleList('bullet');
+      const stillRendered = container.querySelectorAll('[data-anchor]').length > 0;
+      editor.close();
+      container.remove();
+
+      return { bridgeBullet, removed, liKind: r.modified[0].kind, stillRendered };
+    }, Array.from(bytes));
+
+    expect(out.liKind).toBe('li'); // plain paragraph promoted to a list item
+    expect(out.bridgeBullet).toBe(true); // it's a bullet list
+    expect(out.removed).toBe(true); // toggling to "none" removed membership
+    expect(out.stillRendered).toBe(true); // editor.toggleList re-rendered without error
+  });
 });

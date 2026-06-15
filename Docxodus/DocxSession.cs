@@ -95,6 +95,9 @@ public sealed record ParagraphFormatOp
     public bool? PageBreakBefore { get; init; }
 }
 
+/// <summary>List membership for <see cref="DocxSession.ApplyListFormat"/>.</summary>
+public enum ListFormat { None, Bullet, Decimal }
+
 /// <summary>
 /// Per-fragment visible formatting reported by <see cref="DocxSession.Grep"/>.
 /// Booleans default to <c>false</c> meaning "not set on this fragment". The
@@ -4008,6 +4011,62 @@ public sealed class DocxSession : IDisposable
             Modified = new[] { updated },
             Patch = ProjectScope(target),
         };
+    }
+
+    /// <summary>
+    /// Make the paragraph a bullet or numbered list item, or remove list membership.
+    /// Unlike <see cref="SetListLevel"/>/<see cref="RemoveListMembership"/> (which require an
+    /// existing list item), this PROMOTES a plain paragraph: it ensures a reusable numbering
+    /// definition exists (synthesizing one in the numbering part if needed) and sets the
+    /// paragraph's <c>w:numPr</c>. <see cref="ListFormat.None"/> strips inline list membership.
+    /// </summary>
+    public EditResult ApplyListFormat(string anchorId, ListFormat kind)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        var target = FindAnchor(anchorId);
+        if (target is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, "anchor not found", anchorId);
+        if (target.Anchor.Kind is not ("p" or "h" or "li"))
+            return EditResult.Fail(EditErrorCode.AnchorWrongKind, "ApplyListFormat requires a paragraph anchor", anchorId);
+        var element = target.Resolve(_doc!);
+        if (element is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", anchorId);
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var pPr = element.Element(W.pPr);
+            if (kind == ListFormat.None)
+            {
+                pPr?.Element(W.numPr)?.Remove();
+            }
+            else
+            {
+                if (pPr is null) { pPr = new XElement(W.pPr); element.AddFirst(pPr); }
+                var fmt = kind == ListFormat.Bullet ? NumberFormat.Bullet : NumberFormat.Decimal;
+                int numId = Internal.NumberingFactory.EnsureNumbering(_doc!, fmt);
+                int ilvl = (int?)pPr.Element(W.numPr)?.Element(W.ilvl)?.Attribute(W.val) ?? 0;
+                pPr.Element(W.numPr)?.Remove();
+                SetPPrChildInOrder(pPr, new XElement(W.numPr,
+                    new XElement(W.ilvl, new XAttribute(W.val, ilvl)),
+                    new XElement(W.numId, new XAttribute(W.val, numId))));
+            }
+
+            InvalidateProjectionCache();
+            var freshIndex = Project().AnchorIndex;
+            var updated = freshIndex.Values.FirstOrDefault(t => t.Unid == target.Unid)?.Anchor ?? target.Anchor;
+            return new EditResult
+            {
+                Success = true,
+                Modified = new[] { updated },
+                Patch = ProjectScope(target),
+            };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            _ = _history.PopForUndo();
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId);
+        }
     }
 
     // ─── Tier E: annotations ────────────────────────────────────────────

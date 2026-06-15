@@ -130,6 +130,15 @@ public static partial class DocxSessionBridge
     public static string RemoveListMembership(int h, string anchor) =>
         DocxSessionOps.RemoveListMembership(h, anchor);
 
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.ApplyListFormat"/>. Promotes a plain paragraph to a
+    /// bullet/numbered list item (synthesizing a numbering definition if needed) or removes
+    /// list membership. <paramref name="kind"/> is "bullet" | "decimal" | "none".
+    /// </summary>
+    [JSExport]
+    public static string ApplyListFormat(int h, string anchor, string kind) =>
+        DocxSessionOps.ApplyListFormat(h, anchor, DocxSessionJson.ParseListFormat(kind));
+
     [JSExport]
     public static string ReplaceCellContent(int h, string anchor, string md) =>
         DocxSessionOps.ReplaceCellContent(h, anchor, md);

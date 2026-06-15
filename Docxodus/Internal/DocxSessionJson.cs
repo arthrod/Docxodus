@@ -133,6 +133,14 @@ internal static class DocxSessionJson
         };
     }
 
+    /// <summary>Parse a list-format kind string ("bullet" | "decimal"/"number" | "none").</summary>
+    public static ListFormat ParseListFormat(string? kind) => kind?.ToLowerInvariant() switch
+    {
+        "bullet" => ListFormat.Bullet,
+        "decimal" or "number" or "numbered" => ListFormat.Decimal,
+        _ => ListFormat.None,
+    };
+
     public static FindOptions? ParseFindOptions(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object) return null;

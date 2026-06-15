@@ -8,8 +8,8 @@ Status (branch `feat/ir-editor-feasibility-poc`, PR #234): **foundation + MVP sh
 proven; M1 (rich in-block editing), M2 (structural editing), M5 + M5b (formatting controls:
 bold/italic/underline/strike/code, super/sub, alignment, indent, page break, paragraph style,
 undo/redo) done; runnable demo with a full ribbon at `npm/examples/editor.html` (`npm run
-demo`).** Mlists (bullets/numbered — the hard one) is next; then M3 (worker offload) / M4
-(re-paginate-on-edit).
+demo`); Mlists (bullets/numbered) done — all 7 requested controls shipped.** M3 (worker
+offload) / M4 (re-paginate-on-edit) are next.
 
 ## Architecture invariants (do not break)
 
@@ -105,15 +105,25 @@ Test `editor.spec.ts` "M5" applies bold to a selection (survives save), sets Hea
   Verified live. **Note:** the editor uses inline styles (`fabricateClasses:false`), so the
   converter renders super/sub as `<sup>`/`<sub>`.
 
-### Mlists — Bullets & numbered lists (promote plain paragraph → list item)  · effort L · ⏳ NEXT (hard)
-**The one remaining requested control, deliberately its own milestone.** `SetListLevel`/
-`RemoveListMembership` only work on *existing* list items; there is no op that adds a `w:numPr`
-to a plain paragraph, and nothing synthesizes a numbering definition. **Plan (from the controls
-investigation):** new `ApplyListFormat(anchor, None|Bullet|Decimal)` + an `Internal/NumberingFactory`
-that ensures the `NumberingDefinitionsPart` exists, synthesizes a spec-valid 9-level bullet/decimal
-`w:abstractNum` + `w:num` (snapshot-safe, memoized per session), then sets/replaces the paragraph's
-`w:numPr` (flip p→li like `SetParagraphStyle`). Raw is NOT a shortcut (can't touch the numbering
-part). Needs round-trip + accept/reject parity tests and an `ooxml_corner_cases.md` entry.
+### Mlists — Bullets & numbered lists (promote plain paragraph → list item)  · effort L · ✅ **DONE**
+`SetListLevel`/`RemoveListMembership` only work on *existing* list items. **Shipped:** new
+`DocxSession.ApplyListFormat(anchor, ListFormat.None|Bullet|Decimal)` + `Internal/NumberingFactory`
+that ensures the `NumberingDefinitionsPart` exists and **find-or-creates** a spec-valid 9-level
+bullet/decimal `w:abstractNum` + `w:num` tagged by a fixed marker `w:nsid` (idempotent across
+calls/save/reopen/undo — no cache needed), then sets/replaces the paragraph's `w:numPr` (ilvl
+preserved, p→li flip via re-projection). The factory flushes the numbering part itself
+(`PutXDocument`) since the session's `Save` only persists projected parts. Rippled through all 8
+layers; editor `toggleList('bullet'|'decimal')` toggles via `GetListMembership`; demo ribbon has
+•/1. buttons. Tests: C# `DS210`–`DS212` (promote+reuse, decimal→none, save/reopen round-trip);
+browser `Mlists` (bridge promote + membership + remove, editor toggle re-renders). Raw was
+confirmed NOT a shortcut (can't reach the numbering part).
+**Known limit (honest):** the list op writes a correct, lossless `w:numPr` — the saved `.docx`
+opens as a proper bullet/numbered list in Word, and `GetListMembership` confirms it — but
+`WmlToHtmlConverter` does **not currently render the list MARKER glyph** (the • / 1.) in the HTML
+preview, so an editor block doesn't *show* the bullet though it *is* one. This is a converter
+rendering gap (its `ListItemRetriever` path), separate from the list op; verified the marker is
+absent even on a full re-render. Fixing converter list-marker rendering is a follow-up (likely a
+new converter milestone), as is per-item numbering continuation (M9).
 
 ### M6 — Tracked-changes / review mode  · effort M
 **Approach:** open the session with `TrackedChanges = RenderInline`; render `ins`/`del` with

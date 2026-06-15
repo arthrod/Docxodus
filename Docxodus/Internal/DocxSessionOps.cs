@@ -191,6 +191,9 @@ internal static class DocxSessionOps
     public static string RemoveListMembership(int handle, string anchorId) =>
         DocxSessionJson.Serialize(SessionRegistry.Get(handle).RemoveListMembership(anchorId));
 
+    public static string ApplyListFormat(int handle, string anchorId, ListFormat kind) =>
+        DocxSessionJson.Serialize(SessionRegistry.Get(handle).ApplyListFormat(anchorId, kind));
+
     // ─── Tier D: tables ─────────────────────────────────────────────────
 
     public static string ReplaceCellContent(int handle, string cellAnchorId, string markdown) =>

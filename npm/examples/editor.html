@@ -58,6 +58,9 @@
       <button data-indent="720" title="Increase indent">&#8677;</button>
       <button data-pagebreak title="Insert page break before">&#10515;</button>
       <span class="sep"></span>
+      <button data-list="bullet" title="Bullet list">&#8226;</button>
+      <button data-list="decimal" title="Numbered list">1.</button>
+      <span class="sep"></span>
       <select id="style" title="Paragraph style">
         <option value="">Style…</option>
         <option value="Normal">Normal</option>
@@ -118,6 +121,10 @@
     const pbBtn = ribbonEl.querySelector('button[data-pagebreak]');
     pbBtn.addEventListener('mousedown', (e) => e.preventDefault());
     pbBtn.addEventListener('click', () => editor && editor.pageBreakBefore(true));
+    ribbonEl.querySelectorAll('button[data-list]').forEach((btn) => {
+      btn.addEventListener('mousedown', (e) => e.preventDefault());
+      btn.addEventListener('click', () => editor && editor.toggleList(btn.dataset.list));
+    });
     styleEl.addEventListener('change', () => {
       if (editor && styleEl.value) { editor.setParagraphStyle(styleEl.value); }
       styleEl.value = '';

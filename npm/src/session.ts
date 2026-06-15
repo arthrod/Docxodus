@@ -22,6 +22,7 @@ import type {
   FindOptions,
   FormatOp,
   ParagraphFormatOp,
+  ListFormat,
   GrepOptions,
   ListMembership,
   ReplaceOptions,
@@ -199,6 +200,11 @@ export class DocxSession {
 
   removeListMembership(anchorId: string): EditResult {
     return JSON.parse(this.wasm.RemoveListMembership(this.handle, anchorId)) as EditResult;
+  }
+
+  /** Make the paragraph a bullet/numbered list item, or remove list membership ("none"). */
+  applyListFormat(anchorId: string, kind: ListFormat): EditResult {
+    return JSON.parse(this.wasm.ApplyListFormat(this.handle, anchorId, kind)) as EditResult;
   }
 
   // ─── Tier D: cell content ────────────────────────────────────────────

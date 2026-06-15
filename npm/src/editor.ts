@@ -31,6 +31,8 @@ export interface DocxEditorExports {
     ApplyFormat: (handle: number, anchor: string, spanJson: string, opJson: string) => string;
     SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
     SetParagraphFormat: (handle: number, anchor: string, opJson: string) => string;
+    ApplyListFormat: (handle: number, anchor: string, kind: string) => string;
+    GetListMembership: (handle: number, anchor: string) => string;
     RenderBlockHtml: (
       handle: number,
       anchorId: string,
@@ -672,6 +674,37 @@ export class DocxEditor {
   /** Toggle (or set) page-break-before on the active block. */
   pageBreakBefore(value = true): void {
     this.applyParagraphFormat({ pageBreakBefore: value });
+  }
+
+  /**
+   * Toggle the active block between a bullet/numbered list item and a plain paragraph.
+   * Clicking the same kind it already is removes the list; any other state applies the kind.
+   */
+  toggleList(kind: "bullet" | "decimal"): void {
+    const block = this.activeBlock;
+    if (this.closed || !block) return;
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+
+    let membership: { format?: string } | null = null;
+    try {
+      membership = JSON.parse(this.exports.DocxSessionBridge.GetListMembership(this.handle, fullId));
+    } catch { /* treat as not-a-list */ }
+    const isThisKind =
+      !!membership && typeof membership.format === "string" &&
+      membership.format.toLowerCase().startsWith(kind === "bullet" ? "bullet" : "decimal");
+
+    fullId = this.syncBlock(block, fullId);
+    const res = this.parseEdit(
+      this.exports.DocxSessionBridge.ApplyListFormat(this.handle, fullId, isThisKind ? "none" : kind),
+    );
+    if (!res.success) return;
+    this.swapBlock(block, unid, res.modified?.[0])?.focus();
+    // NOTE: ApplyListFormat writes a correct, lossless w:numPr (the saved .docx is a proper
+    // bullet/numbered list in Word), but WmlToHtmlConverter does not currently render the
+    // list MARKER glyph in the HTML preview — a converter limitation tracked separately.
   }
 
   private applyParagraphFormat(op: {

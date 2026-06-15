@@ -1372,6 +1372,56 @@ public class DocxSessionTests
     }
 
     [Fact]
+    public void DS210_ApplyListFormat_Bullet_PromotesAndReuses()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var ps = s.Project().AnchorIndex.Keys.Where(k => k.StartsWith("p:")).ToList();
+        var r1 = s.ApplyListFormat(ps[0], ListFormat.Bullet);
+        Assert.True(r1.Success, r1.Error?.Message);
+        var li1 = r1.Modified[0].Id;
+        Assert.StartsWith("li:", li1); // promoted plain paragraph → list item
+        var lm1 = s.GetListMembership(li1);
+        Assert.NotNull(lm1);
+        Assert.Equal(NumberFormat.Bullet, lm1!.Format);
+
+        // A second bullet paragraph reuses the same synthesized numbering definition.
+        var r2 = s.ApplyListFormat(ps[1], ListFormat.Bullet);
+        Assert.True(r2.Success, r2.Error?.Message);
+        var lm2 = s.GetListMembership(r2.Modified[0].Id);
+        Assert.Equal(lm1.NumId, lm2!.NumId);
+    }
+
+    [Fact]
+    public void DS211_ApplyListFormat_Decimal_ThenNone()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var p = s.Project().AnchorIndex.Keys.First(k => k.StartsWith("p:"));
+        var r = s.ApplyListFormat(p, ListFormat.Decimal);
+        Assert.True(r.Success, r.Error?.Message);
+        var li = r.Modified[0].Id;
+        Assert.Equal(NumberFormat.Decimal, s.GetListMembership(li)!.Format);
+
+        var r2 = s.ApplyListFormat(li, ListFormat.None);
+        Assert.True(r2.Success, r2.Error?.Message);
+        Assert.StartsWith("p:", r2.Modified[0].Id); // back to a plain paragraph
+        Assert.Null(s.GetListMembership(r2.Modified[0].Id));
+    }
+
+    [Fact]
+    public void DS212_ApplyListFormat_RoundTrips()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var p = s.Project().AnchorIndex.Keys.First(k => k.StartsWith("p:"));
+        s.ApplyListFormat(p, ListFormat.Bullet);
+        var saved = s.Save();
+
+        using var s2 = new DocxSession(saved);
+        var li = s2.Project().AnchorIndex.Keys.FirstOrDefault(k => k.StartsWith("li:"));
+        Assert.NotNull(li);
+        Assert.Equal(NumberFormat.Bullet, s2.GetListMembership(li!)!.Format);
+    }
+
+    [Fact]
     public void DS054_SetListLevelIndent()
     {
         using var s = new DocxSession(BuildDS002_BulletedList());

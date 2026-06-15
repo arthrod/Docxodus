@@ -982,6 +982,7 @@ export interface DocxodusWasmExports {
     SetParagraphFormat: (handle: number, anchor: string, opJson: string) => string;
     SetListLevel: (handle: number, anchor: string, delta: number) => string;
     RemoveListMembership: (handle: number, anchor: string) => string;
+    ApplyListFormat: (handle: number, anchor: string, kind: string) => string;
     ReplaceCellContent: (handle: number, anchor: string, md: string) => string;
     RawGetXml: (handle: number, anchor: string) => string;
     RawInsertXml: (handle: number, anchor: string, pos: string, xml: string) => string;
@@ -1111,6 +1112,9 @@ export interface FormatOp {
   /** Vertical alignment: "superscript" | "subscript" | "" (clear). Omit to leave unchanged. */
   vertAlign?: string;
 }
+
+/** List membership for `DocxSession.applyListFormat`. */
+export type ListFormat = "none" | "bullet" | "decimal";
 
 /** Paragraph-level formatting for `DocxSession.setParagraphFormat`. Omit a field to leave it unchanged. */
 export interface ParagraphFormatOp {
