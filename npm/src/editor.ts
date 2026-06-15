@@ -701,10 +701,9 @@ export class DocxEditor {
       this.exports.DocxSessionBridge.ApplyListFormat(this.handle, fullId, isThisKind ? "none" : kind),
     );
     if (!res.success) return;
+    // The session-attached re-render copies the numbering part, so the bullet/number
+    // marker + hanging indent render correctly in the swapped-in block.
     this.swapBlock(block, unid, res.modified?.[0])?.focus();
-    // NOTE: ApplyListFormat writes a correct, lossless w:numPr (the saved .docx is a proper
-    // bullet/numbered list in Word), but WmlToHtmlConverter does not currently render the
-    // list MARKER glyph in the HTML preview — a converter limitation tracked separately.
   }
 
   private applyParagraphFormat(op: {

@@ -1372,6 +1372,20 @@ public class DocxSessionTests
     }
 
     [Fact]
+    public void DS213_ApplyListFormat_Bullet_RendersMarker()
+    {
+        // The single-block render (the editor's incremental path) must show the bullet
+        // marker glyph (Symbol U+F0B7) and the list's hanging indent.
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var p = s.Project().AnchorIndex.Keys.First(k => k.StartsWith("p:"));
+        var li = s.ApplyListFormat(p, ListFormat.Bullet).Modified[0].Id;
+        var html = Docxodus.Internal.HtmlConversionOps.RenderBlockHtml(s, li,
+            new Docxodus.Internal.HtmlConversionOptions { FabricateCssClasses = false });
+        Assert.Contains("", html);      // Symbol bullet marker rendered
+        Assert.Contains("text-indent", html); // hanging indent applied
+    }
+
+    [Fact]
     public void DS210_ApplyListFormat_Bullet_PromotesAndReuses()
     {
         using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());

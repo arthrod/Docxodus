@@ -427,24 +427,33 @@ test.describe('DocxEditor — block editor end-to-end', () => {
       const removed = lm2raw === 'null' || JSON.parse(lm2raw) === null;
       D.DocxSessionBridge.CloseSession(h);
 
-      // --- editor toggleList wiring ---
+      // --- editor toggleList wiring + visible marker ---
       const container = document.createElement('div');
       document.body.appendChild(container);
       const editor = D.DocxEditor.open(container, bin, D, {});
-      const tgt = (Array.from(container.querySelectorAll('p[data-anchor][contenteditable="true"]')) as HTMLElement[])
-        .find((e) => norm(e.textContent || '').length > 10)!;
+      const all = Array.from(container.querySelectorAll('p[data-anchor][contenteditable="true"]')) as HTMLElement[];
+      // Pick a UNIQUE-text paragraph (HC031 repeats some), so we can re-find the exact block.
+      const tgt = all.find((e) => {
+        const t = norm(e.textContent || '').slice(0, 40);
+        return t.length > 20 && all.filter((x) => norm(x.textContent || '').startsWith(t)).length === 1;
+      })!;
+      const key = norm(tgt.textContent || '').slice(0, 40);
       tgt.focus();
       editor.toggleList('bullet');
-      const stillRendered = container.querySelectorAll('[data-anchor]').length > 0;
+      const after = (Array.from(container.querySelectorAll('[data-anchor]')) as HTMLElement[])
+        .find((e) => norm(e.textContent || '').includes(key));
+      const marginLeft = after ? parseFloat(getComputedStyle(after).marginLeft) : 0;
+      const hasMarker = after ? after.outerHTML.includes('') : false; // Symbol bullet glyph
       editor.close();
       container.remove();
 
-      return { bridgeBullet, removed, liKind: r.modified[0].kind, stillRendered };
+      return { bridgeBullet, removed, liKind: r.modified[0].kind, marginLeft, hasMarker };
     }, Array.from(bytes));
 
     expect(out.liKind).toBe('li'); // plain paragraph promoted to a list item
     expect(out.bridgeBullet).toBe(true); // it's a bullet list
     expect(out.removed).toBe(true); // toggling to "none" removed membership
-    expect(out.stillRendered).toBe(true); // editor.toggleList re-rendered without error
+    expect(out.marginLeft).toBeGreaterThan(0); // list indent rendered
+    expect(out.hasMarker).toBe(true); // bullet marker glyph rendered in the editor
   });
 });

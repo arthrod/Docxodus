@@ -115,15 +115,13 @@ preserved, p→li flip via re-projection). The factory flushes the numbering par
 (`PutXDocument`) since the session's `Save` only persists projected parts. Rippled through all 8
 layers; editor `toggleList('bullet'|'decimal')` toggles via `GetListMembership`; demo ribbon has
 •/1. buttons. Tests: C# `DS210`–`DS212` (promote+reuse, decimal→none, save/reopen round-trip);
-browser `Mlists` (bridge promote + membership + remove, editor toggle re-renders). Raw was
-confirmed NOT a shortcut (can't reach the numbering part).
-**Known limit (honest):** the list op writes a correct, lossless `w:numPr` — the saved `.docx`
-opens as a proper bullet/numbered list in Word, and `GetListMembership` confirms it — but
-`WmlToHtmlConverter` does **not currently render the list MARKER glyph** (the • / 1.) in the HTML
-preview, so an editor block doesn't *show* the bullet though it *is* one. This is a converter
-rendering gap (its `ListItemRetriever` path), separate from the list op; verified the marker is
-absent even on a full re-render. Fixing converter list-marker rendering is a follow-up (likely a
-new converter milestone), as is per-item numbering continuation (M9).
+browser `Mlists` (bridge promote + membership + remove, editor toggle re-renders **with a
+visible bullet marker + hanging indent**). The marker renders correctly in both the full and the
+single-block (incremental) paths — the session-attached render copies the numbering part, so the
+converter's `ListItemRetriever` resolves the marker; C# `DS213` asserts the Symbol bullet (U+F0B7)
++ `text-indent`. Raw was confirmed NOT a shortcut (can't reach the numbering part). Remaining
+nuance: per-item numbering *continuation* for a block rendered in isolation is whole-doc context
+(M9), but the marker glyph itself shows.
 
 ### M6 — Tracked-changes / review mode  · effort M
 **Approach:** open the session with `TrackedChanges = RenderInline`; render `ins`/`del` with
