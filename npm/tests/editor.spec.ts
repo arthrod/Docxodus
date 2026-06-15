@@ -161,4 +161,49 @@ test.describe('DocxEditor — block editor end-to-end', () => {
     expect(out.editableCount).toBeGreaterThan(0); // blocks inside pages stay editable
     expect(out.editedText).toContain('PAGINATEDEDIT77'); // incremental edit inside a page
   });
+
+  // M1: editing a block preserves inline formatting (bold/italic/link) instead of
+  // flattening to plain text. The projector emits bold=** italic=* links=[..](..),
+  // so a save/reopen round-trip should show those markers.
+  test('M1: editing preserves inline formatting (bold/italic/link)', async ({ page }) => {
+    const bytes = readTestFile('HC031-Complicated-Document.docx');
+
+    const out = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const D = (window as any).Docxodus;
+
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const editor = D.DocxEditor.open(container, bin, D, {});
+
+      const norm = (s: string) => (s || '').replace(/\s+/g, ' ').trim();
+      const target = (Array.from(
+        container.querySelectorAll('p[data-anchor][contenteditable="true"]'),
+      ) as HTMLElement[]).find((e) => norm(e.textContent || '').length > 5);
+
+      if (target) {
+        // Simulate a user edit that includes formatting. <b>/<i> carry UA bold/italic
+        // computed styles; <a> carries an href — exactly what the serializer reads.
+        target.focus();
+        target.innerHTML =
+          'Plain <b>BOLDWORD</b> and <i>ITALWORD</i> and ' +
+          '<a href="https://example.com/x">LINKWORD</a> end.';
+        target.dispatchEvent(new Event('blur'));
+      }
+
+      const saved: Uint8Array = editor.save();
+      const reopened = D.DocxSessionBridge.OpenSession(saved, '');
+      const markdown = JSON.parse(D.DocxSessionBridge.Project(reopened)).markdown as string;
+      D.DocxSessionBridge.CloseSession(reopened);
+
+      editor.close();
+      container.remove();
+      return { markdown };
+    }, Array.from(bytes));
+
+    // Formatting survived the edit + save (projector convention: ** bold, * italic).
+    expect(out.markdown).toContain('**BOLDWORD**');
+    expect(out.markdown).toContain('*ITALWORD*');
+    expect(out.markdown).toContain('[LINKWORD](https://example.com/x)');
+  });
 });

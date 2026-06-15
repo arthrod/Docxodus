@@ -65,6 +65,96 @@ interface AnchorTargetLite {
 
 const EDITABLE_TAGS = new Set(["P", "H1", "H2", "H3", "H4", "H5", "H6"]);
 
+// ─── M1: inline HTML → markdown (preserve formatting on edit) ───────────────
+
+interface InlineSeg {
+  text: string;
+  bold: boolean;
+  italic: boolean;
+  href: string | null;
+}
+
+function fontWeightIsBold(w: string): boolean {
+  if (w === "bold" || w === "bolder") return true;
+  const n = parseInt(w, 10);
+  return !Number.isNaN(n) && n >= 600;
+}
+
+function escapeInlineMarkdown(text: string): string {
+  // Escape the markdown the projector subset is sensitive to; keep it minimal.
+  return text.replace(/([\\`*_[\]])/g, "\\$1");
+}
+
+function collectInlineSegments(node: Node, out: InlineSeg[]): void {
+  node.childNodes.forEach((child) => {
+    if (child.nodeType === 3 /* TEXT_NODE */) {
+      const text = child.textContent ?? "";
+      if (!text) return;
+      const parent = child.parentElement;
+      let bold = false;
+      let italic = false;
+      let href: string | null = null;
+      if (parent && typeof getComputedStyle === "function") {
+        const cs = getComputedStyle(parent);
+        bold = fontWeightIsBold(cs.fontWeight);
+        italic = cs.fontStyle === "italic" || cs.fontStyle === "oblique";
+        const a = parent.closest("a");
+        href = a ? a.getAttribute("href") : null;
+      }
+      out.push({ text, bold, italic, href });
+    } else if (child.nodeType === 1 /* ELEMENT_NODE */) {
+      const el = child as HTMLElement;
+      if (el.tagName === "BR") {
+        out.push({ text: "\n", bold: false, italic: false, href: null });
+        return;
+      }
+      collectInlineSegments(el, out);
+    }
+  });
+}
+
+function segToMarkdown(seg: InlineSeg): string {
+  if (seg.text === "\n") return "\n";
+  let md = escapeInlineMarkdown(seg.text);
+  if (/\S/.test(seg.text)) {
+    // Don't wrap pure whitespace — `** **` is not valid emphasis.
+    if (seg.bold && seg.italic) md = `***${md}***`;
+    else if (seg.bold) md = `**${md}**`;
+    else if (seg.italic) md = `*${md}*`;
+  }
+  if (seg.href) md = `[${md}](${seg.href})`;
+  return md;
+}
+
+/**
+ * Serialize a block's inline content to the projector's markdown subset, preserving
+ * bold / italic / links (emphasis detected via computed style). Used so an edit keeps
+ * the block's formatting instead of flattening it to plain text. Formatting the markdown
+ * subset cannot express (font size/color) is still dropped on an edited block.
+ */
+export function serializeInlineMarkdown(block: HTMLElement): string {
+  const segs: InlineSeg[] = [];
+  collectInlineSegments(block, segs);
+  // Merge adjacent segments with identical formatting to avoid `**a****b**`.
+  const merged: InlineSeg[] = [];
+  for (const s of segs) {
+    const prev = merged[merged.length - 1];
+    if (
+      prev &&
+      prev.text !== "\n" &&
+      s.text !== "\n" &&
+      prev.bold === s.bold &&
+      prev.italic === s.italic &&
+      prev.href === s.href
+    ) {
+      prev.text += s.text;
+    } else {
+      merged.push({ ...s });
+    }
+  }
+  return merged.map(segToMarkdown).join("").trim();
+}
+
 /** Build the full ConvertDocxToHtmlComplete arg list (stampAnchors = last arg). */
 function completeArgs(
   bytes: Uint8Array,
@@ -211,7 +301,10 @@ export class DocxEditor {
     const fullId = this.unidToFullId.get(unid);
     if (!fullId) return;
 
-    const result = JSON.parse(this.exports.DocxSessionBridge.ReplaceText(this.handle, fullId, newText)) as {
+    // M1: serialize the block's inline content to markdown so bold/italic/links survive
+    // the edit, instead of flattening to plain text.
+    const markdown = serializeInlineMarkdown(el);
+    const result = JSON.parse(this.exports.DocxSessionBridge.ReplaceText(this.handle, fullId, markdown)) as {
       success: boolean;
       modified?: Array<{ id: string; unid: string }>;
     };

@@ -4,8 +4,8 @@ Companion to `ir_editor_feasibility.md` (which records the verdict, architecture
 PoC results). This is the **sequenced, prioritized** plan for turning the proven
 foundation + MVP into a complete editor. Supersedes the scattered "Still Plan 2" notes.
 
-Status as of PR #234 (branch `feat/ir-editor-feasibility-poc`): **foundation + MVP
-shipped and proven.** This roadmap is the work that remains.
+Status (branch `feat/ir-editor-feasibility-poc`, PR #234): **foundation + MVP shipped and
+proven; M1 (rich in-block editing) done.** M2 (structural editing) is next.
 
 ## Architecture invariants (do not break)
 
@@ -30,18 +30,18 @@ shipped and proven.** This roadmap is the work that remains.
 
 ## Milestones (priority order = impact)
 
-### M1 — Rich in-block editing (preserve + apply inline formatting)  · effort M–L · **next**
-**Problem:** `commitBlock` replaces an edited block from `el.textContent` (plain text), so
-editing a formatted paragraph **destroys its bold/italic/links** — the biggest correctness
-trap.
-**Approach:** add an HTML-inline → markdown serializer that walks the edited block's DOM and
-emits the projector's markdown subset, detecting emphasis via `getComputedStyle`
-(font-weight/font-style), links via `href`, code via the run's style — then
-`ReplaceText(anchor, markdown)` instead of plain text. (Finer-grained `ReplaceTextAtSpan` /
-`ApplyFormat` is a later optimization; markdown round-trip covers the common cases first.)
-**Acceptance:** editing a paragraph that contains a bold/italic/linked run, then save+reopen,
-preserves that formatting (projection shows `**…**` / `*…*` / `[…](…)`). Formatting the
-markdown subset can't express (size/color) is still dropped on an *edited* block — documented.
+### M1 — Rich in-block editing (preserve inline formatting)  · effort M–L · ✅ **DONE**
+**Problem:** `commitBlock` replaced an edited block from `el.textContent` (plain text), so
+editing a formatted paragraph destroyed its bold/italic/links — the biggest correctness trap.
+**Shipped:** `serializeInlineMarkdown(block)` (exported from `npm/src/editor.ts`) walks the
+edited block's DOM and emits the projector's markdown subset, detecting emphasis via
+`getComputedStyle` (font-weight/font-style) and links via `href`, merging adjacent
+same-format runs; `commitBlock` sends that markdown to `ReplaceText` instead of plain text.
+Test `editor.spec.ts` "M1: editing preserves inline formatting" edits a block with
+bold/italic/link and confirms `**…**` / `*…*` / `[…](…)` survive save+reopen. Formatting the
+markdown subset cannot express (size/color) is still dropped on an *edited* block; a future
+pass can use finer-grained `ReplaceTextAtSpan`/`ApplyFormat`. **Applying** new formatting
+(toolbar) is M5.
 
 ### M2 — Structural editing via keyboard  · effort M
 **Problem:** no way to add/split/merge/delete blocks from the UI; ops exist in `DocxSession`
@@ -97,6 +97,7 @@ continuation for a block rendered in isolation.
 
 ## Recommended sequencing
 
-**M1 + M2 together = "make editing real"** (the difference between a demo and a usable
-editor), then **M3** for responsiveness. M4–M9 sequence by target use case: authoring favors
-M4/M5/M2; review favors M6; broad fidelity favors M7/M9. M8 (React) any time.
+**M1 done** (edits preserve formatting). **M2 next** (structural editing — split/merge/
+insert via keyboard) completes "make editing real," then **M3** for responsiveness. M4–M9
+sequence by target use case: authoring favors M4/M5; review favors M6; broad fidelity favors
+M7/M9. M8 (React) any time.
