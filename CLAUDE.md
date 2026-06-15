@@ -260,8 +260,13 @@ Format change detection produces **native Word format change markup** (`w:rPrCha
 - `RenderComments` - Render document comments in HTML output
 - `CommentRenderMode` - How to render comments: `EndnoteStyle` (default), `Inline`, or `Margin`
 - `AuthorColors` - Dictionary mapping author names to CSS colors for styling
+- `StampAnchors` - Stamp `data-anchor="<unid>"` on block elements (`p`/`h1`-`h6`/`li`/`table`) so DOM blocks are addressable by the `kind:scope:unid` anchor system (powers the browser editor's incremental re-render). Default false.
 
 See `docs/architecture/comment_rendering.md` for detailed comment rendering documentation.
+
+**Single-block render (`HtmlConversionOps.RenderBlockHtml`)** - Renders ONE block (addressed by a `kind:scope:unid` anchor, or a bare unid) to faithful HTML, for incremental editor re-render. Overloads: `(byte[] bytes, …)` (stateless), `(DocxSession, …)` / `(int handle, …)` (session-attached — resolves against the live document with no byte re-open / whole-doc Unid pass, ~2.5× faster). Builds a throwaway document copying the source's styles/numbering/theme/font/settings parts. The full-document render is the faithfulness oracle. Surfaced in WASM/npm (`renderBlockHtml`, `DocxSession.renderBlock`). See `docs/architecture/ir_editor_feasibility.md`.
+
+**DocxEditor (npm, `npm/src/editor.ts`)** - Framework-agnostic, pure-TypeScript in-browser block editor (the write-side editor counterpart to the read-side projection). Renders a faithful document with `data-anchor` blocks, makes projection-addressable paragraphs/headings `contenteditable`, and on commit edits via `DocxSession` then re-renders only the changed block. `{ paginated: true }` flows blocks into real page boxes via `pagination.ts`. Lossless `save()`. The model-of-record is the live OOXML in `DocxSession`; the IR/anchor system is the addressing overlay (the IR itself is read-only, no IR→OOXML writer). See `docs/architecture/ir_editor_feasibility.md`.
 
 **DocumentAssembler.cs** - Template population from XML data using content controls.
 
@@ -365,6 +370,7 @@ Detailed design docs for the major subsystems live in `docs/architecture/`. Read
 - `markdown_projection.md` — WmlToMarkdownConverter design
 - `ir_diff_engine.md` — DocxDiff (IR diff engine) public surface, pipeline, edit script, settings, parity status, relationship to WmlComparer
 - `docx_mutation_api.md` — DocxSession surface, anchor lifecycle, error catalog, supported markdown subset
+- `ir_editor_feasibility.md` — IR-powered browser DOCX editor: architecture (Option B — DocxSession is model-of-record, IR/anchors are addressing), RenderBlockHtml + DocxEditor surface, measured results, findings
 - `python_docxodus.md` — planned Python wrapper for DocxSession; wire protocol, type mapping, distribution
 - `skiasharp-removal-plan.md`, `wasm-optimization-plan.md`, `ui_responsiveness.md`, `profiling-results.md` — WASM/browser work
 

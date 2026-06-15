@@ -148,6 +148,70 @@ Findings / refinements vs the original design:
   Plan 2 should offer a **session-attached** render (reuse the live `DocxSession` doc) to
   avoid the per-call whole-doc Unid pass.
 
+## 1b. Public API & usage
+
+**Browser editor (npm).**
+
+```ts
+import { initialize, DocxEditor } from "docxodus";
+
+await initialize();
+const bytes = new Uint8Array(await file.arrayBuffer());
+
+// `exports` is the WASM bridge object (DocxSessionBridge + DocumentConverter).
+// In the npm runtime it is the initialized module; in the test harness it is
+// `window.Docxodus`.
+const editor = DocxEditor.open(container, bytes, exports, {
+  paginated: true,   // real page boxes via pagination.ts (false = continuous)
+  editable: true,    // contenteditable projection-addressable blocks
+  onEdit: ({ anchorId }) => console.log("edited", anchorId),
+});
+
+// ...user edits blocks in the DOM; each blur commits + re-renders that block...
+
+const saved: Uint8Array = editor.save();  // lossless DOCX bytes
+editor.close();                           // release the WASM session
+```
+
+**Single-block render (npm), e.g. to drive your own DOM:**
+
+```ts
+import { renderBlockHtml, openDocxSession } from "docxodus";
+
+// Stateless (re-derives anchors over the bytes):
+const html = await renderBlockHtml(bytes, "p:body:<unid>");
+
+// Session-attached (faster — resolves against the live edited doc):
+const session = await openDocxSession(bytes);
+session.replaceText("p:body:<unid>", "new text");
+const fresh = session.renderBlock("p:body:<unid>"); // or the bare unid
+```
+
+**Full-document render with addressable blocks:**
+
+```ts
+const docHtml = await convertDocxToHtml(bytes, { stampAnchors: true, paginationMode: 1 });
+// every p/h*/li/table carries data-anchor="<unid>"
+```
+
+**.NET.**
+
+```csharp
+using Docxodus.Internal;
+
+var opts = new HtmlConversionOptions { StampAnchors = true };
+string fullHtml = HtmlConversionOps.ConvertToHtml(bytes, opts);          // data-anchor on blocks
+
+using var session = new DocxSession(bytes);
+session.ReplaceText("p:body:<unid>", "new text");
+string blockHtml = HtmlConversionOps.RenderBlockHtml(session, "p:body:<unid>",
+    new HtmlConversionOptions());                                        // session-attached
+```
+
+> The `data-anchor` value is the bare unid; DocxSession *edit* ops want the full
+> `kind:scope:unid`. The editor maps bare unid → full id via the session projection index
+> (same Unid scheme — suffix match). `RenderBlockHtml`/`renderBlock` accept either form.
+
 ## 2. Locked decisions
 
 | Decision | Choice | Consequence |
