@@ -162,49 +162,70 @@ test.describe('DocxEditor — block editor end-to-end', () => {
     expect(out.editedText).toContain('PAGINATEDEDIT77'); // incremental edit inside a page
   });
 
-  // M1: editing a block preserves inline formatting (bold/italic/link) instead of
-  // flattening to plain text. The projector emits bold=** italic=* links=[..](..),
-  // so a save/reopen round-trip should show those markers.
-  test('M1: editing preserves inline formatting (bold/italic/link)', async ({ page }) => {
+  // M1 (updated for full-fidelity editing): run formatting applied via the ribbon survives a later
+  // TEXT edit to the same block. The old markdown-re-serialization path is gone — formatting is now
+  // preserved structurally (the span-diff commit leaves untouched runs intact). Bold a word, then
+  // append text elsewhere, and confirm the bold survived (and the doc still saves).
+  test('M1: run formatting survives a later text edit', async ({ page }) => {
     const bytes = readTestFile('HC031-Complicated-Document.docx');
-
     const out = await page.evaluate(async (bytesArray: number[]) => {
       const bin = new Uint8Array(bytesArray);
       const D = (window as any).Docxodus;
-
       const container = document.createElement('div');
       document.body.appendChild(container);
       const editor = D.DocxEditor.open(container, bin, D, {});
 
-      const norm = (s: string) => (s || '').replace(/\s+/g, ' ').trim();
+      const norm = (s: string) => (s || '').replace(/[‎‏]/g, '').replace(/\s+/g, ' ').trim();
+      const isBold = (el: HTMLElement) => {
+        const fw = getComputedStyle(el).fontWeight; const n = parseInt(fw, 10);
+        return fw === 'bold' || fw === 'bolder' || (!Number.isNaN(n) && n >= 600);
+      };
+      const firstTextNode = (el: Node): Text | null => {
+        if (el.nodeType === 3) return el as Text;
+        for (const c of Array.from(el.childNodes)) { const r = firstTextNode(c); if (r) return r; }
+        return null;
+      };
+
       const target = (Array.from(
         container.querySelectorAll('p[data-anchor][contenteditable="true"]'),
-      ) as HTMLElement[]).find((e) => norm(e.textContent || '').length > 5);
+      ) as HTMLElement[]).find((e) => norm(e.textContent || '').length > 12)!;
+      const anchor = target.getAttribute('data-anchor')!;
+      const head = norm(target.textContent || '').slice(0, 3);
 
-      if (target) {
-        // Simulate a user edit that includes formatting. <b>/<i> carry UA bold/italic
-        // computed styles; <a> carries an href — exactly what the serializer reads.
-        target.focus();
-        target.innerHTML =
-          'Plain <b>BOLDWORD</b> and <i>ITALWORD</i> and ' +
-          '<a href="https://example.com/x">LINKWORD</a> end.';
-        target.dispatchEvent(new Event('blur'));
-      }
+      // Bold the first 5 content chars via the ribbon path (ApplyFormat → runs).
+      const tn = firstTextNode(target)!;
+      const raw = tn.textContent || '';
+      const lead = raw.length - raw.replace(/^[‎‏]+/, '').length;
+      target.focus();
+      let sel = window.getSelection()!;
+      let r = document.createRange();
+      r.setStart(tn, lead); r.setEnd(tn, lead + 5);
+      sel.removeAllRanges(); sel.addRange(r);
+      editor.format('bold');
 
-      const saved: Uint8Array = editor.save();
-      const reopened = D.DocxSessionBridge.OpenSession(saved, '');
-      const markdown = JSON.parse(D.DocxSessionBridge.Project(reopened)).markdown as string;
-      D.DocxSessionBridge.CloseSession(reopened);
+      // Append text at the end (a TEXT edit) and commit on blur.
+      const blk = container.querySelector(`[data-anchor="${anchor}"]`) as HTMLElement;
+      blk.focus();
+      const r2 = document.createRange();
+      r2.selectNodeContents(blk); r2.collapse(false);
+      sel = window.getSelection()!; sel.removeAllRanges(); sel.addRange(r2);
+      document.execCommand('insertText', false, ' TAILM1');
+      blk.dispatchEvent(new Event('blur'));
+
+      const after = container.querySelector(`[data-anchor="${anchor}"]`) as HTMLElement;
+      const boldPreserved = (Array.from(after.querySelectorAll('span')) as HTMLElement[]).some(
+        (s) => isBold(s) && norm(s.textContent || '').includes(head),
+      );
+      const savedLen = (editor.save() as Uint8Array).length;
 
       editor.close();
       container.remove();
-      return { markdown };
+      return { boldPreserved, hasTail: norm(after.textContent || '').includes('TAILM1'), savedLen };
     }, Array.from(bytes));
 
-    // Formatting survived the edit + save (projector convention: ** bold, * italic).
-    expect(out.markdown).toContain('**BOLDWORD**');
-    expect(out.markdown).toContain('*ITALWORD*');
-    expect(out.markdown).toContain('[LINKWORD](https://example.com/x)');
+    expect(out.boldPreserved).toBe(true); // bold on the untouched word survived the text edit
+    expect(out.hasTail).toBe(true);
+    expect(out.savedLen).toBeGreaterThan(0);
   });
 
   // M2: structural editing — Enter splits a paragraph, Backspace at start merges.

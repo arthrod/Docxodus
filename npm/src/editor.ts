@@ -796,17 +796,6 @@ export class DocxEditor {
       );
     }
 
-    // If the DOM carries markdown-expressible formatting (bold/italic/links) that the span diff
-    // would lose (ReplaceTextAtSpan takes plain text), fall back to ReplaceText with the markdown
-    // serializer. This fires when the user injects <b>/<i>/<a> elements directly (e.g. via
-    // innerHTML), since serializeInlineMarkdown then produces markers not present in the plain text.
-    const md = serializeInlineMarkdown(el);
-    if (md !== next.trim()) {
-      return this.parseEdit(
-        this.exports.DocxSessionBridge.ReplaceText(this.handle, fullId, md),
-      );
-    }
-
     const minLen = Math.min(old.length, next.length);
     let p = 0;
     while (p < minLen && old[p] === next[p]) p++;
