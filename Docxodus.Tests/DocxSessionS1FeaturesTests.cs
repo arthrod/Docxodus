@@ -361,4 +361,89 @@ public class DocxSessionS1FeaturesTests
         Assert.DoesNotContain(root.Descendants(W + "p"),
             p => (p.Value.Contains("Alpha") || p.Value.Contains("Beta")) && p.Descendants(W + "br").Any());
     }
+
+    // ─── Finding 1a: HR border must not propagate on Enter-split of an empty rule ───────
+
+    [Fact]
+    public void DS216_SplitEmptyBorderedParagraph_DoesNotInheritBorder()
+    {
+        // Reproduces the S-1 smoke-test footgun: pressing Enter inside an HR (an empty
+        // bottom-bordered paragraph) must NOT give the new paragraph a border.
+        using var session = new DocxSession(DocxSession.CreateBlankDocxBytes());
+        var anchor = FirstBodyParagraph(session);
+
+        var hr = session.InsertHorizontalRule(anchor, Position.After);
+        Assert.True(hr.Success, hr.Error?.Message);
+        var hrAnchor = hr.Created[0].Id;
+
+        var split = session.SplitParagraph(hrAnchor, 0);
+        Assert.True(split.Success, split.Error?.Message);
+
+        var root = DocumentXml(session.Save());
+        // Exactly one paragraph carries a border (the original rule), not two — the new
+        // empty paragraph below the rule is borderless so the user can type body text there.
+        Assert.Equal(1, root.Descendants(W + "p").Count(p => p.Element(W + "pPr")?.Element(W + "pBdr") is not null));
+    }
+
+    [Fact]
+    public void DS217_SplitBorderedParagraphWithText_KeepsBorderOnNewParagraph()
+    {
+        // Guard: only the EMPTY-source (rule) case drops the border. A bordered paragraph
+        // that has text (a boxed/underlined block) still splits with the border on both halves
+        // — this protects against an over-broad "always strip on split" implementation.
+        using var session = new DocxSession(DocxSession.CreateBlankDocxBytes());
+        var anchor = FirstBodyParagraph(session);
+
+        var ins = session.InsertParagraph(anchor, Position.After, "Boxed heading text");
+        var boxAnchor = ins.Created[0].Id;
+        var fmt = session.SetParagraphFormat(boxAnchor, new ParagraphFormatOp
+        {
+            BottomBorder = new ParagraphBorderEdge { Style = "single", Size = 12, Color = "auto" },
+        });
+        Assert.True(fmt.Success, fmt.Error?.Message);
+
+        var split = session.SplitParagraph(boxAnchor, 5);
+        Assert.True(split.Success, split.Error?.Message);
+
+        var root = DocumentXml(session.Save());
+        // Both halves of the split text paragraph keep the bottom border.
+        Assert.Equal(2, root.Descendants(W + "p").Count(p => p.Element(W + "pPr")?.Element(W + "pBdr") is not null));
+    }
+
+    // ─── Finding 2: a table at body end must be followed by a paragraph ─────────────────
+
+    [Fact]
+    public void DS218_InsertTableAtBodyEnd_AppendsTrailingParagraph()
+    {
+        // Reproduces "cannot append after a trailing table": inserting after the last block
+        // left the table as the final body element (</w:tbl></w:sectPr>). Word's convention
+        // (and an editable surface) needs a paragraph after the table.
+        using var session = new DocxSession(DocxSession.CreateBlankDocxBytes());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.InsertTable(anchor, Position.After, 1, 2);
+        Assert.True(r.Success, r.Error?.Message);
+
+        var body = DocumentXml(session.Save()).Element(W + "body")!;
+        var tbl = body.Elements(W + "tbl").Single();
+        var next = tbl.ElementsAfterSelf().FirstOrDefault();
+        Assert.NotNull(next);                       // not the last element anymore
+        Assert.Equal(W + "p", next!.Name);          // and what follows is a paragraph
+        Assert.Equal(W + "sectPr", body.Elements().Last().Name); // sectPr still closes the body
+    }
+
+    [Fact]
+    public void DS219_InsertTableFollowedByParagraph_DoesNotAddExtraTrailing()
+    {
+        // Guard against double-insert: when a paragraph already follows the table, no extra one.
+        using var session = new DocxSession(DocxSession.CreateBlankDocxBytes());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.InsertTable(anchor, Position.Before, 1, 2);
+        Assert.True(r.Success, r.Error?.Message);
+
+        var body = DocumentXml(session.Save()).Element(W + "body")!;
+        // [tbl, originalParagraph, sectPr] — exactly one direct body paragraph, not two.
+        Assert.Equal(1, body.Elements(W + "p").Count());
+    }
 }

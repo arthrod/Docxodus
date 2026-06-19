@@ -3421,6 +3421,13 @@ public sealed class DocxSession : IDisposable
                 // paragraph must not inherit a second page break (matches Word clearing it on Enter).
                 newPPr.Elements(W.pageBreakBefore).Remove();
 
+                // An empty bordered paragraph is a horizontal rule; splitting it (Enter) must not
+                // propagate the rule's border onto the fresh paragraph below — otherwise every Enter
+                // stacks another rule and borders the body text (S-1 smoke-test finding 1a). A bordered
+                // paragraph that HAS text keeps its border on both halves (boxed-block behavior).
+                if (totalText.Length == 0)
+                    newPPr.Elements(W.pBdr).Remove();
+
                 // An empty Enter-at-end split starts a fresh paragraph. For a non-list paragraph whose
                 // style declares a distinct next-paragraph style (e.g. Title/Heading -> Normal), rebase
                 // the new paragraph onto that next style instead of cloning the heading: a clean pStyle,
@@ -4271,6 +4278,18 @@ public sealed class DocxSession : IDisposable
 
             if (pos == Position.Before) element.AddBeforeSelf(tbl);
             else element.AddAfterSelf(tbl);
+
+            // A table must be followed by a paragraph: Word's convention is to keep a w:p after
+            // every table, and an end-of-body table with no trailing paragraph leaves no editable
+            // block below it (S-1 smoke-test finding 2). If nothing — or only a sectPr / another
+            // table — follows, append an empty trailing paragraph.
+            var afterTbl = tbl.ElementsAfterSelf().FirstOrDefault();
+            if (afterTbl is null || afterTbl.Name == W.sectPr || afterTbl.Name == W.tbl)
+            {
+                var trailing = new XElement(W.p);
+                UnidHelper.AssignToSelfAndDescendants(trailing);
+                tbl.AddAfterSelf(trailing);
+            }
 
             foreach (var p in cellParagraphs) PromoteHyperlinkRelationships(p);
 
