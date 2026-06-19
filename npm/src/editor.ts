@@ -24,6 +24,7 @@ export interface DocxEditorExports {
   DocxSessionBridge: {
     OpenSession: (bytes: Uint8Array, settingsJson: string) => number;
     CloseSession: (handle: number) => void;
+    CreateBlankDocx: () => Uint8Array;
     Project: (handle: number) => string;
     ReplaceText: (handle: number, anchor: string, md: string) => string;
     ReplaceTextAtSpan: (
@@ -35,6 +36,15 @@ export interface DocxEditorExports {
     ) => string;
     SplitParagraph: (handle: number, anchor: string, offset: number) => string;
     MergeParagraphs: (handle: number, first: string, second: string) => string;
+    InsertHorizontalRule: (handle: number, anchor: string, pos: string, ruleJson: string) => string;
+    InsertTable: (
+      handle: number,
+      anchor: string,
+      pos: string,
+      rows: number,
+      cols: number,
+      optionsJson: string,
+    ) => string;
     ApplyFormat: (handle: number, anchor: string, spanJson: string, opJson: string) => string;
     SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
     SetParagraphFormat: (handle: number, anchor: string, opJson: string) => string;
@@ -500,6 +510,19 @@ export class DocxEditor {
     return editor;
   }
 
+  /**
+   * Open a fresh, blank document (a "New document" — single empty paragraph, Normal style,
+   * US-Letter section) and wire up editing. The seed bytes come from the WASM bridge so the
+   * result opens cleanly in Word too.
+   */
+  static openBlank(
+    container: HTMLElement,
+    exports: DocxEditorExports,
+    options: DocxEditorOptions = {},
+  ): DocxEditor {
+    return DocxEditor.open(container, exports.DocxSessionBridge.CreateBlankDocx(), exports, options);
+  }
+
   /** Lossless DOCX bytes reflecting all edits. */
   save(): Uint8Array {
     this.assertOpen();
@@ -928,9 +951,96 @@ export class DocxEditor {
     else fresh?.focus();
   }
 
+  /**
+   * Set the font size (in points) of the current selection in the active block; with no
+   * selection, applies to the whole paragraph. `pts <= 0` clears the explicit size. Routes
+   * through DocxSession `ApplyFormat` (`w:sz`), so it is lossless and survives save.
+   */
+  setFontSize(pts: number): void {
+    const block = this.activeBlock;
+    if (this.closed || !block) return;
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+    const span = selectionSpanIn(block);
+    fullId = this.syncBlock(block, fullId);
+    const res = this.parseEdit(
+      this.exports.DocxSessionBridge.ApplyFormat(
+        this.handle,
+        fullId,
+        span ? JSON.stringify(span) : "",
+        JSON.stringify({ fontSizePts: pts }),
+      ),
+    );
+    if (!res.success) return;
+    if (this.affectsList(res)) { this.remount(this.blockIndex(block), false); return; }
+    const fresh = this.swapBlock(block, unid, res.modified?.[0]);
+    if (fresh && span) selectRange(fresh, span.start, span.length);
+    else fresh?.focus();
+  }
+
   /** Set paragraph alignment (left/center/right/justify) on the active block. */
   setAlignment(alignment: EditorAlignment): void {
     this.applyParagraphFormat({ alignment });
+  }
+
+  /**
+   * Insert an S-1-style horizontal rule (an empty paragraph with a bottom border) after the
+   * active block. `weight` is the rule thickness in eighths of a point (default 12 ≈ 1.5pt).
+   * Re-renders fully (a new block needs whole-document context to lay out).
+   */
+  insertHorizontalRule(weight = 12, style = "single"): void {
+    const block = this.activeBlock;
+    if (this.closed || !block) return;
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+    const idx = this.blockIndex(block);
+    fullId = this.syncBlock(block, fullId);
+    const res = this.parseEdit(
+      this.exports.DocxSessionBridge.InsertHorizontalRule(
+        this.handle,
+        fullId,
+        "after",
+        JSON.stringify({ style, size: weight, color: "auto" }),
+      ),
+    );
+    if (!res.success) return;
+    this.remount(idx, false);
+  }
+
+  /**
+   * Insert a `rows`×`cols` table after the active block. `options.cellContents` (row-major
+   * markdown) seeds the cells, `options.borderless` makes an invisible layout table, and
+   * `options.cellAlignment` aligns every cell. Re-renders fully (tables need document context).
+   */
+  insertTable(
+    rows: number,
+    cols: number,
+    options?: { borderless?: boolean; cellContents?: string[]; cellAlignment?: EditorAlignment },
+  ): void {
+    const block = this.activeBlock;
+    if (this.closed || !block) return;
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+    const idx = this.blockIndex(block);
+    fullId = this.syncBlock(block, fullId);
+    const res = this.parseEdit(
+      this.exports.DocxSessionBridge.InsertTable(
+        this.handle,
+        fullId,
+        "after",
+        rows,
+        cols,
+        options ? JSON.stringify(options) : "",
+      ),
+    );
+    if (!res.success) return;
+    this.remount(idx, false);
   }
 
   /**

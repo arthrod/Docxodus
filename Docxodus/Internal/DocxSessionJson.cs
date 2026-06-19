@@ -101,6 +101,7 @@ internal static class DocxSessionJson
             Color = TryGetString(root, "color", null),
             RunStyle = TryGetString(root, "runStyle", null),
             VertAlign = TryGetString(root, "vertAlign", null),
+            FontSizePts = TryGetDoubleNullable(root, "fontSizePts"),
         };
     }
 
@@ -130,6 +131,57 @@ internal static class DocxSessionJson
             Alignment = align,
             IndentDelta = indentDelta,
             PageBreakBefore = TryGetBoolNullable(root, "pageBreakBefore"),
+            TopBorder = ParseBorderEdge(root, "topBorder"),
+            BottomBorder = ParseBorderEdge(root, "bottomBorder"),
+            ClearBorders = TryGetBoolNullable(root, "clearBorders"),
+        };
+    }
+
+    /// <summary>
+    /// Parse a <see cref="ParagraphBorderEdge"/> from a named object property
+    /// ({ style?, size?, color?, space? }), or null when the property is absent/not an object.
+    /// </summary>
+    public static ParagraphBorderEdge? ParseBorderEdge(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var e) || e.ValueKind != JsonValueKind.Object) return null;
+        return new ParagraphBorderEdge
+        {
+            Style = TryGetString(e, "style", null),
+            Size = e.TryGetProperty("size", out var s) && s.ValueKind == JsonValueKind.Number ? s.GetInt32() : null,
+            Color = TryGetString(e, "color", null),
+            Space = e.TryGetProperty("space", out var sp) && sp.ValueKind == JsonValueKind.Number ? sp.GetInt32() : null,
+        };
+    }
+
+    /// <summary>
+    /// Parse a <see cref="TableInsertOptions"/> wire object:
+    /// { borderless?: bool, cellContents?: string[], cellAlignment?: "left"|"center"|"right"|"justify" }.
+    /// </summary>
+    public static TableInsertOptions ParseTableInsertOptions(string json)
+    {
+        if (string.IsNullOrEmpty(json)) return new TableInsertOptions();
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        List<string>? cells = null;
+        if (root.TryGetProperty("cellContents", out var cc) && cc.ValueKind == JsonValueKind.Array)
+        {
+            cells = new List<string>(cc.GetArrayLength());
+            foreach (var item in cc.EnumerateArray())
+                cells.Add(item.ValueKind == JsonValueKind.String ? (item.GetString() ?? string.Empty) : string.Empty);
+        }
+        ParagraphAlignment? align = TryGetString(root, "cellAlignment", null)?.ToLowerInvariant() switch
+        {
+            "left" => ParagraphAlignment.Left,
+            "center" => ParagraphAlignment.Center,
+            "right" => ParagraphAlignment.Right,
+            "justify" or "both" => ParagraphAlignment.Justify,
+            _ => null,
+        };
+        return new TableInsertOptions
+        {
+            Borderless = TryGetBool(root, "borderless", false),
+            CellContents = cells,
+            CellAlignment = align,
         };
     }
 
@@ -166,6 +218,9 @@ internal static class DocxSessionJson
 
     public static string? TryGetString(JsonElement root, string name, string? fallback) =>
         root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : fallback;
+
+    public static double? TryGetDoubleNullable(JsonElement root, string name) =>
+        root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : (double?)null;
 
     // ─── Serializers ────────────────────────────────────────────────────
 

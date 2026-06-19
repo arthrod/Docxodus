@@ -961,6 +961,7 @@ export interface DocxodusWasmExports {
   DocxSessionBridge: {
     OpenSession: (bytes: Uint8Array, settingsJson: string) => number;
     CloseSession: (handle: number) => void;
+    CreateBlankDocx: () => Uint8Array;
     Project: (handle: number) => string;
     ProjectAnchor: (handle: number, anchorId: string, depth: number) => string;
     RenderBlockHtml: (
@@ -976,6 +977,8 @@ export interface DocxodusWasmExports {
     InsertParagraph: (handle: number, anchor: string, pos: string, md: string) => string;
     SplitParagraph: (handle: number, anchor: string, offset: number) => string;
     MergeParagraphs: (handle: number, first: string, second: string) => string;
+    InsertHorizontalRule: (handle: number, anchor: string, pos: string, ruleJson: string) => string;
+    InsertTable: (handle: number, anchor: string, pos: string, rows: number, cols: number, optionsJson: string) => string;
     ApplyFormat: (handle: number, anchor: string, spanJson: string, opJson: string) => string;
     ApplyFormatBySubstring: (handle: number, anchor: string, substring: string, opJson: string) => string;
     SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
@@ -1111,6 +1114,23 @@ export interface FormatOp {
   runStyle?: string;
   /** Vertical alignment: "superscript" | "subscript" | "" (clear). Omit to leave unchanged. */
   vertAlign?: string;
+  /**
+   * Font size in **points** (maps to `w:sz`/`w:szCs`, stored as half-points). Omit to leave
+   * unchanged; a value &lt;= 0 clears the explicit size. Fractional points round to a half-point.
+   */
+  fontSizePts?: number;
+}
+
+/** One edge of a paragraph border (`w:pBdr` top/bottom) — drives S-1 horizontal rules. */
+export interface ParagraphBorderEdge {
+  /** Border line style (`w:val`): "single","double","thick","dotted","dashed",… Default "single". */
+  style?: string;
+  /** Weight in eighths of a point (`w:sz`). Default 6 (≈0.75pt); a heavy rule ≈ 18–24. */
+  size?: number;
+  /** Hex color without '#', or "auto". Default "auto". */
+  color?: string;
+  /** Padding between border and text, in points (`w:space`). Default 1. */
+  space?: number;
 }
 
 /** List membership for `DocxSession.applyListFormat`. */
@@ -1124,6 +1144,22 @@ export interface ParagraphFormatOp {
   indentDelta?: number;
   /** Page-break-before: true to add, false to remove. */
   pageBreakBefore?: boolean;
+  /** Top paragraph border (`w:pBdr/w:top`). Omit to leave unchanged. */
+  topBorder?: ParagraphBorderEdge;
+  /** Bottom paragraph border (`w:pBdr/w:bottom`) — what an S-1 horizontal rule is. Omit to leave unchanged. */
+  bottomBorder?: ParagraphBorderEdge;
+  /** Remove all paragraph borders before applying any top/bottom border in this op. */
+  clearBorders?: boolean;
+}
+
+/** Options for `DocxSession.insertTable`. */
+export interface TableInsertOptions {
+  /** Emit an invisible layout table (explicit "none" borders) — the S-1 multi-column blocks. */
+  borderless?: boolean;
+  /** Row-major markdown for each cell (row 0 left→right, then row 1, …). Short/omitted ⇒ empty cells. */
+  cellContents?: string[];
+  /** Alignment applied to every cell paragraph (S-1 columns are centered). */
+  cellAlignment?: "left" | "center" | "right" | "justify";
 }
 
 export interface DocxSessionSettings {

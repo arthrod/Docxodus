@@ -37,6 +37,7 @@
 <body>
   <header>
     <h1>Docxodus editor</h1>
+    <button id="new" title="New blank document">New</button>
     <label class="btn">Open<input id="file" type="file" accept=".docx" hidden /></label>
     <button id="save" disabled>Save</button>
     <span class="sep"></span>
@@ -48,6 +49,12 @@
       <button data-cmd="code" title="Inline code">&lt;/&gt;</button>
       <button data-cmd="superscript" title="Superscript">x&#178;</button>
       <button data-cmd="subscript" title="Subscript">x&#8322;</button>
+      <select id="fontsize" title="Font size (points)">
+        <option value="">Size…</option>
+        <option>8</option><option>9</option><option>10</option><option>11</option>
+        <option>12</option><option>14</option><option>16</option><option>18</option>
+        <option>20</option><option>24</option><option>28</option><option>36</option><option>48</option>
+      </select>
       <span class="sep"></span>
       <button data-align="left" title="Align left">L</button>
       <button data-align="center" title="Align center">C</button>
@@ -60,6 +67,10 @@
       <span class="sep"></span>
       <button data-list="bullet" title="Bullet list">&#8226;</button>
       <button data-list="decimal" title="Numbered list">1.</button>
+      <span class="sep"></span>
+      <button id="hr" title="Insert horizontal rule below">&#9473;&#9473;</button>
+      <button id="hrThick" title="Insert thick rule below">&#9608;&#9608;</button>
+      <button id="table" title="Insert table">&#8862;</button>
       <span class="sep"></span>
       <select id="style" title="Paragraph style">
         <option value="">Style…</option>
@@ -85,7 +96,7 @@
   </p>
   <div id="editor" class="continuous"></div>
 
-  <script src="./editor.bundle.js"></script>
+  <script>document.write('<script src="./editor.bundle.js?t=' + Date.now() + '"><\/script>');</script>
   <script type="module">
     import { dotnet } from './_framework/dotnet.js';
 
@@ -126,6 +137,33 @@
       btn.addEventListener('mousedown', (e) => e.preventDefault());
       btn.addEventListener('click', () => editor && editor.toggleList(btn.dataset.list));
     });
+    // Font size.
+    const fontsizeEl = document.getElementById('fontsize');
+    fontsizeEl.addEventListener('mousedown', (e) => { /* keep selection */ });
+    fontsizeEl.addEventListener('change', () => {
+      if (editor && fontsizeEl.value) editor.setFontSize(parseFloat(fontsizeEl.value));
+      fontsizeEl.value = '';
+    });
+    // Horizontal rules + table insertion.
+    for (const [id, fn] of [
+      ['hr', () => editor && editor.insertHorizontalRule(12)],
+      ['hrThick', () => editor && editor.insertHorizontalRule(24)],
+    ]) {
+      const b = document.getElementById(id);
+      b.addEventListener('mousedown', (e) => e.preventDefault());
+      b.addEventListener('click', fn);
+    }
+    const tableBtn = document.getElementById('table');
+    tableBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    tableBtn.addEventListener('click', () => {
+      if (!editor) return;
+      const spec = prompt('Table size as "rows x cols" (add " borderless"):', '2 x 3 borderless');
+      if (!spec) return;
+      const m = spec.match(/(\d+)\s*[x×]\s*(\d+)/i);
+      if (!m) return;
+      editor.insertTable(parseInt(m[1], 10), parseInt(m[2], 10),
+        { borderless: /borderless/i.test(spec), cellAlignment: 'center' });
+    });
     styleEl.addEventListener('change', () => {
       if (editor && styleEl.value) { editor.setParagraphStyle(styleEl.value); }
       styleEl.value = '';
@@ -151,6 +189,14 @@
     let editor = null;
     let currentBytes = null;
 
+    // Test hook: expose the WASM exports + open helper so automated smoke tests can drive
+    // the editing surface (the same bridge ops the toolbar buttons call) and re-render.
+    window.__demo = {
+      exports,
+      openDoc: (b) => openDoc(b),
+      getEditor: () => editor,
+    };
+
     function openDoc(bytes) {
       currentBytes = bytes;
       if (editor) { try { editor.close(); } catch {} editor = null; }
@@ -169,6 +215,12 @@
       if (!f) return;
       setStatus(`Loading ${f.name}…`);
       openDoc(new Uint8Array(await f.arrayBuffer()));
+    });
+
+    // New blank document — mint a fresh single-paragraph DOCX and open it.
+    document.getElementById('new').addEventListener('click', () => {
+      setStatus('New blank document…');
+      openDoc(exports.DocxSessionBridge.CreateBlankDocx());
     });
 
     // Toggle pagination WITHOUT discarding edits: re-render the live session in the new mode

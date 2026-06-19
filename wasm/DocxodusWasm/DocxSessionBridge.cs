@@ -30,6 +30,10 @@ public static partial class DocxSessionBridge
     [JSExport]
     public static void CloseSession(int handle) => DocxSessionOps.CloseSession(handle);
 
+    /// <summary>Mint a complete blank DOCX (a "New document" seed) as bytes.</summary>
+    [JSExport]
+    public static byte[] CreateBlankDocx() => DocxSessionOps.CreateBlankDocx();
+
     [JSExport]
     public static string Project(int handle) => DocxSessionOps.Project(handle);
 
@@ -98,6 +102,24 @@ public static partial class DocxSessionBridge
     [JSExport]
     public static string MergeParagraphs(int h, string first, string second) =>
         DocxSessionOps.MergeParagraphs(h, first, second);
+
+    /// <summary>
+    /// Insert an empty paragraph carrying a bottom border (an S-1-style horizontal rule)
+    /// before/after the anchor. <paramref name="ruleJson"/> is an optional border-edge object
+    /// ({ style?, size?, color?, space? }); empty string uses the default rule.
+    /// </summary>
+    [JSExport]
+    public static string InsertHorizontalRule(int h, string anchor, string posStr, string ruleJson) =>
+        DocxSessionOps.InsertHorizontalRule(h, anchor, DocxSessionJson.ParsePos(posStr), ruleJson);
+
+    /// <summary>
+    /// Insert a rows×cols table before/after the anchor. <paramref name="optionsJson"/> is a
+    /// TableInsertOptions object ({ borderless?, cellContents?: string[], cellAlignment? }).
+    /// Returns an EditResult whose <c>created</c> lists the cell-paragraph anchors (row-major).
+    /// </summary>
+    [JSExport]
+    public static string InsertTable(int h, string anchor, string posStr, int rows, int cols, string optionsJson) =>
+        DocxSessionOps.InsertTable(h, anchor, DocxSessionJson.ParsePos(posStr), rows, cols, optionsJson);
 
     [JSExport]
     public static string ApplyFormat(int h, string anchor, string spanJson, string opJson) =>

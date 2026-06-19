@@ -77,6 +77,35 @@ public sealed record FormatOp
     /// a string rather than a bool toggle.
     /// </summary>
     public string? VertAlign { get; init; }
+
+    /// <summary>
+    /// Font size in points (maps to <c>w:sz</c>/<c>w:szCs</c>, which store half-points).
+    /// null = leave unchanged; a value &lt;= 0 clears the explicit size (falls back to the
+    /// style/default). Fractional points are allowed (e.g. 7.5) and round to the nearest
+    /// half-point. Needed for the S-1 cover page's large "FORM S-1" and company-name lines.
+    /// </summary>
+    public double? FontSizePts { get; init; }
+}
+
+/// <summary>
+/// One edge of a paragraph border (a <c>w:pBdr</c> child — <c>w:top</c>/<c>w:bottom</c>).
+/// Drives the horizontal rules and section separators on an S-1-style cover page. When an
+/// edge is set, null fields fall back to sensible defaults; use
+/// <see cref="ParagraphFormatOp.ClearBorders"/> to remove all paragraph borders.
+/// </summary>
+public sealed record ParagraphBorderEdge
+{
+    /// <summary>Border line style (<c>w:val</c>): single, double, thick, dotted, dashed, … Default "single".</summary>
+    public string? Style { get; init; }
+
+    /// <summary>Border weight in eighths of a point (<c>w:sz</c>). Default 6 (≈0.75pt); a heavy rule ≈ 18–24.</summary>
+    public int? Size { get; init; }
+
+    /// <summary>Border color as a hex triplet without '#', or "auto" (<c>w:color</c>). Default "auto".</summary>
+    public string? Color { get; init; }
+
+    /// <summary>Padding between the border and the text in points (<c>w:space</c>). Default 1.</summary>
+    public int? Space { get; init; }
 }
 
 /// <summary>Paragraph alignment (maps to w:jc): Justify → w:val "both".</summary>
@@ -93,6 +122,32 @@ public sealed record ParagraphFormatOp
     public ParagraphAlignment? Alignment { get; init; }
     public int? IndentDelta { get; init; }
     public bool? PageBreakBefore { get; init; }
+
+    /// <summary>Top paragraph border (<c>w:pBdr/w:top</c>). null = leave unchanged.</summary>
+    public ParagraphBorderEdge? TopBorder { get; init; }
+
+    /// <summary>Bottom paragraph border (<c>w:pBdr/w:bottom</c>). null = leave unchanged.
+    /// This is what an S-1 horizontal rule is: an (often empty) paragraph with a bottom border.</summary>
+    public ParagraphBorderEdge? BottomBorder { get; init; }
+
+    /// <summary>When true, remove the entire <c>w:pBdr</c> (all paragraph borders) before applying
+    /// any <see cref="TopBorder"/>/<see cref="BottomBorder"/> in this same op.</summary>
+    public bool? ClearBorders { get; init; }
+}
+
+/// <summary>Options for <see cref="DocxSession.InsertTable"/>.</summary>
+public sealed record TableInsertOptions
+{
+    /// <summary>When true, emit explicit "none" table + inside borders (an invisible layout table —
+    /// the S-1 multi-column blocks). When false, a thin single border on every edge.</summary>
+    public bool Borderless { get; init; }
+
+    /// <summary>Row-major (row 0 left→right, then row 1, …) markdown for each cell. A null/short list
+    /// leaves the remaining cells empty; each entry may parse to more than one paragraph.</summary>
+    public IReadOnlyList<string>? CellContents { get; init; }
+
+    /// <summary>Alignment applied to every cell paragraph (the S-1 columns are centered). null = leave default.</summary>
+    public ParagraphAlignment? CellAlignment { get; init; }
 }
 
 /// <summary>List membership for <see cref="DocxSession.ApplyListFormat"/>.</summary>
@@ -3957,6 +4012,45 @@ public sealed class DocxSession : IDisposable
         else after.AddAfterSelf(child);
     }
 
+    // CT_PBdr child schema order. w:pBdr edges must appear in this sequence.
+    private static readonly string[] PBdrEdgeOrder = { "top", "left", "bottom", "right", "between", "bar" };
+
+    private static XElement BorderEdgeElement(XName edgeName, ParagraphBorderEdge edge) =>
+        new XElement(edgeName,
+            new XAttribute(W.val, string.IsNullOrEmpty(edge.Style) ? "single" : edge.Style),
+            new XAttribute(W.sz, edge.Size ?? 6),
+            new XAttribute(W.space, edge.Space ?? 1),
+            new XAttribute(W.color, string.IsNullOrEmpty(edge.Color) ? "auto" : edge.Color));
+
+    /// <summary>Insert/replace a single <c>w:pBdr</c> edge, keeping CT_PBdr child order.</summary>
+    private static void SetBorderEdgeInOrder(XElement pBdr, XName edgeName, XElement edge)
+    {
+        pBdr.Elements(edgeName).Remove();
+        int idx = Array.IndexOf(PBdrEdgeOrder, edgeName.LocalName);
+        XElement? after = null;
+        foreach (var e in pBdr.Elements())
+        {
+            int ei = Array.IndexOf(PBdrEdgeOrder, e.Name.LocalName);
+            if (ei >= 0 && ei < idx) after = e;
+            else if (ei >= idx) break;
+        }
+        if (after is null) pBdr.AddFirst(edge);
+        else after.AddAfterSelf(edge);
+    }
+
+    /// <summary>Apply top/bottom border edges (and an optional clear) to a paragraph's pPr, in place.</summary>
+    private static void ApplyParagraphBorders(XElement pPr, ParagraphBorderEdge? top, ParagraphBorderEdge? bottom, bool clear)
+    {
+        if (clear) pPr.Element(W.pBdr)?.Remove();
+        if (top is null && bottom is null) return;
+        var pBdr = pPr.Element(W.pBdr);
+        bool isNew = pBdr is null;
+        pBdr ??= new XElement(W.pBdr);
+        if (top is not null) SetBorderEdgeInOrder(pBdr, W.top, BorderEdgeElement(W.top, top));
+        if (bottom is not null) SetBorderEdgeInOrder(pBdr, W.bottom, BorderEdgeElement(W.bottom, bottom));
+        if (isNew) SetPPrChildInOrder(pPr, pBdr);
+    }
+
     /// <summary>
     /// Set paragraph-level formatting (alignment, indent delta, page-break-before) on the
     /// paragraph the anchor names. Only the non-null fields of <paramref name="op"/> change.
@@ -4016,6 +4110,9 @@ public sealed class DocxSession : IDisposable
                 ind.SetAttributeValue(W.left, next);
             }
 
+            if (op.ClearBorders is true || op.TopBorder is not null || op.BottomBorder is not null)
+                ApplyParagraphBorders(pPr, op.TopBorder, op.BottomBorder, op.ClearBorders is true);
+
             InvalidateProjectionCache();
             var freshIndex = Project().AnchorIndex;
             var updated = freshIndex.Values.FirstOrDefault(t => t.Unid == target.Unid)?.Anchor ?? target.Anchor;
@@ -4033,6 +4130,199 @@ public sealed class DocxSession : IDisposable
             _ = _history.PopForUndo();
             return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId);
         }
+    }
+
+    /// <summary>
+    /// Insert an empty paragraph carrying a bottom border — an S-1-style horizontal rule —
+    /// before/after the block named by <paramref name="anchorId"/>. <paramref name="rule"/>
+    /// styles the line (default: a single 12-eighths ≈1.5pt black rule).
+    /// </summary>
+    /// <summary>
+    /// Mint a complete, blank single-paragraph DOCX (Normal style, doc defaults, settings, and a
+    /// US-Letter portrait section) as bytes — a "New document" seed for editors that draft from
+    /// scratch. The result opens cleanly in Word and as a <see cref="DocxSession"/>.
+    /// </summary>
+    public static byte[] CreateBlankDocxBytes() => Internal.BlankDocumentFactory.CreateBytes();
+
+    /// <summary>
+    /// Insert an empty paragraph carrying a bottom border — an S-1-style horizontal rule —
+    /// before/after the block named by <paramref name="anchorId"/>. <paramref name="rule"/>
+    /// styles the line (default: a single 12-eighths ≈1.5pt black rule).
+    /// </summary>
+    public EditResult InsertHorizontalRule(string anchorId, Position pos, ParagraphBorderEdge? rule = null)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        var target = FindAnchor(anchorId);
+        if (target is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
+        var element = target.Resolve(_doc!);
+        if (element is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, "element resolved null", anchorId);
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var edge = rule ?? new ParagraphBorderEdge { Style = "single", Size = 12, Color = "auto" };
+            var pPr = new XElement(W.pPr);
+            ApplyParagraphBorders(pPr, top: null, bottom: edge, clear: false);
+            var p = new XElement(W.p, pPr);
+            UnidHelper.AssignToSelfAndDescendants(p);
+
+            if (pos == Position.Before) element.AddBeforeSelf(p);
+            else element.AddAfterSelf(p);
+
+            var unid = (string)p.Attribute(PtOpenXml.Unid)!;
+            InvalidateProjectionCache();
+            var created = Project().AnchorIndex.Values.FirstOrDefault(t => t.Unid == unid)?.Anchor
+                ?? new Anchor($"p:{target.Anchor.Scope}:{unid}", "p", target.Anchor.Scope, unid);
+
+            return new EditResult
+            {
+                Success = true,
+                Created = new[] { created },
+                Patch = ProjectScope(target),
+            };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            _ = _history.PopForUndo();
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId);
+        }
+    }
+
+    /// <summary>
+    /// Insert a <paramref name="rows"/>×<paramref name="cols"/> table before/after the block named
+    /// by <paramref name="anchorId"/>. <paramref name="options"/> controls borders, per-cell markdown
+    /// (row-major), and cell alignment. Returns the created cell-paragraph anchors (row-major), so the
+    /// caller can address and fill/format each cell.
+    /// </summary>
+    public EditResult InsertTable(string anchorId, Position pos, int rows, int cols, TableInsertOptions? options = null)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (rows < 1 || cols < 1)
+            return EditResult.Fail(EditErrorCode.MalformedMarkdown, "table needs >= 1 row and >= 1 column", anchorId);
+        var target = FindAnchor(anchorId);
+        if (target is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
+        var element = target.Resolve(_doc!);
+        if (element is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, "element resolved null", anchorId);
+
+        var opts = options ?? new TableInsertOptions();
+        var contents = opts.CellContents;
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            const int contentTwips = 9576;           // ~6.65", a US-Letter content width
+            int colTwips = contentTwips / cols;
+
+            var tblPr = new XElement(W.tblPr,
+                new XElement(W.tblW, new XAttribute(W._w, 5000), new XAttribute(W.type, "pct")),
+                BuildTableBorders(opts.Borderless),
+                new XElement(W.tblLayout, new XAttribute(W.type, "fixed")));
+
+            var tblGrid = new XElement(W.tblGrid);
+            for (int c = 0; c < cols; c++)
+                tblGrid.Add(new XElement(W.gridCol, new XAttribute(W._w, colTwips)));
+
+            var tbl = new XElement(W.tbl, tblPr, tblGrid);
+            var cellParagraphs = new List<XElement>();
+
+            for (int r = 0; r < rows; r++)
+            {
+                var tr = new XElement(W.tr);
+                for (int c = 0; c < cols; c++)
+                {
+                    var tc = new XElement(W.tc,
+                        new XElement(W.tcPr, new XElement(W.tcW, new XAttribute(W._w, colTwips), new XAttribute(W.type, "dxa"))));
+
+                    int idx = r * cols + c;
+                    string? md = contents is not null && idx < contents.Count ? contents[idx] : null;
+                    var paras = BuildCellParagraphs(md, opts.CellAlignment);
+                    foreach (var p in paras) tc.Add(p);
+                    cellParagraphs.AddRange(paras);
+                    tr.Add(tc);
+                }
+                tbl.Add(tr);
+            }
+
+            UnidHelper.AssignToSelfAndDescendants(tbl);
+
+            if (pos == Position.Before) element.AddBeforeSelf(tbl);
+            else element.AddAfterSelf(tbl);
+
+            foreach (var p in cellParagraphs) PromoteHyperlinkRelationships(p);
+
+            InvalidateProjectionCache();
+            var index = Project().AnchorIndex;
+            var created = new List<Anchor>();
+            foreach (var p in cellParagraphs)
+            {
+                var unid = (string)p.Attribute(PtOpenXml.Unid)!;
+                if (index.Values.FirstOrDefault(t => t.Unid == unid)?.Anchor is { } a)
+                    created.Add(a);
+            }
+
+            return new EditResult
+            {
+                Success = true,
+                Created = created,
+                Patch = ProjectScope(target),
+            };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            _ = _history.PopForUndo();
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId);
+        }
+    }
+
+    /// <summary>Build the cell's paragraph(s) from optional markdown + alignment. Always >= 1 paragraph.</summary>
+    private static List<XElement> BuildCellParagraphs(string? markdown, ParagraphAlignment? align)
+    {
+        var result = new List<XElement>();
+        if (!string.IsNullOrEmpty(markdown))
+        {
+            var parsed = Internal.MarkdownPayloadParser.Parse(markdown);
+            if (parsed.Success)
+                foreach (var block in parsed.Blocks)
+                    result.Add(BuildParagraphFromParsedBlock(block));
+        }
+        if (result.Count == 0) result.Add(new XElement(W.p));
+
+        if (align is { } a)
+        {
+            var val = a switch
+            {
+                ParagraphAlignment.Center => "center",
+                ParagraphAlignment.Right => "right",
+                ParagraphAlignment.Justify => "both",
+                _ => "left",
+            };
+            foreach (var p in result)
+            {
+                var pPr = p.Element(W.pPr);
+                if (pPr is null) { pPr = new XElement(W.pPr); p.AddFirst(pPr); }
+                SetPPrChildInOrder(pPr, new XElement(W.jc, new XAttribute(W.val, val)));
+            }
+        }
+        return result;
+    }
+
+    private static XElement BuildTableBorders(bool borderless)
+    {
+        var edges = new[] { W.top, W.left, W.bottom, W.right, W.insideH, W.insideV };
+        var bdr = new XElement(W.tblBorders);
+        foreach (var e in edges)
+            bdr.Add(borderless
+                ? new XElement(e, new XAttribute(W.val, "none"), new XAttribute(W.sz, 0),
+                    new XAttribute(W.space, 0), new XAttribute(W.color, "auto"))
+                : new XElement(e, new XAttribute(W.val, "single"), new XAttribute(W.sz, 4),
+                    new XAttribute(W.space, 0), new XAttribute(W.color, "auto")));
+        return bdr;
     }
 
     public EditResult SetListLevel(string anchorId, int levelDelta)
@@ -4878,6 +5168,21 @@ public sealed class DocxSession : IDisposable
                 if (v is not ("superscript" or "subscript"))
                     throw new ArgumentException($"invalid vertAlign: {op.VertAlign}");
                 rPr.Add(new XElement(W.vertAlign, new XAttribute(W.val, v)));
+            }
+        }
+
+        if (op.FontSizePts is { } pts)
+        {
+            // w:sz / w:szCs are half-points. Clearing (<= 0) drops the explicit size so the run
+            // inherits the style/default size again.
+            rPr.Element(W.sz)?.Remove();
+            rPr.Element(W.szCs)?.Remove();
+            if (pts > 0)
+            {
+                var halfPts = ((int)System.Math.Round(pts * 2, System.MidpointRounding.AwayFromZero))
+                    .ToString(System.Globalization.CultureInfo.InvariantCulture);
+                rPr.Add(new XElement(W.sz, new XAttribute(W.val, halfPts)));
+                rPr.Add(new XElement(W.szCs, new XAttribute(W.val, halfPts)));
             }
         }
     }

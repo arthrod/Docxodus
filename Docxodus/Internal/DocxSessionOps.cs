@@ -18,6 +18,9 @@ internal static class DocxSessionOps
     public static int OpenSession(byte[] bytes, DocxSessionSettings? settings) =>
         SessionRegistry.OpenSession(bytes, settings);
 
+    /// <summary>Mint a complete blank DOCX (a "New document" seed) as bytes.</summary>
+    public static byte[] CreateBlankDocx() => DocxSession.CreateBlankDocxBytes();
+
     public static void CloseSession(int handle) => SessionRegistry.CloseSession(handle);
 
     public static byte[] Save(int handle) => SessionRegistry.Get(handle).Save();
@@ -171,6 +174,19 @@ internal static class DocxSessionOps
     public static string MergeParagraphs(int handle, string firstAnchorId, string secondAnchorId) =>
         DocxSessionJson.Serialize(SessionRegistry.Get(handle).MergeParagraphs(firstAnchorId, secondAnchorId));
 
+    public static string InsertHorizontalRule(int handle, string anchorId, Position position, string ruleJson) =>
+        DocxSessionJson.Serialize(SessionRegistry.Get(handle).InsertHorizontalRule(
+            anchorId, position,
+            string.IsNullOrEmpty(ruleJson) ? null : ParseRuleEdge(ruleJson)));
+
+    private static ParagraphBorderEdge? ParseRuleEdge(string json)
+    {
+        // The rule JSON is itself a border-edge object; reuse the named-property parser by
+        // wrapping it under a known key.
+        using var d = System.Text.Json.JsonDocument.Parse($"{{\"e\":{json}}}");
+        return DocxSessionJson.ParseBorderEdge(d.RootElement, "e");
+    }
+
     // ─── Tier C: formatting ─────────────────────────────────────────────
 
     public static string ApplyFormat(int handle, string anchorId, CharSpan? span, FormatOp op) =>
@@ -198,6 +214,10 @@ internal static class DocxSessionOps
 
     public static string ReplaceCellContent(int handle, string cellAnchorId, string markdown) =>
         DocxSessionJson.Serialize(SessionRegistry.Get(handle).ReplaceCellContent(cellAnchorId, markdown));
+
+    public static string InsertTable(int handle, string anchorId, Position position, int rows, int cols, string optionsJson) =>
+        DocxSessionJson.Serialize(SessionRegistry.Get(handle).InsertTable(
+            anchorId, position, rows, cols, DocxSessionJson.ParseTableInsertOptions(optionsJson)));
 
     // ─── Raw escape hatch ───────────────────────────────────────────────
 

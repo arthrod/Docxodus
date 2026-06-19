@@ -1,0 +1,264 @@
+#nullable enable
+
+using System;
+using System.IO;
+using System.Linq;
+using System.Xml.Linq;
+using DocumentFormat.OpenXml.Packaging;
+using Docxodus;
+using Xunit;
+
+namespace Docxodus.Tests;
+
+/// <summary>
+/// Tests for the editor features built to draft an SEC Form S-1 cover page through
+/// <see cref="DocxSession"/>: run font size, paragraph borders / horizontal rules,
+/// table insertion, and the blank-document factory. Test IDs use the DS2xx range.
+/// </summary>
+public class DocxSessionS1FeaturesTests
+{
+    private static readonly XNamespace W =
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+    private static string FirstBodyParagraph(DocxSession session) =>
+        session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h").Anchor.Id;
+
+    private static XElement DocumentXml(byte[] docxBytes)
+    {
+        using var ms = new MemoryStream(docxBytes);
+        using var doc = WordprocessingDocument.Open(ms, false);
+        return doc.MainDocumentPart!.GetXDocument().Root!;
+    }
+
+    // ─── F1: font size ──────────────────────────────────────────────────
+
+    [Fact]
+    public void DS201_FontSize_SetsSzAndSzCsInHalfPoints()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.ApplyFormat(anchor, null, new FormatOp { FontSizePts = 20 });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var root = DocumentXml(session.Save());
+        var run = root.Descendants(W + "r").First(x => x.Value.Length > 0);
+        Assert.Equal("40", (string?)run.Element(W + "rPr")?.Element(W + "sz")?.Attribute(W + "val"));
+        Assert.Equal("40", (string?)run.Element(W + "rPr")?.Element(W + "szCs")?.Attribute(W + "val"));
+    }
+
+    [Fact]
+    public void DS201b_FontSize_FractionalRoundsToHalfPoint()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        session.ApplyFormat(anchor, null, new FormatOp { FontSizePts = 7.5 });
+
+        var root = DocumentXml(session.Save());
+        var run = root.Descendants(W + "r").First(x => x.Value.Length > 0);
+        Assert.Equal("15", (string?)run.Element(W + "rPr")?.Element(W + "sz")?.Attribute(W + "val"));
+    }
+
+    [Fact]
+    public void DS202_FontSize_ZeroClearsExplicitSize()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        session.ApplyFormat(anchor, null, new FormatOp { FontSizePts = 18 });
+        session.ApplyFormat(anchor, null, new FormatOp { FontSizePts = 0 });
+
+        var root = DocumentXml(session.Save());
+        Assert.Empty(root.Descendants(W + "sz"));
+    }
+
+    // ─── F2: paragraph borders ──────────────────────────────────────────
+
+    [Fact]
+    public void DS203_BottomBorder_EmitsPBdrBottom()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.SetParagraphFormat(anchor, new ParagraphFormatOp
+        {
+            BottomBorder = new ParagraphBorderEdge { Style = "single", Size = 18, Color = "000000" },
+        });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var root = DocumentXml(session.Save());
+        var bottom = root.Descendants(W + "pBdr").Elements(W + "bottom").Single();
+        Assert.Equal("single", (string?)bottom.Attribute(W + "val"));
+        Assert.Equal("18", (string?)bottom.Attribute(W + "sz"));
+        Assert.Equal("000000", (string?)bottom.Attribute(W + "color"));
+    }
+
+    [Fact]
+    public void DS204_InsertHorizontalRule_AddsEmptyBorderedParagraph()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        int before = DocumentXml(session.Save()).Descendants(W + "p").Count();
+
+        var r = session.InsertHorizontalRule(anchor, Position.After);
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.NotEmpty(r.Created);
+
+        var root = DocumentXml(session.Save());
+        Assert.Equal(before + 1, root.Descendants(W + "p").Count());
+        // The new paragraph has a bottom border and no run text.
+        var rule = root.Descendants(W + "p").Single(p => p.Element(W + "pPr")?.Element(W + "pBdr") is not null);
+        Assert.NotNull(rule.Element(W + "pPr")!.Element(W + "pBdr")!.Element(W + "bottom"));
+        Assert.Equal(string.Empty, rule.Value);
+    }
+
+    // ─── F3: table insertion ────────────────────────────────────────────
+
+    [Fact]
+    public void DS205_InsertTable_BuildsGridWithSeededContentAndAlignment()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.InsertTable(anchor, Position.After, rows: 2, cols: 3, new TableInsertOptions
+        {
+            Borderless = true,
+            CellAlignment = ParagraphAlignment.Center,
+            CellContents = new[] { "Texas", "7370", "01-0627671", "(State)", "(SIC)", "(IRS)" },
+        });
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Equal(6, r.Created.Count); // one cell-paragraph anchor per cell
+
+        var root = DocumentXml(session.Save());
+        var tbl = root.Descendants(W + "tbl").Single();
+        Assert.Equal(2, tbl.Elements(W + "tr").Count());
+        Assert.All(tbl.Elements(W + "tr"), tr => Assert.Equal(3, tr.Elements(W + "tc").Count()));
+        Assert.Equal(3, tbl.Element(W + "tblGrid")!.Elements(W + "gridCol").Count());
+
+        // Seeded content + centered cell paragraphs.
+        Assert.Contains("Texas", tbl.Value);
+        Assert.Contains("01-0627671", tbl.Value);
+        var firstCellP = tbl.Element(W + "tr")!.Element(W + "tc")!.Element(W + "p")!;
+        Assert.Equal("center", (string?)firstCellP.Element(W + "pPr")?.Element(W + "jc")?.Attribute(W + "val"));
+
+        // Borderless => explicit "none" table borders.
+        var borders = tbl.Element(W + "tblPr")!.Element(W + "tblBorders")!;
+        Assert.All(borders.Elements(), e => Assert.Equal("none", (string?)e.Attribute(W + "val")));
+    }
+
+    [Fact]
+    public void DS206_InsertTable_BorderedByDefault()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        var r = session.InsertTable(anchor, Position.After, 1, 2);
+        Assert.True(r.Success, r.Error?.Message);
+
+        var tbl = DocumentXml(session.Save()).Descendants(W + "tbl").Single();
+        var borders = tbl.Element(W + "tblPr")!.Element(W + "tblBorders")!;
+        Assert.All(borders.Elements(), e => Assert.Equal("single", (string?)e.Attribute(W + "val")));
+    }
+
+    [Fact]
+    public void DS207_InsertTable_CreatedCellsAreFillableByAnchor()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        var r = session.InsertTable(anchor, Position.After, 1, 2, new TableInsertOptions
+        {
+            CellContents = new[] { "left", "right" },
+        });
+        Assert.True(r.Success, r.Error?.Message);
+
+        // Each created cell anchor is addressable for a subsequent edit.
+        var cellAnchor = r.Created.First();
+        var fill = session.ReplaceText(cellAnchor.Id, "FILLED");
+        Assert.True(fill.Success, fill.Error?.Message);
+        Assert.Contains("FILLED", DocumentXml(session.Save()).Descendants(W + "tbl").Single().Value);
+    }
+
+    // ─── F0: blank document ─────────────────────────────────────────────
+
+    [Fact]
+    public void DS208_CreateBlankDocx_OpensAsEditableSession()
+    {
+        var bytes = DocxSession.CreateBlankDocxBytes();
+        using var session = new DocxSession(bytes);
+        var proj = session.Project();
+        Assert.True(proj.AnchorIndex.Count >= 1);
+
+        // A blank doc must support the basic drafting ops without error: typing into the
+        // single (empty) body paragraph is the entry point for drafting from scratch.
+        var anchor = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h").Anchor.Id;
+        var typed = session.ReplaceText(anchor, "Hello S-1");
+        Assert.True(typed.Success, typed.Error?.Message);
+        // Verify against saved OOXML text (the markdown projection escapes the hyphen).
+        Assert.Contains("Hello S-1", DocumentXml(session.Save()).Descendants(W + "body").Single().Value);
+    }
+
+    // ─── End-to-end: build an S-1-style page and validate the OOXML schema ──
+
+    [Fact]
+    public void DS210_DraftS1CoverPage_ProducesSchemaValidOoxml()
+    {
+        // Mirror the browser smoke test: a blank doc, then every new feature exercised —
+        // font size, paragraph border / horizontal rule, and borderless + bordered tables.
+        using var session = new DocxSession(DocxSession.CreateBlankDocxBytes());
+        var sentinel = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p").Anchor.Id;
+
+        // 2-col header table (borderless), justified left/right + 8pt.
+        var hdr = session.InsertTable(sentinel, Position.Before, 1, 2, new TableInsertOptions
+        {
+            Borderless = true,
+            CellContents = new[] { "As filed on May 20, 2026", "Registration No. 333-" },
+        });
+        session.SetParagraphFormat(hdr.Created[0].Id, new ParagraphFormatOp { Alignment = ParagraphAlignment.Left });
+        session.SetParagraphFormat(hdr.Created[1].Id, new ParagraphFormatOp { Alignment = ParagraphAlignment.Right });
+        session.ApplyFormat(hdr.Created[0].Id, null, new FormatOp { FontSizePts = 8 });
+
+        // Heavy rule.
+        session.InsertHorizontalRule(sentinel, Position.Before, new ParagraphBorderEdge { Style = "single", Size = 24, Color = "000000" });
+
+        // Big bold centered title.
+        var title = session.InsertParagraph(sentinel, Position.Before, "FORM S-1").Created[0].Id;
+        session.ApplyFormat(title, null, new FormatOp { Bold = true, FontSizePts = 22 });
+        session.SetParagraphFormat(title, new ParagraphFormatOp { Alignment = ParagraphAlignment.Center });
+
+        session.InsertHorizontalRule(sentinel, Position.Before);
+
+        // Bordered 2×3 value/label table.
+        session.InsertTable(sentinel, Position.Before, 2, 3, new TableInsertOptions
+        {
+            CellAlignment = ParagraphAlignment.Center,
+            CellContents = new[] { "Texas", "7370", "01-0627671", "(State)", "(SIC)", "(IRS)" },
+        });
+
+        var bytes = session.Save();
+
+        using var ms = new MemoryStream(bytes);
+        using var wDoc = WordprocessingDocument.Open(ms, false);
+        var validator = new DocumentFormat.OpenXml.Validation.OpenXmlValidator();
+        var errors = validator.Validate(wDoc)
+            .Select(e => $"{e.Path?.XPath}: {e.Description}")
+            .ToList();
+        Assert.True(errors.Count == 0, "OOXML schema errors:\n" + string.Join("\n", errors));
+    }
+
+    [Fact]
+    public void DS209_CreateBlankDocx_HasNormalStyleAndOpensInWord()
+    {
+        var bytes = DocxSession.CreateBlankDocxBytes();
+        using var ms = new MemoryStream(bytes);
+        using var doc = WordprocessingDocument.Open(ms, false);
+
+        // A default "Normal" paragraph style + a section + a body paragraph exist.
+        var stylesRoot = doc.MainDocumentPart!.StyleDefinitionsPart!.GetXDocument().Root!;
+        Assert.Contains(stylesRoot.Elements(W + "style"),
+            s => (string?)s.Attribute(W + "styleId") == "Normal");
+        var body = doc.MainDocumentPart.GetXDocument().Root!.Element(W + "body")!;
+        Assert.NotNull(body.Element(W + "sectPr"));
+        Assert.NotEmpty(body.Elements(W + "p"));
+    }
+}

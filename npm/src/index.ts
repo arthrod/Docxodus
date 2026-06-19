@@ -100,6 +100,14 @@ export function openDocxSession(
   return openDocxSessionImpl(bytes, wasm, settings);
 }
 
+/**
+ * Mint a complete, blank single-paragraph DOCX (Normal style, US-Letter section) as bytes —
+ * a "New document" seed for editors that draft from scratch. Requires {@link initialize}.
+ */
+export function createBlankDocx(): Uint8Array {
+  return ensureInitialized().DocxSessionBridge.CreateBlankDocx();
+}
+
 import {
   CommentRenderMode,
   PaginationMode,

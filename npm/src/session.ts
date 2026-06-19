@@ -21,7 +21,9 @@ import type {
   FillOptions,
   FindOptions,
   FormatOp,
+  ParagraphBorderEdge,
   ParagraphFormatOp,
+  TableInsertOptions,
   ListFormat,
   GrepOptions,
   ListMembership,
@@ -155,6 +157,39 @@ export class DocxSession {
 
   mergeParagraphs(firstAnchorId: string, secondAnchorId: string): EditResult {
     return JSON.parse(this.wasm.MergeParagraphs(this.handle, firstAnchorId, secondAnchorId)) as EditResult;
+  }
+
+  /**
+   * Insert an empty paragraph carrying a bottom border — an S-1-style horizontal rule —
+   * before/after the block. `rule` styles the line (default: a single ≈1.5pt black rule).
+   */
+  insertHorizontalRule(
+    anchorId: string,
+    position: "before" | "after",
+    rule?: ParagraphBorderEdge,
+  ): EditResult {
+    const ruleJson = rule ? JSON.stringify(rule) : "";
+    return JSON.parse(
+      this.wasm.InsertHorizontalRule(this.handle, anchorId, position, ruleJson),
+    ) as EditResult;
+  }
+
+  /**
+   * Insert a `rows`×`cols` table before/after the block. `options` controls borders, row-major
+   * cell markdown, and cell alignment. The returned `EditResult.created` lists the cell-paragraph
+   * anchors (row-major), so each cell can then be addressed to fill/format.
+   */
+  insertTable(
+    anchorId: string,
+    position: "before" | "after",
+    rows: number,
+    cols: number,
+    options?: TableInsertOptions,
+  ): EditResult {
+    const optionsJson = options ? JSON.stringify(options) : "";
+    return JSON.parse(
+      this.wasm.InsertTable(this.handle, anchorId, position, rows, cols, optionsJson),
+    ) as EditResult;
   }
 
   // ─── Tier C: formatting ──────────────────────────────────────────────
