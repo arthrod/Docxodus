@@ -97,6 +97,17 @@
   </p>
   <div id="editor" class="continuous"></div>
 
+  <!-- Floating table toolbar — appears when the caret is inside a table cell. -->
+  <div id="tabletools" style="display:none; position:absolute; z-index:20; gap:4px;
+       background:#fff; border:1px solid #c3c7cc; border-radius:6px; padding:4px; box-shadow:0 1px 4px rgba(0,0,0,.18);">
+    <button data-tt="rowAbove" title="Insert row above">&#8593;Row</button>
+    <button data-tt="rowBelow" title="Insert row below">&#8595;Row</button>
+    <button data-tt="colLeft" title="Insert column left">&#8592;Col</button>
+    <button data-tt="colRight" title="Insert column right">&#8594;Col</button>
+    <button data-tt="delRow" title="Delete row">&#10005;Row</button>
+    <button data-tt="delCol" title="Delete column">&#10005;Col</button>
+  </div>
+
   <script>document.write('<script src="./editor.bundle.js?t=' + Date.now() + '"><\/script>');</script>
   <script type="module">
     import { dotnet } from './_framework/dotnet.js';
@@ -177,6 +188,35 @@
       ribbonEl.querySelectorAll('button[data-cmd]').forEach((b) => {
         b.classList.toggle('active', !!st[b.dataset.cmd]);
       });
+    });
+
+    // Floating table toolbar: row/column CRUD, shown when the caret is in a table cell.
+    const tableTools = document.getElementById('tabletools');
+    const ttOps = {
+      rowAbove: () => editor.insertTableRow('above'),
+      rowBelow: () => editor.insertTableRow('below'),
+      colLeft: () => editor.insertTableColumn('left'),
+      colRight: () => editor.insertTableColumn('right'),
+      delRow: () => editor.deleteTableRow(),
+      delCol: () => editor.deleteTableColumn(),
+    };
+    tableTools.querySelectorAll('button[data-tt]').forEach((b) => {
+      b.addEventListener('mousedown', (e) => e.preventDefault()); // keep the cell selection
+      b.addEventListener('click', () => { if (editor) ttOps[b.dataset.tt]?.(); });
+    });
+    document.addEventListener('selectionchange', () => {
+      const sel = document.getSelection();
+      const node = sel && sel.anchorNode;
+      const el = node ? (node.nodeType === 1 ? node : node.parentElement) : null;
+      const table = el && el.closest ? el.closest('#editor table') : null;
+      if (table) {
+        const r = table.getBoundingClientRect();
+        tableTools.style.display = 'inline-flex';
+        tableTools.style.left = (window.scrollX + r.left) + 'px';
+        tableTools.style.top = (window.scrollY + r.top - 40) + 'px';
+      } else {
+        tableTools.style.display = 'none';
+      }
     });
 
     setStatus('Booting WASM…');

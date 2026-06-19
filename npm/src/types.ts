@@ -979,6 +979,10 @@ export interface DocxodusWasmExports {
     MergeParagraphs: (handle: number, first: string, second: string) => string;
     InsertHorizontalRule: (handle: number, anchor: string, pos: string, ruleJson: string) => string;
     InsertTable: (handle: number, anchor: string, pos: string, rows: number, cols: number, optionsJson: string) => string;
+    InsertTableRow: (handle: number, cellAnchor: string, pos: string) => string;
+    InsertTableColumn: (handle: number, cellAnchor: string, pos: string) => string;
+    DeleteTableRow: (handle: number, cellAnchor: string) => string;
+    DeleteTableColumn: (handle: number, cellAnchor: string) => string;
     ApplyFormat: (handle: number, anchor: string, spanJson: string, opJson: string) => string;
     ApplyFormatBySubstring: (handle: number, anchor: string, substring: string, opJson: string) => string;
     SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;

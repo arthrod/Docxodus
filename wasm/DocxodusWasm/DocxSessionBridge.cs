@@ -122,6 +122,22 @@ public static partial class DocxSessionBridge
         DocxSessionOps.InsertTable(h, anchor, DocxSessionJson.ParsePos(posStr), rows, cols, optionsJson);
 
     [JSExport]
+    public static string InsertTableRow(int h, string cellAnchor, string posStr) =>
+        DocxSessionOps.InsertTableRow(h, cellAnchor, DocxSessionJson.ParsePos(posStr));
+
+    [JSExport]
+    public static string InsertTableColumn(int h, string cellAnchor, string posStr) =>
+        DocxSessionOps.InsertTableColumn(h, cellAnchor, DocxSessionJson.ParsePos(posStr));
+
+    [JSExport]
+    public static string DeleteTableRow(int h, string cellAnchor) =>
+        DocxSessionOps.DeleteTableRow(h, cellAnchor);
+
+    [JSExport]
+    public static string DeleteTableColumn(int h, string cellAnchor) =>
+        DocxSessionOps.DeleteTableColumn(h, cellAnchor);
+
+    [JSExport]
     public static string ApplyFormat(int h, string anchor, string spanJson, string opJson) =>
         DocxSessionOps.ApplyFormat(h, anchor, ParseSpan(spanJson), DocxSessionJson.ParseFormatOp(opJson));
 

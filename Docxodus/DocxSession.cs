@@ -4344,6 +4344,228 @@ public sealed class DocxSession : IDisposable
         return bdr;
     }
 
+    // ─── Table editing (row / column CRUD), addressed by a cell-paragraph anchor ──────────
+    //
+    // v1 assumes a rectangular grid with no horizontal cell merges (w:gridSpan) — the shape
+    // InsertTable produces and the common case for layout tables (the S-1 columns).
+
+    /// <summary>Resolve a cell-paragraph anchor to its (paragraph, cell, row, table, column index,
+    /// anchor target). Returns a failure EditResult via <paramref name="error"/> on any miss.</summary>
+    private EditResult? ResolveCell(string cellAnchorId, out XElement? p, out XElement? tc,
+        out XElement? tr, out XElement? tbl, out int colIndex, out AnchorTarget? target)
+    {
+        p = tc = tr = tbl = null; colIndex = -1; target = null;
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        target = FindAnchor(cellAnchorId);
+        if (target is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {cellAnchorId}", cellAnchorId);
+        p = target.Resolve(_doc!);
+        if (p is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", cellAnchorId);
+        tc = p.Ancestors(W.tc).FirstOrDefault();
+        if (tc is null)
+            return EditResult.Fail(EditErrorCode.AnchorWrongKind,
+                "table row/column ops require an anchor inside a table cell", cellAnchorId);
+        tr = tc.Ancestors(W.tr).FirstOrDefault();
+        tbl = tr?.Ancestors(W.tbl).FirstOrDefault();
+        if (tr is null || tbl is null)
+            return EditResult.Fail(EditErrorCode.InternalError, "malformed table (cell has no row/table)", cellAnchorId);
+        colIndex = tr.Elements(W.tc).ToList().IndexOf(tc);
+        return null;
+    }
+
+    /// <summary>After a structural edit, resolve the freshly-projected anchors for the given paragraphs.</summary>
+    private List<Anchor> ResolveAnchorsForParagraphs(IEnumerable<XElement> paras)
+    {
+        var index = Project().AnchorIndex;
+        var result = new List<Anchor>();
+        foreach (var para in paras)
+        {
+            var unid = (string?)para.Attribute(PtOpenXml.Unid);
+            if (unid is not null && index.Values.FirstOrDefault(t => t.Unid == unid)?.Anchor is { } a)
+                result.Add(a);
+        }
+        return result;
+    }
+
+    private static XElement NewEmptyCellLike(XElement referenceCell)
+    {
+        var tcPr = referenceCell.Element(W.tcPr);
+        var tc = new XElement(W.tc);
+        if (tcPr is not null) tc.Add(new XElement(tcPr)); // clone width/borders/valign
+        var p = new XElement(W.p);
+        tc.Add(p);
+        return tc;
+    }
+
+    /// <summary>Insert a row before/after the row containing <paramref name="cellAnchorId"/>. The new
+    /// row clones each column's cell width and starts empty. Returns the new cell-paragraph anchors.</summary>
+    public EditResult InsertTableRow(string cellAnchorId, Position pos)
+    {
+        if (ResolveCell(cellAnchorId, out _, out _, out var tr, out _, out _, out var target) is { } err)
+            return err;
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var newTr = new XElement(W.tr);
+            var newParas = new List<XElement>();
+            foreach (var tc in tr!.Elements(W.tc))
+            {
+                var newTc = NewEmptyCellLike(tc);
+                newParas.Add(newTc.Element(W.p)!);
+                newTr.Add(newTc);
+            }
+            UnidHelper.AssignToSelfAndDescendants(newTr);
+            if (pos == Position.Before) tr.AddBeforeSelf(newTr);
+            else tr.AddAfterSelf(newTr);
+
+            InvalidateProjectionCache();
+            return new EditResult
+            {
+                Success = true,
+                Created = ResolveAnchorsForParagraphs(newParas),
+                Patch = ProjectScope(target!),
+            };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            _ = _history.PopForUndo();
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, cellAnchorId);
+        }
+    }
+
+    /// <summary>Insert a column before/after the column containing <paramref name="cellAnchorId"/>: a new
+    /// cell in every row (cloning that column's width) plus a matching w:gridCol. Returns the new
+    /// cell-paragraph anchors (top→bottom).</summary>
+    public EditResult InsertTableColumn(string cellAnchorId, Position pos)
+    {
+        if (ResolveCell(cellAnchorId, out _, out _, out _, out var tbl, out var colIndex, out var target) is { } err)
+            return err;
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var newParas = new List<XElement>();
+            foreach (var tr in tbl!.Elements(W.tr))
+            {
+                var cells = tr.Elements(W.tc).ToList();
+                var refTc = colIndex < cells.Count ? cells[colIndex] : cells[^1];
+                var newTc = NewEmptyCellLike(refTc);
+                UnidHelper.AssignToSelfAndDescendants(newTc);
+                newParas.Add(newTc.Element(W.p)!);
+                if (pos == Position.Before) refTc.AddBeforeSelf(newTc);
+                else refTc.AddAfterSelf(newTc);
+            }
+
+            // Mirror the structural change in w:tblGrid so column count stays consistent.
+            var grid = tbl.Element(W.tblGrid);
+            if (grid is not null)
+            {
+                var cols = grid.Elements(W.gridCol).ToList();
+                if (colIndex < cols.Count)
+                {
+                    var clone = new XElement(cols[colIndex]);
+                    if (pos == Position.Before) cols[colIndex].AddBeforeSelf(clone);
+                    else cols[colIndex].AddAfterSelf(clone);
+                }
+            }
+
+            InvalidateProjectionCache();
+            return new EditResult
+            {
+                Success = true,
+                Created = ResolveAnchorsForParagraphs(newParas),
+                Patch = ProjectScope(target!),
+            };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            _ = _history.PopForUndo();
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, cellAnchorId);
+        }
+    }
+
+    /// <summary>Delete the row containing <paramref name="cellAnchorId"/>. Deleting the last row removes
+    /// the whole table.</summary>
+    public EditResult DeleteTableRow(string cellAnchorId)
+    {
+        if (ResolveCell(cellAnchorId, out _, out _, out var tr, out var tbl, out _, out var target) is { } err)
+            return err;
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var index = Project().AnchorIndex;
+            var removed = CellParagraphAnchorsIn(tr!, index);
+            if (tbl!.Elements(W.tr).Count() <= 1) { foreach (var a in CellParagraphAnchorsIn(tbl, index)) if (!removed.Contains(a)) removed.Add(a); tbl.Remove(); }
+            else tr!.Remove();
+
+            InvalidateProjectionCache();
+            return new EditResult { Success = true, Removed = removed, Patch = ProjectScope(target!) };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            _ = _history.PopForUndo();
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, cellAnchorId);
+        }
+    }
+
+    /// <summary>Delete the column containing <paramref name="cellAnchorId"/> from every row (and its
+    /// w:gridCol). Deleting the last column removes the whole table.</summary>
+    public EditResult DeleteTableColumn(string cellAnchorId)
+    {
+        if (ResolveCell(cellAnchorId, out _, out _, out _, out var tbl, out var colIndex, out var target) is { } err)
+            return err;
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var index = Project().AnchorIndex;
+            var grid = tbl!.Element(W.tblGrid);
+            int colCount = grid?.Elements(W.gridCol).Count() ?? tbl.Elements(W.tr).First().Elements(W.tc).Count();
+
+            var removed = new List<Anchor>();
+            if (colCount <= 1) { foreach (var a in CellParagraphAnchorsIn(tbl, index)) removed.Add(a); tbl.Remove(); }
+            else
+            {
+                foreach (var tr in tbl.Elements(W.tr).ToList())
+                {
+                    var cells = tr.Elements(W.tc).ToList();
+                    if (colIndex >= cells.Count) continue;
+                    foreach (var a in CellParagraphAnchorsIn(cells[colIndex], index)) removed.Add(a);
+                    cells[colIndex].Remove();
+                }
+                var cols = grid?.Elements(W.gridCol).ToList();
+                if (cols is not null && colIndex < cols.Count) cols[colIndex].Remove();
+            }
+
+            InvalidateProjectionCache();
+            return new EditResult { Success = true, Removed = removed, Patch = ProjectScope(target!) };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            _ = _history.PopForUndo();
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, cellAnchorId);
+        }
+    }
+
+    /// <summary>The cell-paragraph anchors under <paramref name="scope"/> (a tc/tr/tbl), in document order.</summary>
+    private static List<Anchor> CellParagraphAnchorsIn(XElement scope, IReadOnlyDictionary<string, AnchorTarget> index)
+    {
+        var result = new List<Anchor>();
+        foreach (var para in scope.Descendants(W.p))
+        {
+            var unid = (string?)para.Attribute(PtOpenXml.Unid);
+            if (unid is not null && index.Values.FirstOrDefault(t => t.Unid == unid)?.Anchor is { } a)
+                result.Add(a);
+        }
+        return result;
+    }
+
     public EditResult SetListLevel(string anchorId, int levelDelta)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");

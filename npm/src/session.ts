@@ -192,6 +192,28 @@ export class DocxSession {
     ) as EditResult;
   }
 
+  /**
+   * Table row/column editing, addressed by a cell-paragraph anchor (e.g. one returned from
+   * {@link insertTable}'s `created`). Insert clones the reference row/column's widths and starts
+   * empty (`created` lists the new cell-paragraph anchors); delete of the last row/column removes
+   * the whole table. v1 assumes a rectangular grid (no horizontal cell merges).
+   */
+  insertTableRow(cellAnchorId: string, position: "before" | "after"): EditResult {
+    return JSON.parse(this.wasm.InsertTableRow(this.handle, cellAnchorId, position)) as EditResult;
+  }
+
+  insertTableColumn(cellAnchorId: string, position: "before" | "after"): EditResult {
+    return JSON.parse(this.wasm.InsertTableColumn(this.handle, cellAnchorId, position)) as EditResult;
+  }
+
+  deleteTableRow(cellAnchorId: string): EditResult {
+    return JSON.parse(this.wasm.DeleteTableRow(this.handle, cellAnchorId)) as EditResult;
+  }
+
+  deleteTableColumn(cellAnchorId: string): EditResult {
+    return JSON.parse(this.wasm.DeleteTableColumn(this.handle, cellAnchorId)) as EditResult;
+  }
+
   // ─── Tier C: formatting ──────────────────────────────────────────────
 
   applyFormat(anchorId: string, span: CharSpan | null, op: FormatOp): EditResult {

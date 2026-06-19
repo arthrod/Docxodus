@@ -219,6 +219,18 @@ internal static class DocxSessionOps
         DocxSessionJson.Serialize(SessionRegistry.Get(handle).InsertTable(
             anchorId, position, rows, cols, DocxSessionJson.ParseTableInsertOptions(optionsJson)));
 
+    public static string InsertTableRow(int handle, string cellAnchorId, Position position) =>
+        DocxSessionJson.Serialize(SessionRegistry.Get(handle).InsertTableRow(cellAnchorId, position));
+
+    public static string InsertTableColumn(int handle, string cellAnchorId, Position position) =>
+        DocxSessionJson.Serialize(SessionRegistry.Get(handle).InsertTableColumn(cellAnchorId, position));
+
+    public static string DeleteTableRow(int handle, string cellAnchorId) =>
+        DocxSessionJson.Serialize(SessionRegistry.Get(handle).DeleteTableRow(cellAnchorId));
+
+    public static string DeleteTableColumn(int handle, string cellAnchorId) =>
+        DocxSessionJson.Serialize(SessionRegistry.Get(handle).DeleteTableColumn(cellAnchorId));
+
     // ─── Raw escape hatch ───────────────────────────────────────────────
 
     public static string RawGetXml(int handle, string anchorId) =>

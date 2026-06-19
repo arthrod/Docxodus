@@ -45,6 +45,10 @@ export interface DocxEditorExports {
       cols: number,
       optionsJson: string,
     ) => string;
+    InsertTableRow: (handle: number, cellAnchor: string, pos: string) => string;
+    InsertTableColumn: (handle: number, cellAnchor: string, pos: string) => string;
+    DeleteTableRow: (handle: number, cellAnchor: string) => string;
+    DeleteTableColumn: (handle: number, cellAnchor: string) => string;
     ApplyFormat: (handle: number, anchor: string, spanJson: string, opJson: string) => string;
     SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
     SetParagraphFormat: (handle: number, anchor: string, opJson: string) => string;
@@ -1071,6 +1075,47 @@ export class DocxEditor {
     );
     if (!res.success) return;
     this.remount(idx, false);
+  }
+
+  // ─── Table row / column editing (active block must be inside a table cell) ──────────
+
+  /** Run a table-structure op on the active cell (a cell-paragraph block) and re-render. */
+  private tableEdit(run: (cellAnchor: string) => string): void {
+    const block = this.activeBlock;
+    if (this.closed || !block || !block.closest("table")) return;
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+    const idx = this.blockIndex(block);
+    fullId = this.syncBlock(block, fullId); // flush uncommitted cell text first
+    const res = this.parseEdit(run(fullId));
+    if (!res.success) return;
+    this.remount(idx, false);
+  }
+
+  /** Insert a row above/below the active cell's row. No-op outside a table. */
+  insertTableRow(where: "above" | "below"): void {
+    this.tableEdit((a) =>
+      this.exports.DocxSessionBridge.InsertTableRow(this.handle, a, where === "above" ? "before" : "after"),
+    );
+  }
+
+  /** Insert a column left/right of the active cell's column. No-op outside a table. */
+  insertTableColumn(where: "left" | "right"): void {
+    this.tableEdit((a) =>
+      this.exports.DocxSessionBridge.InsertTableColumn(this.handle, a, where === "left" ? "before" : "after"),
+    );
+  }
+
+  /** Delete the active cell's row (deleting the last row removes the table). No-op outside a table. */
+  deleteTableRow(): void {
+    this.tableEdit((a) => this.exports.DocxSessionBridge.DeleteTableRow(this.handle, a));
+  }
+
+  /** Delete the active cell's column (deleting the last column removes the table). No-op outside a table. */
+  deleteTableColumn(): void {
+    this.tableEdit((a) => this.exports.DocxSessionBridge.DeleteTableColumn(this.handle, a));
   }
 
   /**
