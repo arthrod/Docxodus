@@ -105,10 +105,12 @@ test.describe('DocxEditor — smoke-test gap regressions', () => {
     expect(intactText).toBe(true);
   });
 
-  // GAP 3: table cells are editable for TEXT (decision: keep + document), but structural ops
-  // (Enter-split / Backspace-merge / Tab) need whole-table context the single-block model lacks,
-  // so they must be inert inside a cell — text editing only, never structural corruption.
-  test('GAP3: structural keys are inert inside a table cell; text editing still works', async ({ page }) => {
+  // GAP 3: table cells are editable for TEXT and Enter now SPLITS the cell paragraph into two
+  // paragraphs within the SAME cell (the engine keeps the new w:p in the w:tc — the grid is
+  // unchanged), so a cell can hold stacked lines. Grid-changing ops (cross-cell Backspace-merge,
+  // Tab focus-jump / list-nest) still need whole-table context the single-block model lacks, so
+  // they stay inert.
+  test('GAP3: Enter splits within a cell (grid unchanged); Tab stays inert; text editing works', async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(String(e)));
 
@@ -160,7 +162,7 @@ test.describe('DocxEditor — smoke-test gap regressions', () => {
 
     const before = await tableStats();
 
-    // Enter must be inert (no intra-cell split).
+    // Enter splits the cell paragraph IN PLACE: one more paragraph, same cell GRID.
     await caretToEndOfCell();
     await page.keyboard.press('Enter');
     const afterEnter = await tableStats();
@@ -180,9 +182,12 @@ test.describe('DocxEditor — smoke-test gap regressions', () => {
     );
 
     expect(errors, `uncaught errors:\n${errors.join('\n')}`).toEqual([]);
-    // Structural keys inert: paragraph count + table shape unchanged, no list marker introduced.
-    expect(afterEnter.tableParagraphs).toBe(before.tableParagraphs);
-    expect(afterTab.tableParagraphs).toBe(before.tableParagraphs);
+    // Enter split the cell paragraph in place: +1 paragraph, SAME cell grid, no list marker.
+    expect(afterEnter.tableParagraphs).toBe(before.tableParagraphs + 1);
+    expect(afterEnter.tableCells).toBe(before.tableCells);
+    expect(afterEnter.listMarkers).toBe(before.listMarkers);
+    // Tab stays inert: nothing changes from the post-Enter state.
+    expect(afterTab.tableParagraphs).toBe(afterEnter.tableParagraphs);
     expect(afterTab.tableCells).toBe(before.tableCells);
     expect(afterTab.listMarkers).toBe(before.listMarkers);
     // Text editing still works.

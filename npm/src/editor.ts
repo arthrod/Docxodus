@@ -715,12 +715,14 @@ export class DocxEditor {
       if (k === "z") { ev.preventDefault(); ev.shiftKey ? this.redo() : this.undo(); return; }
       if (k === "y") { ev.preventDefault(); this.redo(); return; }
     }
-    // Inside a table cell, structural ops (split / merge / list-nest) need whole-table context
-    // the single-block editing model lacks, so keep them INERT — a cell is editable for text and
-    // inline/paragraph formatting only, never structure. Tab is swallowed so it can't move focus
-    // out of the cell or insert a literal tab; plain Enter does not split; Backspace at the cell's
-    // start does not merge across the cell boundary (mid-text Backspace still deletes normally).
-    // (GAP3 — keeps cell editing useful without risking table corruption.)
+    // Inside a table cell, structural ops that change the TABLE GRID (cross-cell merge,
+    // list-nest, focus-jumping Tab) stay INERT — the single-block model can't give them
+    // whole-table context. Tab is swallowed (no focus escape / literal tab); Backspace at
+    // the cell's start does not merge across the cell boundary (mid-text Backspace still
+    // deletes normally). Enter, however, splits the cell paragraph into two paragraphs
+    // WITHIN the same cell — the engine keeps the new w:p in the w:tc, the grid is
+    // unchanged, so it's safe (it's how a cell holds stacked lines: value over a smaller
+    // label, multi-line addresses). (GAP3.)
     const inTableCell = !!el.closest("table");
 
     // Tab / Shift+Tab on a list item nests / un-nests it (changes list level).
@@ -743,7 +745,8 @@ export class DocxEditor {
     }
     if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
       ev.preventDefault();
-      if (inTableCell) return; // split needs whole-table context — inert in cells
+      // Splits at the caret — in a cell this stacks a second paragraph within the same
+      // w:tc (grid unchanged); in the body it splits the paragraph as before.
       this.splitAtCaret(el);
     } else if (ev.key === "Backspace") {
       const sel = typeof window !== "undefined" ? window.getSelection() : null;
