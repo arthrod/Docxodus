@@ -944,14 +944,109 @@ export class DocxEditor {
 
   // ─── M5: formatting commands (ribbon) ────────────────────────────────
 
+  // ─── Multi-block selection helpers (format a whole stack of paragraphs at once) ──────
+
+  /** Editable blocks the current selection covers, in document order. Uses Range.comparePoint
+   *  (robust to a selection boundary that normalized onto a wrapper element rather than a block
+   *  or text node — Range.intersectsNode misses the end block at a `(block, childCount)` boundary).
+   *  A collapsed or single-block selection yields just the active block. */
+  private selectedBlocks(): HTMLElement[] {
+    const sel = typeof window !== "undefined" ? window.getSelection() : null;
+    const all = Array.from(
+      this.editRoot.querySelectorAll<HTMLElement>('[data-anchor][contenteditable="true"]'),
+    );
+    if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
+      const range = sel.getRangeAt(0);
+      const hit = all.filter((b) => {
+        try {
+          const startsAfterEnd = range.comparePoint(b, 0) > 0; // block begins after the selection ends
+          const endsBeforeStart = range.comparePoint(b, b.childNodes.length) < 0; // block ends before it starts
+          return !startsAfterEnd && !endsBeforeStart;
+        } catch {
+          return false;
+        }
+      });
+      if (hit.length > 1) return hit;
+    }
+    return this.activeBlock ? [this.activeBlock] : [];
+  }
+
+  /** The selection's span within `block`, clipped to the block (for inline ops across blocks):
+   *  the first block runs selection-start→end-of-block, middle blocks are whole, the last block
+   *  runs start-of-block→selection-end. Returns null for a whole-block apply. */
+  private blockSpanForSelection(block: HTMLElement): { start: number; length: number } | null {
+    const sel = typeof window !== "undefined" ? window.getSelection() : null;
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+    const range = sel.getRangeAt(0);
+    const hasStart = block.contains(range.startContainer);
+    const hasEnd = block.contains(range.endContainer);
+    if (hasStart && hasEnd) return selectionSpanIn(block);
+    const contentLen = blockContentText(block).length;
+    if (hasStart) {
+      const start = contentOffsetOf(block, range.startContainer, range.startOffset);
+      return { start, length: Math.max(0, contentLen - start) };
+    }
+    if (hasEnd) {
+      const end = contentOffsetOf(block, range.endContainer, range.endOffset);
+      return { start: 0, length: end };
+    }
+    return { start: 0, length: contentLen }; // fully-spanned middle block
+  }
+
+  /** Apply an inline ApplyFormat op to each block's slice of the selection, then re-render.
+   *  Returns false (caller falls back to the single-block path) for a 1-block selection. */
+  private applyInlineOpAcrossBlocks(blocks: HTMLElement[], op: object): boolean {
+    if (blocks.length <= 1) return false;
+    const targets = blocks.map((b) => {
+      const unid = b.getAttribute("data-anchor");
+      return { block: b, fullId: unid ? this.unidToFullId.get(unid) : undefined, span: this.blockSpanForSelection(b) };
+    });
+    for (const t of targets) {
+      if (!t.fullId || (t.span && t.span.length === 0)) continue;
+      const synced = this.syncBlock(t.block, t.fullId);
+      this.exports.DocxSessionBridge.ApplyFormat(
+        this.handle, synced, t.span ? JSON.stringify(t.span) : "", JSON.stringify(op),
+      );
+    }
+    this.remount();
+    return true;
+  }
+
+  /** Apply a whole-block (paragraph-level) op to each selected block, then re-render.
+   *  Returns false for a 1-block selection (caller uses the single-block path). */
+  private applyParagraphOpAcrossBlocks(blocks: HTMLElement[], run: (fullId: string) => string): boolean {
+    if (blocks.length <= 1) return false;
+    const targets = blocks.map((b) => {
+      const unid = b.getAttribute("data-anchor");
+      return { block: b, fullId: unid ? this.unidToFullId.get(unid) : undefined };
+    });
+    for (const t of targets) {
+      if (!t.fullId) continue;
+      const synced = this.syncBlock(t.block, t.fullId);
+      run(synced);
+    }
+    this.remount();
+    return true;
+  }
+
   /**
    * Toggle (or set) an inline format on the current selection in the active block.
-   * With no selection, applies to the whole paragraph. Routes through DocxSession
-   * (`ApplyFormat`) so it is lossless and supports underline/strike, not just markdown.
+   * A selection spanning multiple blocks applies to each. With no selection, applies to
+   * the whole paragraph. Routes through DocxSession (`ApplyFormat`) so it is lossless and
+   * supports underline/strike, not just markdown.
    */
   format(key: FormatKey, value?: boolean): void {
     const block = this.activeBlock;
     if (this.closed || !block) return;
+    const blocks = this.selectedBlocks();
+    if (blocks.length > 1) {
+      const on0 = value ?? !selectionHasFormat(key, blocks[0]);
+      const multiOp =
+        key === "superscript" || key === "subscript"
+          ? { vertAlign: on0 ? key : "" }
+          : { [key]: on0 };
+      if (this.applyInlineOpAcrossBlocks(blocks, multiOp)) return;
+    }
     const unid = block.getAttribute("data-anchor");
     if (!unid) return;
     let fullId = this.unidToFullId.get(unid);
@@ -988,6 +1083,8 @@ export class DocxEditor {
   setFontSize(pts: number): void {
     const block = this.activeBlock;
     if (this.closed || !block) return;
+    const blocks = this.selectedBlocks();
+    if (blocks.length > 1 && this.applyInlineOpAcrossBlocks(blocks, { fontSizePts: pts })) return;
     const unid = block.getAttribute("data-anchor");
     if (!unid) return;
     let fullId = this.unidToFullId.get(unid);
@@ -1192,6 +1289,14 @@ export class DocxEditor {
   }): void {
     const block = this.activeBlock;
     if (this.closed || !block) return;
+    const blocks = this.selectedBlocks();
+    if (
+      blocks.length > 1 &&
+      this.applyParagraphOpAcrossBlocks(blocks, (id) =>
+        this.exports.DocxSessionBridge.SetParagraphFormat(this.handle, id, JSON.stringify(op)),
+      )
+    )
+      return;
     const unid = block.getAttribute("data-anchor");
     if (!unid) return;
     let fullId = this.unidToFullId.get(unid);
@@ -1206,10 +1311,19 @@ export class DocxEditor {
     this.swapBlock(block, unid, res.modified?.[0])?.focus();
   }
 
-  /** Set the paragraph style of the active block (e.g. "Heading1", "Heading2", "Normal"). */
+  /** Set the paragraph style of the active block — or of every block in a multi-block selection
+   *  (e.g. "Heading1", "Heading2", "Normal"). */
   setParagraphStyle(styleId: string): void {
     const block = this.activeBlock;
     if (this.closed || !block) return;
+    const blocks = this.selectedBlocks();
+    if (
+      blocks.length > 1 &&
+      this.applyParagraphOpAcrossBlocks(blocks, (id) =>
+        this.exports.DocxSessionBridge.SetParagraphStyle(this.handle, id, styleId),
+      )
+    )
+      return;
     const unid = block.getAttribute("data-anchor");
     if (!unid) return;
     let fullId = this.unidToFullId.get(unid);
