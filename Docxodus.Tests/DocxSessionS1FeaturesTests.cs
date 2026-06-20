@@ -72,6 +72,61 @@ public class DocxSessionS1FeaturesTests
         Assert.Empty(root.Descendants(W + "sz"));
     }
 
+    // ─── F1b: font family ───────────────────────────────────────────────
+
+    [Fact]
+    public void DS220_FontFamily_SetsRFontsAsciiHAnsiCs()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.ApplyFormat(anchor, null, new FormatOp { FontFamily = "Times New Roman" });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var root = DocumentXml(session.Save());
+        var run = root.Descendants(W + "r").First(x => x.Value.Length > 0);
+        var rFonts = run.Element(W + "rPr")?.Element(W + "rFonts");
+        Assert.NotNull(rFonts);
+        Assert.Equal("Times New Roman", (string?)rFonts!.Attribute(W + "ascii"));
+        Assert.Equal("Times New Roman", (string?)rFonts.Attribute(W + "hAnsi"));
+        Assert.Equal("Times New Roman", (string?)rFonts.Attribute(W + "cs"));
+    }
+
+    [Fact]
+    public void DS221_FontFamily_InsertedInSchemaOrder_AndValidates()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        // Apply size + bold FIRST so a naive append would put w:rFonts after w:sz (out of order).
+        session.ApplyFormat(anchor, null, new FormatOp { Bold = true, FontSizePts = 14 });
+        session.ApplyFormat(anchor, null, new FormatOp { FontFamily = "Georgia" });
+
+        var bytes = session.Save();
+        var root = DocumentXml(bytes);
+        var rPr = root.Descendants(W + "r").First(x => x.Value.Length > 0).Element(W + "rPr")!;
+        // w:rFonts is the first EG_RPrBase child after an optional w:rStyle (none here),
+        // so it must be the first rPr child — before w:b / w:sz.
+        Assert.Equal(W + "rFonts", rPr.Elements().First().Name);
+
+        using var ms = new MemoryStream(bytes);
+        using var doc = WordprocessingDocument.Open(ms, false);
+        var errors = new DocumentFormat.OpenXml.Validation.OpenXmlValidator().Validate(doc).ToList();
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void DS222_FontFamily_EmptyStringClearsRFonts()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        session.ApplyFormat(anchor, null, new FormatOp { FontFamily = "Arial" });
+        session.ApplyFormat(anchor, null, new FormatOp { FontFamily = "" });
+
+        var root = DocumentXml(session.Save());
+        var run = root.Descendants(W + "r").First(x => x.Value.Length > 0);
+        Assert.Null(run.Element(W + "rPr")?.Element(W + "rFonts"));
+    }
+
     // ─── F2: paragraph borders ──────────────────────────────────────────
 
     [Fact]

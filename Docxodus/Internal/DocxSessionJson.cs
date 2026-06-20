@@ -102,6 +102,7 @@ internal static class DocxSessionJson
             RunStyle = TryGetString(root, "runStyle", null),
             VertAlign = TryGetString(root, "vertAlign", null),
             FontSizePts = TryGetDoubleNullable(root, "fontSizePts"),
+            FontFamily = TryGetString(root, "fontFamily", null),
         };
     }
 

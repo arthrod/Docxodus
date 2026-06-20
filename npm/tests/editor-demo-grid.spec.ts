@@ -36,4 +36,33 @@ test.describe('Demo — visual table grid picker', () => {
     // The picker closed after insertion.
     await expect(page.locator('#gridpicker')).toBeHidden();
   });
+
+  // Gap 2 — the picker's alignment selector controls cell alignment instead of hard-coding
+  // center, so an inserted table can be left-aligned (the S-1 filing line no longer comes out
+  // centered).
+  test('alignment selector controls cell alignment (left → not centered)', async ({ page }) => {
+    await page.goto('/editor.html');
+    await page.waitForFunction(() => !!(window as any).__demo, { timeout: 60000 });
+    await page.click('#new');
+    await page.waitForFunction(() => !!(window as any).__demo.getEditor());
+    await page.evaluate(() => {
+      const p = document.querySelector('#editor p[data-anchor][contenteditable="true"]') as HTMLElement;
+      p.focus();
+    });
+
+    await page.click('#table');
+    await expect(page.locator('#gridpicker')).toBeVisible();
+    await page.selectOption('#gridalign', 'left');
+    // Insert a 1×2 table (cell at row 0, col 1).
+    await page.locator('#gridcells [data-r="0"][data-c="1"]').dispatchEvent('mousedown');
+
+    const aligns = await page.evaluate(() => {
+      const cells = Array.from(
+        document.querySelectorAll('#editor table td p[data-anchor]'),
+      ) as HTMLElement[];
+      return cells.map((c) => getComputedStyle(c).textAlign);
+    });
+    expect(aligns.length).toBe(2);
+    expect(aligns.every((a) => a !== 'center')).toBe(true);
+  });
 });

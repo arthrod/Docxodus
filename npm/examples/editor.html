@@ -58,6 +58,18 @@
         <option>20</option><option>24</option><option>28</option><option>36</option>
         <option>48</option><option>72</option><option>96</option>
       </datalist>
+      <select id="fontfamily" title="Font family — applies to the selection"
+              style="font: inherit; padding:5px 6px; border:1px solid #c3c7cc; border-radius:6px; background:#f6f7f8; max-width:140px;">
+        <option value="">Font…</option>
+        <option>Calibri</option>
+        <option>Times New Roman</option>
+        <option>Arial</option>
+        <option>Georgia</option>
+        <option>Cambria</option>
+        <option>Courier New</option>
+        <option>Verdana</option>
+        <option>Garamond</option>
+      </select>
       <span class="sep"></span>
       <button data-align="left" title="Align left">L</button>
       <button data-align="center" title="Align center">C</button>
@@ -71,11 +83,17 @@
       <button data-list="bullet" title="Bullet list">&#8226;</button>
       <button data-list="decimal" title="Numbered list">1.</button>
       <span class="sep"></span>
-      <button id="hr" title="Insert horizontal rule below">&#9473;&#9473;</button>
-      <button id="hrThick" title="Insert thick rule below">&#9608;&#9608;</button>
-      <button id="hrDouble" title="Insert double rule below">&#9552;&#9552;</button>
+      <select id="rulepos" title="Insert rules above or below the active block"
+              style="font: inherit; padding:5px 6px; border:1px solid #c3c7cc; border-radius:6px; background:#f6f7f8;">
+        <option value="below">Below</option>
+        <option value="above">Above</option>
+      </select>
+      <button id="hr" title="Insert horizontal rule">&#9473;&#9473;</button>
+      <button id="hrThick" title="Insert thick rule">&#9608;&#9608;</button>
+      <button id="hrDouble" title="Insert double rule">&#9552;&#9552;</button>
       <button id="hrClear" title="Clear rule / paragraph border">&#9472;&#10007;</button>
       <button id="table" title="Insert table">&#8862;</button>
+      <button id="delblock" title="Delete this block">&#128465;</button>
       <span class="sep"></span>
       <select id="style" title="Paragraph style">
         <option value="">Style…</option>
@@ -118,7 +136,16 @@
     <div id="gridcells" style="display:grid; grid-template-columns: repeat(10, 16px); gap:2px;"></div>
     <div style="margin-top:6px; font-size:12px; display:flex; justify-content:space-between; align-items:center; gap:12px;">
       <span id="gridlabel">0 × 0</span>
-      <label class="toggle"><input id="gridborderless" type="checkbox" checked /> Borderless</label>
+      <span style="display:inline-flex; align-items:center; gap:8px;">
+        <label style="display:inline-flex; align-items:center; gap:4px;">Align
+          <select id="gridalign" style="font: inherit; padding:2px 4px; border:1px solid #c3c7cc; border-radius:4px;">
+            <option value="left">L</option>
+            <option value="center">C</option>
+            <option value="right">R</option>
+          </select>
+        </label>
+        <label class="toggle"><input id="gridborderless" type="checkbox" checked /> Borderless</label>
+      </span>
     </div>
   </div>
 
@@ -174,6 +201,14 @@
     // size change took two Ctrl+Z to revert (and the second call re-selected a swapped-out block).
     fontsizeEl.addEventListener('change', applyFontSize);
     fontsizeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); fontsizeEl.blur(); } });
+    // Font family — applies the picked font to the selection, then resets to the "Font…" label
+    // (the editor caches the last real selection, like the size combobox, so the dropdown stealing
+    // focus doesn't lose the sub-range).
+    const fontFamilyEl = document.getElementById('fontfamily');
+    fontFamilyEl.addEventListener('change', () => {
+      if (editor && fontFamilyEl.value) editor.setFontFamily(fontFamilyEl.value);
+      fontFamilyEl.value = '';
+    });
     // Reflect the current selection's size in the input (unless the user is editing the field).
     document.addEventListener('selectionchange', () => {
       if (!editor || document.activeElement === fontsizeEl) return;
@@ -185,12 +220,14 @@
         if (px) fontsizeEl.value = String(Math.round(px * 0.75 * 2) / 2); // px → pt, nearest 0.5
       }
     });
-    // Horizontal rules + table insertion.
+    // Horizontal rules + table insertion. The Above/Below select decides where the rule lands.
+    const rulePos = () => document.getElementById('rulepos').value; // "above" | "below"
     for (const [id, fn] of [
-      ['hr', () => editor && editor.insertHorizontalRule(12)],
-      ['hrThick', () => editor && editor.insertHorizontalRule(24)],
-      ['hrDouble', () => editor && editor.insertHorizontalRule(12, 'double')],
+      ['hr', () => editor && editor.insertHorizontalRule(12, 'single', rulePos())],
+      ['hrThick', () => editor && editor.insertHorizontalRule(24, 'single', rulePos())],
+      ['hrDouble', () => editor && editor.insertHorizontalRule(12, 'double', rulePos())],
       ['hrClear', () => editor && editor.clearParagraphBorders()],
+      ['delblock', () => editor && editor.deleteBlock()],
     ]) {
       const b = document.getElementById(id);
       b.addEventListener('mousedown', (e) => e.preventDefault());
@@ -231,7 +268,7 @@
       if (!cell || !editor) return;
       e.preventDefault();
       editor.insertTable((+cell.dataset.r) + 1, (+cell.dataset.c) + 1,
-        { borderless: gridBorderless.checked, cellAlignment: 'center' });
+        { borderless: gridBorderless.checked, cellAlignment: document.getElementById('gridalign').value });
       closePicker();
     });
     tableBtn.addEventListener('mousedown', (e) => e.preventDefault());

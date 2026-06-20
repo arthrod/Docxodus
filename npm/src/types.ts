@@ -1123,6 +1123,11 @@ export interface FormatOp {
    * unchanged; a value &lt;= 0 clears the explicit size. Fractional points round to a half-point.
    */
   fontSizePts?: number;
+  /**
+   * Run font family (maps to `w:rFonts` ascii/hAnsi/cs). Omit to leave unchanged; `""` clears
+   * the explicit font so the run inherits the style/default. Lets a run match a serif filing.
+   */
+  fontFamily?: string;
 }
 
 /** One edge of a paragraph border (`w:pBdr` top/bottom) — drives S-1 horizontal rules. */

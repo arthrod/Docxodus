@@ -85,6 +85,13 @@ public sealed record FormatOp
     /// half-point. Needed for the S-1 cover page's large "FORM S-1" and company-name lines.
     /// </summary>
     public double? FontSizePts { get; init; }
+
+    /// <summary>
+    /// Run font family (maps to <c>w:rFonts</c> — sets <c>w:ascii</c>/<c>w:hAnsi</c>/<c>w:cs</c>
+    /// to the name). null = leave unchanged; <c>""</c> clears the explicit font so the run
+    /// inherits the style/default. Needed to match serif filings (e.g. an S-1 in Times New Roman).
+    /// </summary>
+    public string? FontFamily { get; init; }
 }
 
 /// <summary>
@@ -5443,6 +5450,24 @@ public sealed class DocxSession : IDisposable
                     .ToString(System.Globalization.CultureInfo.InvariantCulture);
                 rPr.Add(new XElement(W.sz, new XAttribute(W.val, halfPts)));
                 rPr.Add(new XElement(W.szCs, new XAttribute(W.val, halfPts)));
+            }
+        }
+
+        if (op.FontFamily is not null)
+        {
+            // w:rFonts is the first EG_RPrBase child after an optional w:rStyle, so it must be
+            // placed there (a bare rPr.Add would append after w:sz/w:vertAlign → out of schema
+            // order). "" clears the explicit font so the run inherits the style/default.
+            rPr.Element(W.rFonts)?.Remove();
+            if (op.FontFamily.Length > 0)
+            {
+                var rFonts = new XElement(W.rFonts,
+                    new XAttribute(W.ascii, op.FontFamily),
+                    new XAttribute(W.hAnsi, op.FontFamily),
+                    new XAttribute(W.cs, op.FontFamily));
+                var rStyle = rPr.Element(W.rStyle);
+                if (rStyle is not null) rStyle.AddAfterSelf(rFonts);
+                else rPr.AddFirst(rFonts);
             }
         }
     }

@@ -36,6 +36,7 @@ export interface DocxEditorExports {
     ) => string;
     SplitParagraph: (handle: number, anchor: string, offset: number) => string;
     MergeParagraphs: (handle: number, first: string, second: string) => string;
+    DeleteBlock: (handle: number, anchor: string) => string;
     InsertHorizontalRule: (handle: number, anchor: string, pos: string, ruleJson: string) => string;
     InsertTable: (
       handle: number,
@@ -1171,6 +1172,40 @@ export class DocxEditor {
     else fresh?.focus();
   }
 
+  /**
+   * Set the font family of the current selection in the active block; with no selection,
+   * applies to the whole paragraph. `""` clears the explicit font (inherits the style/default).
+   * Routes through DocxSession `ApplyFormat` (`w:rFonts`), so it is lossless and survives save.
+   * Multi-block + last-selection plumbing matches {@link setFontSize} (a focus-stealing font
+   * dropdown still applies to the real sub-range).
+   */
+  setFontFamily(name: string): void {
+    const block = this.activeBlock;
+    if (this.closed || !block) return;
+    const blocks = this.selectedBlocks();
+    if (blocks.length > 1 && this.applyInlineOpAcrossBlocks(blocks, { fontFamily: name })) return;
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+    let span = selectionSpanIn(block);
+    if (!span && this.lastSelection && this.lastSelection.unid === unid) span = this.lastSelection.span;
+    fullId = this.syncBlock(block, fullId);
+    const res = this.parseEdit(
+      this.exports.DocxSessionBridge.ApplyFormat(
+        this.handle,
+        fullId,
+        span ? JSON.stringify(span) : "",
+        JSON.stringify({ fontFamily: name }),
+      ),
+    );
+    if (!res.success) return;
+    if (this.affectsList(res)) { this.remount(this.blockIndex(block), false); return; }
+    const fresh = this.swapBlock(block, unid, res.modified?.[0]);
+    if (fresh && span) selectRange(fresh, span.start, span.length);
+    else fresh?.focus();
+  }
+
   /** Set paragraph alignment (left/center/right/justify) on the active block. */
   setAlignment(alignment: EditorAlignment): void {
     this.applyParagraphFormat({ alignment });
@@ -1181,7 +1216,7 @@ export class DocxEditor {
    * active block. `weight` is the rule thickness in eighths of a point (default 12 ≈ 1.5pt).
    * Re-renders fully (a new block needs whole-document context to lay out).
    */
-  insertHorizontalRule(weight = 12, style = "single"): void {
+  insertHorizontalRule(weight = 12, style = "single", position: "above" | "below" = "below"): void {
     const block = this.activeBlock;
     if (this.closed || !block) return;
     const unid = block.getAttribute("data-anchor");
@@ -1194,11 +1229,13 @@ export class DocxEditor {
       this.exports.DocxSessionBridge.InsertHorizontalRule(
         this.handle,
         fullId,
-        "after",
+        position === "above" ? "before" : "after",
         JSON.stringify({ style, size: weight, color: "auto" }),
       ),
     );
     if (!res.success) return;
+    // remount from the active block's index re-renders the new rule whether it landed just
+    // above (at idx) or just below (at idx+1) the active block.
     this.remount(idx, false);
   }
 
@@ -1357,6 +1394,28 @@ export class DocxEditor {
    *  this surfaces it on the editor so an HR border is removable (S-1 smoke-test finding 1b). */
   clearParagraphBorders(): void {
     this.applyParagraphFormat({ clearBorders: true });
+  }
+
+  /**
+   * Delete the active block (e.g. a stray empty paragraph left above/below a table). Routes
+   * through DocxSession `DeleteBlock` + re-render, focusing the previous block. No-op when the
+   * caret is inside a table (remove cells via the table toolbar's delete row/column instead) and
+   * no-op when it is the only editable block (don't empty the document). Closes the S-1
+   * smoke-test "no block-delete affordance" gap.
+   */
+  deleteBlock(): void {
+    const block = this.activeBlock;
+    if (this.closed || !block) return;
+    if (block.closest("table")) return; // cells are removed via the table toolbar, not here
+    if (this.editableList().length <= 1) return; // never delete the last editable block
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    const fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+    const idx = this.blockIndex(block);
+    const res = this.parseEdit(this.exports.DocxSessionBridge.DeleteBlock(this.handle, fullId));
+    if (!res.success) return;
+    this.remount(Math.max(0, idx - 1), true);
   }
 
   private applyParagraphFormat(op: {

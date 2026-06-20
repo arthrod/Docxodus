@@ -133,9 +133,10 @@ What am I editing?
 ├── Joining two adjacent paragraphs?
 │       → MergeParagraphs(firstAnchor, secondAnchor)
 │
-├── Just the bold/italic/underline/code/color of some characters?
+├── Just the bold/italic/underline/code/color/size/font of some characters?
 │       → ApplyFormat(anchor, CharSpan(start, length), FormatOp{...})
 │       → ApplyFormat(anchor, null, FormatOp{...})  # null span = whole paragraph
+│         # FormatOp.FontSizePts → w:sz/w:szCs; FontFamily → w:rFonts ("" clears)
 │
 ├── Changing a paragraph's style (e.g., Normal → Heading2)?
 │       → SetParagraphStyle(anchor, styleId)
