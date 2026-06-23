@@ -179,6 +179,9 @@ internal static class DocxSessionOps
             anchorId, position,
             string.IsNullOrEmpty(ruleJson) ? null : ParseRuleEdge(ruleJson)));
 
+    public static string InsertTab(int handle, string anchorId, int characterOffset, TabStopAlignment alignment) =>
+        DocxSessionJson.Serialize(SessionRegistry.Get(handle).InsertTab(anchorId, characterOffset, alignment));
+
     private static ParagraphBorderEdge? ParseRuleEdge(string json)
     {
         // The rule JSON is itself a border-edge object; reuse the named-property parser by
@@ -209,6 +212,10 @@ internal static class DocxSessionOps
 
     public static string ApplyListFormat(int handle, string anchorId, ListFormat kind) =>
         DocxSessionJson.Serialize(SessionRegistry.Get(handle).ApplyListFormat(anchorId, kind));
+
+    public static string ApplyMultilevelNumbering(int handle, string anchorId,
+        System.Collections.Generic.IReadOnlyList<NumberingLevel> levels, int level, bool restart) =>
+        DocxSessionJson.Serialize(SessionRegistry.Get(handle).ApplyMultilevelNumbering(anchorId, levels, level, restart));
 
     // ─── Tier D: tables ─────────────────────────────────────────────────
 

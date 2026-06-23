@@ -113,6 +113,15 @@ public static partial class DocxSessionBridge
         DocxSessionOps.InsertHorizontalRule(h, anchor, DocxSessionJson.ParsePos(posStr), ruleJson);
 
     /// <summary>
+    /// Insert a tab at <paramref name="characterOffset"/>, ensuring a tab stop of
+    /// <paramref name="alignmentStr"/> ("right"|"center"|"left") on the paragraph. A right stop lands
+    /// at the section's right content margin so left+right text share one baseline without a table.
+    /// </summary>
+    [JSExport]
+    public static string InsertTab(int h, string anchor, int characterOffset, string alignmentStr) =>
+        DocxSessionOps.InsertTab(h, anchor, characterOffset, DocxSessionJson.ParseTabAlignment(alignmentStr));
+
+    /// <summary>
     /// Insert a rows×cols table before/after the anchor. <paramref name="optionsJson"/> is a
     /// TableInsertOptions object ({ borderless?, cellContents?: string[], cellAlignment? }).
     /// Returns an EditResult whose <c>created</c> lists the cell-paragraph anchors (row-major).
@@ -179,6 +188,15 @@ public static partial class DocxSessionBridge
     [JSExport]
     public static string ApplyListFormat(int h, string anchor, string kind) =>
         DocxSessionOps.ApplyListFormat(h, anchor, DocxSessionJson.ParseListFormat(kind));
+
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.ApplyMultilevelNumbering"/>. <paramref name="levelsJson"/>
+    /// is a NumberingLevel[] wire array (see <c>DocxSessionJson.ParseNumberingLevels</c>): each
+    /// { format, levelText, start?, indentLeft?, hanging?, justify?, bulletFont? }.
+    /// </summary>
+    [JSExport]
+    public static string ApplyMultilevelNumbering(int h, string anchor, string levelsJson, int level, bool restart) =>
+        DocxSessionOps.ApplyMultilevelNumbering(h, anchor, DocxSessionJson.ParseNumberingLevels(levelsJson), level, restart);
 
     [JSExport]
     public static string ReplaceCellContent(int h, string anchor, string md) =>

@@ -20,6 +20,11 @@ internal static class DocxSessionJson
     public static Position ParsePos(string s) =>
         string.Equals(s, "before", System.StringComparison.OrdinalIgnoreCase) ? Position.Before : Position.After;
 
+    public static TabStopAlignment ParseTabAlignment(string s) =>
+        string.Equals(s, "right", System.StringComparison.OrdinalIgnoreCase) ? TabStopAlignment.Right
+        : string.Equals(s, "center", System.StringComparison.OrdinalIgnoreCase) ? TabStopAlignment.Center
+        : TabStopAlignment.Left;
+
     public static DocxSessionSettings ParseSettings(string settingsJson)
     {
         if (string.IsNullOrEmpty(settingsJson)) return new DocxSessionSettings();
@@ -108,8 +113,9 @@ internal static class DocxSessionJson
 
     /// <summary>
     /// Parse a ParagraphFormatOp wire object: { alignment?: "left"|"center"|"right"|"justify",
-    /// indentDelta?: int (twips), pageBreakBefore?: bool }. Missing fields leave that property
-    /// unchanged.
+    /// indentDelta?: int (twips), leftIndent?: int (twips), firstLineIndent?: int (signed twips:
+    /// &gt;0 first-line, &lt;0 hanging, 0 clears), pageBreakBefore?: bool }. Missing fields leave
+    /// that property unchanged.
     /// </summary>
     public static ParagraphFormatOp ParseParagraphFormatOp(string json)
     {
@@ -127,10 +133,18 @@ internal static class DocxSessionJson
         int? indentDelta = root.TryGetProperty("indentDelta", out var d) && d.ValueKind == JsonValueKind.Number
             ? d.GetInt32()
             : null;
+        int? leftIndent = root.TryGetProperty("leftIndent", out var li) && li.ValueKind == JsonValueKind.Number
+            ? li.GetInt32()
+            : null;
+        int? firstLineIndent = root.TryGetProperty("firstLineIndent", out var fli) && fli.ValueKind == JsonValueKind.Number
+            ? fli.GetInt32()
+            : null;
         return new ParagraphFormatOp
         {
             Alignment = align,
             IndentDelta = indentDelta,
+            LeftIndent = leftIndent,
+            FirstLineIndent = firstLineIndent,
             PageBreakBefore = TryGetBoolNullable(root, "pageBreakBefore"),
             TopBorder = ParseBorderEdge(root, "topBorder"),
             BottomBorder = ParseBorderEdge(root, "bottomBorder"),
@@ -157,7 +171,7 @@ internal static class DocxSessionJson
     /// <summary>
     /// Parse a <see cref="TableInsertOptions"/> wire object:
     /// { borderless?: bool, cellContents?: string[], cellAlignment?: "left"|"center"|"right"|"justify",
-    ///   columnWidths?: number[] (twips, one per column) }.
+    ///   columnWidths?: number[] (twips, one per column), cellFontFamily?: string }.
     /// </summary>
     public static TableInsertOptions ParseTableInsertOptions(string json)
     {
@@ -192,6 +206,7 @@ internal static class DocxSessionJson
             CellContents = cells,
             CellAlignment = align,
             ColumnWidths = widths,
+            CellFontFamily = TryGetString(root, "cellFontFamily", null),
         };
     }
 
@@ -202,6 +217,48 @@ internal static class DocxSessionJson
         "decimal" or "number" or "numbered" => ListFormat.Decimal,
         _ => ListFormat.None,
     };
+
+    /// <summary>
+    /// Parse a NumberingLevel[] wire array: [{ format, levelText, start?, indentLeft?, hanging?,
+    /// justify?, bulletFont? }]. Unknown formats fall back to decimal.
+    /// </summary>
+    public static IReadOnlyList<NumberingLevel> ParseNumberingLevels(string json)
+    {
+        var list = new List<NumberingLevel>();
+        if (string.IsNullOrEmpty(json)) return list;
+        using var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.ValueKind != JsonValueKind.Array) return list;
+        foreach (var e in doc.RootElement.EnumerateArray())
+        {
+            NumberFormat fmt = TryGetString(e, "format", null)?.ToLowerInvariant() switch
+            {
+                "upperletter" => NumberFormat.UpperLetter,
+                "lowerletter" => NumberFormat.LowerLetter,
+                "upperroman" => NumberFormat.UpperRoman,
+                "lowerroman" => NumberFormat.LowerRoman,
+                "bullet" => NumberFormat.Bullet,
+                _ => NumberFormat.Decimal,
+            };
+            ParagraphAlignment? jc = TryGetString(e, "justify", null)?.ToLowerInvariant() switch
+            {
+                "center" => ParagraphAlignment.Center,
+                "right" => ParagraphAlignment.Right,
+                "left" => ParagraphAlignment.Left,
+                _ => null,
+            };
+            list.Add(new NumberingLevel
+            {
+                Format = fmt,
+                LevelText = TryGetString(e, "levelText", "") ?? "",
+                Start = e.TryGetProperty("start", out var s) && s.ValueKind == JsonValueKind.Number ? s.GetInt32() : 1,
+                IndentLeft = e.TryGetProperty("indentLeft", out var il) && il.ValueKind == JsonValueKind.Number ? il.GetInt32() : null,
+                Hanging = e.TryGetProperty("hanging", out var hg) && hg.ValueKind == JsonValueKind.Number ? hg.GetInt32() : 360,
+                Justify = jc,
+                BulletFont = TryGetString(e, "bulletFont", null),
+            });
+        }
+        return list;
+    }
 
     public static FindOptions? ParseFindOptions(JsonElement root)
     {

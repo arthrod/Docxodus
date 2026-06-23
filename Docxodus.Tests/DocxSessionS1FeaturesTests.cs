@@ -127,6 +127,116 @@ public class DocxSessionS1FeaturesTests
         Assert.Null(run.Element(W + "rPr")?.Element(W + "rFonts"));
     }
 
+    // ─── F1c: Enter inherits run formatting ─────────────────────────────
+
+    [Fact]
+    public void DS230_SplitAtEnd_NewParagraphInheritsRunFormatting()
+    {
+        // Drafting a uniformly-formatted filing: format a whole paragraph bold + Times + 16pt
+        // (direct run formatting, as the editor's ribbon applies it), press Enter at the end, and
+        // keep typing. The new line must continue in the SAME formatting (matches Word) — not reset
+        // to the document default.
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        session.ApplyFormat(anchor, null, new FormatOp { Bold = true, FontFamily = "Times New Roman", FontSizePts = 16 });
+
+        var split = session.SplitParagraph(anchor, "First paragraph.".Length); // Enter at end
+        Assert.True(split.Success, split.Error?.Message);
+        var newAnchor = split.Created!.Single().Id;
+
+        var typed = session.ReplaceText(newAnchor, "continued");
+        Assert.True(typed.Success, typed.Error?.Message);
+
+        var root = DocumentXml(session.Save());
+        var run = root.Descendants(W + "r").First(r => r.Value == "continued");
+        var rPr = run.Element(W + "rPr");
+        Assert.NotNull(rPr);
+        Assert.NotNull(rPr!.Element(W + "b"));                                                  // bold carried
+        Assert.Equal("Times New Roman", (string?)rPr.Element(W + "rFonts")?.Attribute(W + "ascii")); // font carried
+        Assert.Equal("32", (string?)rPr.Element(W + "sz")?.Attribute(W + "val"));               // 16pt carried
+    }
+
+    [Fact]
+    public void DS231_SplitInheritance_ProducesValidOoxml()
+    {
+        // The carried paragraph-mark rPr must be inserted in schema order so the document validates.
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        session.ApplyFormat(anchor, null, new FormatOp { Bold = true, FontFamily = "Georgia", FontSizePts = 18 });
+        var split = session.SplitParagraph(anchor, "First paragraph.".Length);
+        session.ReplaceText(split.Created!.Single().Id, "more");
+
+        var bytes = session.Save();
+        using var ms = new MemoryStream(bytes);
+        using var doc = WordprocessingDocument.Open(ms, false);
+        var errors = new DocumentFormat.OpenXml.Validation.OpenXmlValidator().Validate(doc).ToList();
+        Assert.Empty(errors);
+    }
+
+    // ─── F1d: right tab stop ────────────────────────────────────────────
+
+    [Fact]
+    public void DS240_InsertTab_Right_AddsRightTabStopAndTabRun()
+    {
+        // The "As filed… / Registration No." filing row: one paragraph, left text + a right-aligned
+        // tab stop at the margin + a tab + (later) right text — no two-column table needed.
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.InsertTab(anchor, "First paragraph.".Length, TabStopAlignment.Right);
+        Assert.True(r.Success, r.Error?.Message);
+
+        var root = DocumentXml(session.Save());
+        var para = root.Descendants(W + "p").First(p => p.Value.Contains("First paragraph."));
+
+        // A right tab STOP on the paragraph (w:pPr/w:tabs/w:tab with val=right, a positive pos).
+        var stop = para.Element(W + "pPr")?.Element(W + "tabs")?.Element(W + "tab");
+        Assert.NotNull(stop);
+        Assert.Equal("right", (string?)stop!.Attribute(W + "val"));
+        Assert.True(int.Parse((string)stop.Attribute(W + "pos")!) > 0);
+
+        // A tab RUN in the content (a w:tab whose parent is a w:r), after the text.
+        var tabRun = para.Descendants(W + "tab").Where(t => t.Parent!.Name == W + "r").ToList();
+        Assert.Single(tabRun);
+    }
+
+    [Fact]
+    public void DS241_InsertTab_ProducesValidOoxml_AndRoundTrips()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        session.InsertTab(anchor, "First paragraph.".Length, TabStopAlignment.Right);
+
+        var bytes = session.Save();
+        using var ms = new MemoryStream(bytes);
+        using var doc = WordprocessingDocument.Open(ms, false);
+        var errors = new DocumentFormat.OpenXml.Validation.OpenXmlValidator().Validate(doc).ToList();
+        Assert.Empty(errors);
+
+        // Round-trips: reopen sees the tab stop survive.
+        using var session2 = new DocxSession(bytes);
+        var root = DocumentXml(session2.Save());
+        Assert.Contains(root.Descendants(W + "tab"),
+            t => t.Parent!.Name == W + "tabs" && (string?)t.Attribute(W + "val") == "right");
+    }
+
+    [Fact]
+    public void DS242_InsertTab_Twice_DoesNotDuplicateTheStop()
+    {
+        // Idempotent stop: applying a right tab on the same paragraph again must not stack a second
+        // identical stop (a tab RUN is added each time — that's content — but the STOP is de-duped).
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        session.InsertTab(anchor, "First paragraph.".Length, TabStopAlignment.Right);
+        session.InsertTab(anchor, "First paragraph.".Length, TabStopAlignment.Right);
+
+        var root = DocumentXml(session.Save());
+        var para = root.Descendants(W + "p").First(p => p.Value.Contains("First paragraph."));
+        var stops = para.Element(W + "pPr")!.Element(W + "tabs")!.Elements(W + "tab")
+            .Where(t => (string?)t.Attribute(W + "val") == "right").ToList();
+        Assert.Single(stops);
+    }
+
     // ─── F2: paragraph borders ──────────────────────────────────────────
 
     [Fact]
@@ -500,5 +610,293 @@ public class DocxSessionS1FeaturesTests
         var body = DocumentXml(session.Save()).Element(W + "body")!;
         // [tbl, originalParagraph, sectPr] — exactly one direct body paragraph, not two.
         Assert.Equal(1, body.Elements(W + "p").Count());
+    }
+
+    // ─── F5: table cells inherit the document font ──────────────────────
+
+    [Fact]
+    public void DS223_InsertTable_CellFontFamily_StampsSeededRunFonts()
+    {
+        // A table inserted into a Times document should have Times cells, not the
+        // blank-doc docDefaults (Calibri). Seeded content runs carry the font directly.
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.InsertTable(anchor, Position.After, 1, 2, new TableInsertOptions
+        {
+            Borderless = true,
+            CellFontFamily = "Times New Roman",
+            CellContents = new[] { "Texas", "7370" },
+        });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var tbl = DocumentXml(session.Save()).Descendants(W + "tbl").Single();
+        foreach (var run in tbl.Descendants(W + "r").Where(x => x.Value.Length > 0))
+        {
+            var ascii = (string?)run.Element(W + "rPr")?.Element(W + "rFonts")?.Attribute(W + "ascii");
+            Assert.Equal("Times New Roman", ascii);
+        }
+    }
+
+    [Fact]
+    public void DS224_InsertTable_CellFontFamily_StampsEmptyCellMarkFont()
+    {
+        // Empty cells (the editor's grid-picker flow) carry the font on the paragraph-mark
+        // run properties so later typing inherits it.
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.InsertTable(anchor, Position.After, 2, 2, new TableInsertOptions
+        {
+            Borderless = true,
+            CellFontFamily = "Times New Roman",
+        });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var tbl = DocumentXml(session.Save()).Descendants(W + "tbl").Single();
+        foreach (var cellP in tbl.Descendants(W + "tc").Select(tc => tc.Element(W + "p")!))
+        {
+            var markAscii = (string?)cellP.Element(W + "pPr")?.Element(W + "rPr")?
+                .Element(W + "rFonts")?.Attribute(W + "ascii");
+            Assert.Equal("Times New Roman", markAscii);
+        }
+    }
+
+    [Fact]
+    public void DS225_TypingIntoEmptyFontCell_InheritsTheMarkFont()
+    {
+        // The critical typed-later path: the editor commits text into an empty cell via
+        // ReplaceText, which rebuilds runs. The new run must inherit the cell's mark font.
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.InsertTable(anchor, Position.After, 1, 2, new TableInsertOptions
+        {
+            Borderless = true,
+            CellFontFamily = "Times New Roman",
+        });
+        Assert.True(r.Success, r.Error?.Message);
+        var cellAnchor = r.Created[0].Id;
+
+        var typed = session.ReplaceText(cellAnchor, "Texas");
+        Assert.True(typed.Success, typed.Error?.Message);
+
+        var tbl = DocumentXml(session.Save()).Descendants(W + "tbl").Single();
+        var run = tbl.Descendants(W + "r").First(x => x.Value == "Texas");
+        var ascii = (string?)run.Element(W + "rPr")?.Element(W + "rFonts")?.Attribute(W + "ascii");
+        Assert.Equal("Times New Roman", ascii);
+    }
+
+    [Fact]
+    public void DS226_InsertTable_CellFontFamily_Validates()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.InsertTable(anchor, Position.After, 2, 2, new TableInsertOptions
+        {
+            Borderless = true,
+            CellFontFamily = "Times New Roman",
+            CellContents = new[] { "Texas", "7370" },
+        });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var bytes = session.Save();
+        using var ms = new MemoryStream(bytes);
+        using var doc = WordprocessingDocument.Open(ms, false);
+        var errors = new DocumentFormat.OpenXml.Validation.OpenXmlValidator().Validate(doc).ToList();
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void DS227_InsertTable_NoCellFontFamily_LeavesCellsFontless()
+    {
+        // Default (no CellFontFamily) preserves prior behavior — cells inherit docDefaults.
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.InsertTable(anchor, Position.After, 1, 2, new TableInsertOptions
+        {
+            Borderless = true,
+            CellContents = new[] { "Texas", "7370" },
+        });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var tbl = DocumentXml(session.Save()).Descendants(W + "tbl").Single();
+        var run = tbl.Descendants(W + "r").First(x => x.Value == "Texas");
+        Assert.Null(run.Element(W + "rPr")?.Element(W + "rFonts"));
+    }
+
+    // ─── F-indent: hanging / first-line indent ──────────────────────────
+
+    private static XElement? FirstInd(byte[] docxBytes) =>
+        DocumentXml(docxBytes).Descendants(W + "p").First().Element(W + "pPr")?.Element(W + "ind");
+
+    [Fact]
+    public void DS243_SetParagraphFormat_LeftIndent_SetsWIndLeft()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        var r = session.SetParagraphFormat(anchor, new ParagraphFormatOp { LeftIndent = 1440 });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var ind = FirstInd(session.Save());
+        Assert.Equal("1440", (string?)ind?.Attribute(W + "left"));
+    }
+
+    [Fact]
+    public void DS244_SetParagraphFormat_FirstLineIndentPositive_SetsFirstLine_RemovesHanging()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        session.SetParagraphFormat(anchor, new ParagraphFormatOp { LeftIndent = 720, FirstLineIndent = -360 });
+        var r = session.SetParagraphFormat(anchor, new ParagraphFormatOp { FirstLineIndent = 360 });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var ind = FirstInd(session.Save());
+        Assert.Equal("360", (string?)ind?.Attribute(W + "firstLine"));
+        Assert.Null((string?)ind?.Attribute(W + "hanging"));
+    }
+
+    [Fact]
+    public void DS245_SetParagraphFormat_FirstLineIndentNegative_SetsHanging_RemovesFirstLine()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        session.SetParagraphFormat(anchor, new ParagraphFormatOp { FirstLineIndent = 200 });
+        var r = session.SetParagraphFormat(anchor, new ParagraphFormatOp { LeftIndent = 720, FirstLineIndent = -360 });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var ind = FirstInd(session.Save());
+        Assert.Equal("360", (string?)ind?.Attribute(W + "hanging"));
+        Assert.Equal("720", (string?)ind?.Attribute(W + "left"));
+        Assert.Null((string?)ind?.Attribute(W + "firstLine"));
+    }
+
+    [Fact]
+    public void DS246_SetParagraphFormat_FirstLineIndentZero_ClearsBoth_KeepsLeft()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        session.SetParagraphFormat(anchor, new ParagraphFormatOp { LeftIndent = 720, FirstLineIndent = -360 });
+        var r = session.SetParagraphFormat(anchor, new ParagraphFormatOp { FirstLineIndent = 0 });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var ind = FirstInd(session.Save());
+        Assert.Null((string?)ind?.Attribute(W + "hanging"));
+        Assert.Null((string?)ind?.Attribute(W + "firstLine"));
+        Assert.Equal("720", (string?)ind?.Attribute(W + "left"));
+    }
+
+    [Fact]
+    public void DS247_ParseParagraphFormatOp_ReadsLeftAndFirstLineIndent()
+    {
+        var op = Docxodus.Internal.DocxSessionJson.ParseParagraphFormatOp(
+            "{\"leftIndent\":720,\"firstLineIndent\":-360}");
+        Assert.Equal(720, op.LeftIndent);
+        Assert.Equal(-360, op.FirstLineIndent);
+    }
+
+    // ─── F-numbering: configurable multi-level numbering ─────────────────
+
+    [Fact]
+    public void DS248_EnsureMultilevel_BuildsAbstractNum_AndDedupsSameScheme()
+    {
+        var bytes = DocxSession.CreateBlankDocxBytes();
+        using var stream = new MemoryStream(); // expandable — adding a numbering part grows the package
+        stream.Write(bytes, 0, bytes.Length);
+        stream.Position = 0;
+        using var doc = WordprocessingDocument.Open(stream, true);
+        var levels = new System.Collections.Generic.List<NumberingLevel>
+        {
+            new() { Format = NumberFormat.Decimal, LevelText = "%1." },
+            new() { Format = NumberFormat.LowerLetter, LevelText = "(%2)" },
+        };
+        int n1 = Docxodus.Internal.NumberingFactory.EnsureMultilevel(doc, levels, restart: false);
+        int n2 = Docxodus.Internal.NumberingFactory.EnsureMultilevel(doc, levels, restart: false);
+        Assert.Equal(n1, n2); // same scheme → same numId (one continuous sequence)
+
+        int n3 = Docxodus.Internal.NumberingFactory.EnsureMultilevel(doc, levels, restart: true);
+        Assert.NotEqual(n1, n3); // restart → fresh numId
+
+        var root = doc.MainDocumentPart!.NumberingDefinitionsPart!.GetXDocument().Root!;
+        var abs = root.Elements(W + "abstractNum").Single(a =>
+            a.Elements(W + "lvl").Any(l => (string?)l.Element(W + "lvlText")?.Attribute(W + "val") == "(%2)"));
+        Assert.Equal("lowerLetter",
+            (string?)abs.Elements(W + "lvl").First(l => (string?)l.Attribute(W + "ilvl") == "1")
+                .Element(W + "numFmt")?.Attribute(W + "val"));
+    }
+
+    [Fact]
+    public void DS249_ApplyMultilevelNumbering_SetsNumPr()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        var levels = new System.Collections.Generic.List<NumberingLevel>
+        {
+            new() { Format = NumberFormat.Decimal, LevelText = "%1." },
+            new() { Format = NumberFormat.Decimal, LevelText = "%1.%2" },
+            new() { Format = NumberFormat.LowerLetter, LevelText = "(%3)" },
+        };
+        var res = session.ApplyMultilevelNumbering(anchor, levels, level: 0);
+        Assert.True(res.Success, res.Error?.Message);
+
+        var numPr = DocumentXml(session.Save()).Descendants(W + "p").First()
+            .Element(W + "pPr")?.Element(W + "numPr");
+        Assert.NotNull(numPr);
+        Assert.Equal("0", (string?)numPr!.Element(W + "ilvl")?.Attribute(W + "val"));
+    }
+
+    [Fact]
+    public void DS250_ApplyMultilevelNumbering_ThenSetListLevel_Promotes()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        var levels = new System.Collections.Generic.List<NumberingLevel>
+        {
+            new() { Format = NumberFormat.Decimal, LevelText = "%1." },
+            new() { Format = NumberFormat.LowerLetter, LevelText = "(%2)" },
+        };
+        var applied = session.ApplyMultilevelNumbering(anchor, levels, level: 0);
+        Assert.True(applied.Success, applied.Error?.Message);
+
+        var bumped = session.SetListLevel(applied.Modified[0].Id, 1);
+        Assert.True(bumped.Success, bumped.Error?.Message);
+
+        var ilvl = DocumentXml(session.Save()).Descendants(W + "p").First()
+            .Element(W + "pPr")?.Element(W + "numPr")?.Element(W + "ilvl")?.Attribute(W + "val");
+        Assert.Equal("1", (string?)ilvl);
+    }
+
+    [Fact]
+    public void DS251_ApplyMultilevelNumbering_RoundTrips()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        var levels = new System.Collections.Generic.List<NumberingLevel>
+        {
+            new() { Format = NumberFormat.LowerLetter, LevelText = "(%1)" },
+        };
+        session.ApplyMultilevelNumbering(anchor, levels, 0);
+
+        using var reopened = new DocxSession(session.Save());
+        var numPr = DocumentXml(reopened.Save()).Descendants(W + "p").First()
+            .Element(W + "pPr")?.Element(W + "numPr");
+        Assert.NotNull(numPr);
+    }
+
+    [Fact]
+    public void DS252_ParseNumberingLevels_ReadsArray()
+    {
+        var levels = Docxodus.Internal.DocxSessionJson.ParseNumberingLevels(
+            "[{\"format\":\"decimal\",\"levelText\":\"%1.\"},{\"format\":\"lowerLetter\",\"levelText\":\"(%2)\",\"hanging\":300}]");
+        Assert.Equal(2, levels.Count);
+        Assert.Equal(NumberFormat.Decimal, levels[0].Format);
+        Assert.Equal("(%2)", levels[1].LevelText);
+        Assert.Equal(300, levels[1].Hanging);
     }
 }

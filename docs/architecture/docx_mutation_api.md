@@ -72,6 +72,7 @@ This is symmetric by design: anything the projector can emit, the parser can acc
 
 - If you can see it in the projection output, you can write it in a payload.
 - If you need a table → `InsertTable(anchor, Position, rows, cols, TableInsertOptions?)` (borderless, row-major `CellContents`, `CellAlignment`, per-column `ColumnWidths`), then edit cells with `ReplaceCellContent` or address each cell-paragraph anchor; reshape with `InsertTableRow`/`InsertTableColumn`/`DeleteTableRow`/`DeleteTableColumn` (by a cell-paragraph anchor; v1 assumes a rectangular grid, no `w:gridSpan`).
+- If you need left text + right-aligned text on one baseline (a filing masthead's "As filed… / Reg No." row) → `InsertTab(anchor, characterOffset, TabStopAlignment)` inserts a `w:tab` run at the offset and ensures a tab stop on the paragraph; a `Right` stop lands at the section's right content margin (page width − margins from the governing `w:sectPr`). De-duped and idempotent. No two-column table needed.
 - If you need a footnote, comment, or image → those are v2 ops, currently rejected with a clear error.
 - For everything OOXML can do that markdown can't (complex tables, math, content controls, drawings) → `session.Raw.*`.
 
@@ -157,6 +158,34 @@ What am I editing?
         → Just call it. Every successful op takes a snapshot.
           session.Undo() restores prior state.
 ```
+
+## Indent and multi-level (legal) numbering
+
+### Hanging / first-line indent — `ParagraphFormatOp`
+
+`SetParagraphFormat` carries three indent knobs (all tri-state — null leaves the value unchanged):
+
+| Field | OOXML | Notes |
+|-------|-------|-------|
+| `IndentDelta` | `w:ind/@w:left` += delta | relative nudge (clamped ≥ 0); the editor's ± buttons |
+| `LeftIndent` | `w:ind/@w:left` = value | absolute left (twips); applied before `IndentDelta` if both are set |
+| `FirstLineIndent` | `w:ind/@w:firstLine` or `@w:hanging` | **signed**: `>0` → first-line indent, `<0` → hanging = `abs`, `0` → clears both |
+
+`@w:firstLine` and `@w:hanging` are mutually exclusive in OOXML, so `FirstLineIndent` always writes at most one and removes the other; if applying these empties `w:ind`, the element is removed. Editor: `DocxEditor.setIndent({ left?, firstLine? })` (multi-block aware). A standard legal hanging indent is `{ left: 720, firstLine: -360 }`.
+
+### `ApplyMultilevelNumbering` — caller-configurable legal numbering
+
+```
+ApplyMultilevelNumbering(anchorId, IReadOnlyList<NumberingLevel> levels, int level = 0, bool restart = false)
+```
+
+The caller supplies the per-level scheme; each `NumberingLevel` is `{ Format, LevelText, Start, IndentLeft, Hanging, Justify, BulletFont }` where `LevelText` is the `w:lvlText` template (`"%1."`, `"%1.%2"`, `"(%3)"`, …). `Internal.NumberingFactory.EnsureMultilevel` builds the `abstractNum` (≤ 9 levels) and **dedups by a deterministic `w:nsid` hashed from the level definitions**: applying the same scheme to several paragraphs reuses one `num`, so they form **one continuous sequence**; `restart: true` mints a fresh `num` on the same `abstractNum` (a new sequence). The paragraph gains a `w:numPr` and projects as kind `li`, so the existing `SetListLevel(delta)` (Tab/Shift+Tab), `RemoveListMembership`, and `GetListMembership` apply with no extra surface. Validation: `levels` must hold 1–9 entries (`ValidationFailed`) and `level` must be in range (`InvalidListLevel`).
+
+Undo invariant (same as `ApplyListFormat`/`SetListLevel`): the numbering part is **not** snapshotted — only the paragraph's `w:numPr` is. Orphan `abstractNum`/`num` left after undo are harmless; do not start snapshotting the numbering part.
+
+**Editor default scheme.** The browser editor ships one built-in outline (`DEFAULT_OUTLINE`: `1.` / `1.1` / `(a)` / `(i)` / `(A)` / `(I)` …, each with a hanging indent) behind `DocxEditor.toggleLegalNumbering()` (toggles the active block, or every block in a multi-block selection; removes membership when the block is already a list item). The configurable engine stays available to other callers.
+
+**Incremental-render caveat.** `RenderBlockHtml` computes numbering inside a throwaway single-block document, so a re-rendered `1.1` / `(b)` can show a restarted number until a full re-render. `toggleLegalNumbering` and level changes therefore re-render the whole list region (`remount(idx, false)`), like the existing decimal-list path. The full-document converter is the faithfulness oracle, and save → reopen is authoritative.
 
 ## Bulk block removal — `DeleteRange` and `DeleteSection`
 

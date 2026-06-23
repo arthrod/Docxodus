@@ -18,6 +18,8 @@
  */
 
 import { paginateHtml } from "./pagination.js";
+import { readSelection, type MultiBlockSelection } from "./editor-selection.js";
+import { classifyBeforeInput } from "./editor-input.js";
 
 /** The subset of WASM bridge exports the editor needs (as exposed on `window.Docxodus`). */
 export interface DocxEditorExports {
@@ -38,6 +40,7 @@ export interface DocxEditorExports {
     MergeParagraphs: (handle: number, first: string, second: string) => string;
     DeleteBlock: (handle: number, anchor: string) => string;
     InsertHorizontalRule: (handle: number, anchor: string, pos: string, ruleJson: string) => string;
+    InsertTab: (handle: number, anchor: string, characterOffset: number, alignment: string) => string;
     InsertTable: (
       handle: number,
       anchor: string,
@@ -54,6 +57,8 @@ export interface DocxEditorExports {
     SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
     SetParagraphFormat: (handle: number, anchor: string, opJson: string) => string;
     ApplyListFormat: (handle: number, anchor: string, kind: string) => string;
+    ApplyMultilevelNumbering: (handle: number, anchor: string, levelsJson: string, level: number, restart: boolean) => string;
+    RemoveListMembership: (handle: number, anchor: string) => string;
     SetListLevel: (handle: number, anchor: string, delta: number) => string;
     GetListMembership: (handle: number, anchor: string) => string;
     RenderBlockHtml: (
@@ -99,6 +104,11 @@ interface AnchorTargetLite {
 }
 
 const EDITABLE_TAGS = new Set(["P", "H1", "H2", "H3", "H4", "H5", "H6"]);
+
+/** Canonical selector for an editable body block. Decoupled from the contenteditable attribute so
+ *  the single-root model (one contenteditable surface; blocks marked editable by attribute) and the
+ *  legacy per-block model both resolve the same set. */
+const EDITABLE_SELECTOR = '[data-anchor][data-editable="1"]';
 
 // ─── M1: inline HTML → markdown (preserve formatting on edit) ───────────────
 
@@ -212,6 +222,20 @@ interface EditResultLite {
   error?: { message?: string };
 }
 
+/** Canonical legal outline scheme applied by {@link DocxEditor.toggleLegalNumbering}:
+ *  1. / 1.1 / (a) / (i) / (A) / (I) / … each with a hanging indent. */
+const DEFAULT_OUTLINE = [
+  { format: "decimal", levelText: "%1." },
+  { format: "decimal", levelText: "%1.%2" },
+  { format: "lowerLetter", levelText: "(%3)" },
+  { format: "lowerRoman", levelText: "(%4)" },
+  { format: "upperLetter", levelText: "(%5)" },
+  { format: "upperRoman", levelText: "(%6)" },
+  { format: "lowerLetter", levelText: "(%7)" },
+  { format: "lowerRoman", levelText: "(%8)" },
+  { format: "upperLetter", levelText: "(%9)" },
+];
+
 /** True if `block` renders as a list item (has a generated marker as its first child). */
 function isListBlock(block: HTMLElement): boolean {
   return !!block.querySelector(":scope > [data-list-marker]");
@@ -225,6 +249,24 @@ function isInMarker(node: Node | null): boolean {
     el = el.parentElement;
   }
   return false;
+}
+
+/** Copy the first content run's font-family + font-size onto a list item's generated marker spans,
+ *  so a re-fonted clause's number/bullet matches its text in the editor preview (the converter
+ *  renders the marker in the document default). No-op when there is no marker or no explicit run
+ *  font. Preview-only — does not touch the session/OOXML. */
+function syncMarkerFontToRun(block: HTMLElement): void {
+  const markers = block.querySelectorAll<HTMLElement>("[data-list-marker]");
+  if (markers.length === 0) return;
+  const contentRun = Array.from(block.querySelectorAll<HTMLElement>("span")).find(
+    (s) => !isInMarker(s) && (s.textContent ?? "").length > 0,
+  );
+  if (!contentRun) return;
+  const { fontFamily, fontSize } = contentRun.style;
+  markers.forEach((m) => {
+    if (fontFamily) m.style.fontFamily = fontFamily;
+    if (fontSize) m.style.fontSize = fontSize;
+  });
 }
 
 /**
@@ -259,7 +301,7 @@ function domOffsetForContentOffset(s: string, n: number): number {
  * text and injected bidi marks. This is the offset DocxSession ops expect (the paragraph's run
  * text, not the rendered number/bullet or bidi marks the converter injects).
  */
-function contentOffsetOf(block: HTMLElement, container: Node, offset: number): number {
+export function contentOffsetOf(block: HTMLElement, container: Node, offset: number): number {
   let count = 0;
   let done = false;
   const walk = (node: Node): void => {
@@ -296,7 +338,7 @@ function caretOffsetIn(block: HTMLElement): number | null {
 
 /** Visible content text of `block`, excluding generated list-marker text (the same content
  *  caretOffsetIn/contentOffsetOf count). */
-function blockContentText(block: HTMLElement): string {
+export function blockContentText(block: HTMLElement): string {
   let out = "";
   const walk = (node: Node): void => {
     if (node.nodeType === 3 /* TEXT_NODE */) {
@@ -320,7 +362,15 @@ function blockContentText(block: HTMLElement): string {
  * trimmed length keeps the split offset consistent with what was committed.
  */
 function trimmedSplitOffset(block: HTMLElement, domOffset: number): number {
-  const content = blockContentText(block);
+  return toCommittedOffset(blockContentText(block), domOffset);
+}
+
+/** Map a DOM/content offset (which counts the placeholder + edge whitespace the converter renders)
+ *  to the COMMITTED run-text offset the session holds (it trims leading/trailing whitespace). A span
+ *  built from raw DOM offsets overshoots the committed run, and ApplyFormat then silently no-ops —
+ *  e.g. setFontFamily/setFontSize on a freshly-typed line (whose DOM keeps a trailing placeholder
+ *  space) wouldn't apply. Subtracting leading whitespace and clamping to the trimmed length fixes it. */
+function toCommittedOffset(content: string, domOffset: number): number {
   const leading = content.length - content.replace(/^\s+/, "").length;
   const trimmedLen = content.trim().length;
   return Math.max(0, Math.min(domOffset - Math.min(domOffset, leading), trimmedLen));
@@ -369,7 +419,7 @@ export type FormatKey = "bold" | "italic" | "underline" | "strike" | "code" | "s
 export type EditorAlignment = "left" | "center" | "right" | "justify";
 
 /** The selection's content-text {start,length} within `block` (excludes markers), or null. */
-function selectionSpanIn(block: HTMLElement): { start: number; length: number } | null {
+export function selectionSpanIn(block: HTMLElement): { start: number; length: number } | null {
   const sel = typeof window !== "undefined" ? window.getSelection() : null;
   if (!sel || sel.rangeCount === 0) return null;
   const range = sel.getRangeAt(0);
@@ -419,6 +469,19 @@ function selectRange(el: HTMLElement, start: number, length: number): void {
   }
 }
 
+/** Select a block's entire content. Used to keep a whole-block selection alive after a single-block
+ *  format re-renders the node, so commands chain (font → bold on the same cell) without re-selecting,
+ *  mirroring the multi-block path. */
+function selectWholeBlock(el: HTMLElement): void {
+  const sel = typeof window !== "undefined" ? window.getSelection() : null;
+  if (!sel || !el.isConnected) return;
+  el.focus();
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
 /**
  * True when `el`'s immediate parent is a paragraph-border `<div>` the full render wrapped it in
  * (CreateBorderDivs groups visibly-bordered paragraphs into a div). The body wrapper div has no
@@ -431,13 +494,40 @@ function inBorderWrapper(el: HTMLElement): boolean {
   return /border-(top|bottom|left|right):\s*(?!none)[^;]+/i.test(style);
 }
 
+/** The element whose computed style represents the RUN formatting at a selection boundary. A text
+ *  node maps to its parent run span. An ELEMENT container — which the browser reports when a whole
+ *  paragraph is selected via triple-click / selectNodeContents / our Select-All (startContainer is
+ *  the block `<p>`, not a text node) — is descended into the content leaf at the boundary, because
+ *  bold/italic/underline live on the inner run spans, not on the block. Reading the block element
+ *  there returned the paragraph default (normal weight), so the format toggle mis-read a fully-bold
+ *  paragraph as not-bold and re-ADDED bold instead of removing it. Generated list markers
+ *  (contenteditable=false) are skipped so a list item's marker glyph never decides the run state. */
+function formatProbeElement(container: Node, offset: number): HTMLElement | null {
+  if (container.nodeType === 3) return container.parentElement; // text node → its run span (unchanged)
+  const kids = Array.from(container.childNodes);
+  // The content node at the boundary: the boundary child (or first content node after it), skipping
+  // markers; else the last content child; else the container itself (e.g. an empty block).
+  let node: Node | null =
+    kids.slice(offset).find((c) => !isInMarker(c)) ??
+    kids.filter((c) => !isInMarker(c)).pop() ??
+    container;
+  for (let guard = 0; node && node.nodeType === 1 && guard < 64; guard++) {
+    const child: ChildNode | undefined = Array.from((node as HTMLElement).childNodes).find(
+      (c) => !isInMarker(c),
+    );
+    if (!child) break;
+    node = child;
+  }
+  return node ? (node.nodeType === 3 ? node.parentElement : (node as HTMLElement)) : null;
+}
+
 /** Whether the current selection's start already carries `key`, read from computed style. */
 function selectionHasFormat(key: FormatKey, fallback: HTMLElement): boolean {
   const sel = typeof window !== "undefined" ? window.getSelection() : null;
   let el: HTMLElement | null = fallback;
   if (sel && sel.rangeCount > 0) {
-    const n = sel.getRangeAt(0).startContainer;
-    el = n.nodeType === 3 ? n.parentElement : (n as HTMLElement);
+    const r = sel.getRangeAt(0);
+    el = formatProbeElement(r.startContainer, r.startOffset) ?? fallback;
   }
   if (!el || typeof getComputedStyle !== "function") return false;
   const cs = getComputedStyle(el);
@@ -470,6 +560,26 @@ function completeArgs(
   ];
 }
 
+/** The structural-input listeners an editor instance owns on its editing-host root. */
+interface RootHandlers {
+  beforeinput: (ev: Event) => void;
+  keydown: (ev: Event) => void;
+  blur: (ev: Event) => void;
+}
+type RootWithHandlers = HTMLElement & { __docxEditorHandlers?: RootHandlers };
+
+/** Detach whatever editor's structural listeners are currently on `root` (recorded on the
+ *  element itself). Lets a fresh open on a re-used container take over input even if a prior
+ *  instance was never closed (e.g. a bfcache restore). */
+function removeRootHandlers(root: HTMLElement): void {
+  const h = (root as RootWithHandlers).__docxEditorHandlers;
+  if (!h) return;
+  root.removeEventListener("beforeinput", h.beforeinput);
+  root.removeEventListener("keydown", h.keydown);
+  root.removeEventListener("blur", h.blur, true);
+  delete (root as RootWithHandlers).__docxEditorHandlers;
+}
+
 export class DocxEditor {
   private readonly exports: DocxEditorExports;
   private readonly container: HTMLElement;
@@ -491,6 +601,18 @@ export class DocxEditor {
   private replacing = false;
 
   /**
+   * Client-side undo grouping. The editor is the SOLE driver of the session's Undo/Redo, so a
+   * compound editor action (multi-block format, cross-block delete/type-over) records how many
+   * session ops it performed; one editor.undo() reverses the whole group. Every successful mutation
+   * goes through `op()`: ungrouped → a group of 1 (unchanged single-edit UX); inside `group()` →
+   * folded into the surrounding unit. `redoGroups` mirrors it for redo and is cleared by any new edit.
+   */
+  private readonly undoGroups: number[] = [];
+  private readonly redoGroups: number[] = [];
+  private groupDepth = 0;
+  private groupOps = 0;
+
+  /**
    * The last real (non-collapsed) text selection inside an editable block. A toolbar control that
    * must take focus to be used — the font-size combobox — blurs the block and collapses the live
    * selection, so without this an operation triggered from such a control could only target the
@@ -498,6 +620,41 @@ export class DocxEditor {
    * block, and cleared when a caret is collapsed inside a block (so it never goes stale).
    */
   private lastSelection: { unid: string; span: { start: number; length: number } } | null = null;
+
+  /**
+   * The editing-host root this instance currently has structural listeners on (the container in
+   * continuous mode, the page container in paginated mode). The single root is REUSED across
+   * re-opens (the demo re-opens on the same container) and IS the contenteditable host, so the
+   * listeners are bound PER OPEN (not once) and removed on close — otherwise a 2nd open's Enter/
+   * Backspace would be handled by the first, now-closed instance and fall through to native
+   * contenteditable (cloning the block's data-anchor → model corruption on the next remount).
+   */
+  private wiredRoot: HTMLElement | null = null;
+  private readonly boundBeforeInput = (ev: Event): void => this.onBeforeInput(ev as InputEvent);
+  private readonly boundKeydown = (ev: Event): void => {
+    const block = this.keydownBlock(ev);
+    if (block) this.onKeydown(block, ev as KeyboardEvent);
+  };
+  private readonly boundBlur = (ev: Event): void => {
+    // Commit when focus leaves the editor. Capture so a `blur` dispatched on a descendant block
+    // reaches here.
+    // A TABLE CELL is its own contenteditable host, so leaving it fires a blur even when focus
+    // stays inside the editor (relatedTarget is another block). Commit that cell HERE — the
+    // relatedTarget guard below would otherwise skip it, and the selectionchange between-block
+    // commit never fires across the cell-host teardown, so the typed text would sit uncommitted and
+    // be erased by the next remount (complex-filing smoke-test data-loss bug). Scoped to CELLS: body
+    // blocks aren't their own hosts (no real blur) and already commit via selectionchange; committing
+    // them on the blur a remount fires while swapping the DOM would interfere with structural ops.
+    const tgt = ev.target as HTMLElement | null;
+    if (!this.replacing && tgt && tgt.closest("table") && this.editableBlockOf(tgt) === tgt) {
+      this.commitBlock(tgt);
+    }
+    // IGNORE transient internal focus shifts (relatedTarget still inside the editor) for the
+    // full-editor flush — between-block commits are handled above + by selectionchange.
+    const rt = (ev as FocusEvent).relatedTarget as Node | null;
+    if (rt && this.editRoot.contains(rt)) return;
+    this.commitAllDirty();
+  };
 
   private constructor(
     container: HTMLElement,
@@ -520,8 +677,20 @@ export class DocxEditor {
     const sel = typeof window !== "undefined" ? window.getSelection() : null;
     if (!sel || sel.rangeCount === 0) return; // no selection info — keep the cache as-is
     const range = sel.getRangeAt(0);
-    const block = this.editableBlockOf(range.commonAncestorContainer);
-    if (!block) return; // selection is outside the editor (e.g. a toolbar field) — keep the cache
+    // Resolve from the START container so a multi-block selection (whose commonAncestor is the root)
+    // still tracks the first selected block as active (for ribbon highlighting + commands).
+    const block = this.editableBlockOf(range.startContainer) ?? this.editableBlockOf(range.commonAncestorContainer);
+    if (!block) return; // selection is outside the editor (e.g. a toolbar field) — keep caches
+    // Single-root: focus stays on the host, so moving the caret between blocks fires no blur. A
+    // deliberate (collapsed) caret move OUT of a block commits that block here (commitBlock is a
+    // no-op if unchanged) — the primary between-block commit. A drag-selection is non-collapsed, so
+    // we never commit mid-drag and the multi-block selection survives. Set activeBlock first so the
+    // commit's re-render (a re-entrant selectionchange) doesn't re-commit the block being left.
+    const leaving = this.activeBlock;
+    this.activeBlock = block;
+    if (leaving && leaving !== block && range.collapsed && leaving.isConnected && !this.replacing) {
+      this.commitBlock(leaving);
+    }
     const unid = block.getAttribute("data-anchor");
     if (!unid) return;
     if (range.collapsed) {
@@ -536,7 +705,7 @@ export class DocxEditor {
   private editableBlockOf(node: Node | null): HTMLElement | null {
     if (!node) return null;
     const start = node.nodeType === 1 ? (node as HTMLElement) : node.parentElement;
-    const block = start?.closest<HTMLElement>('[data-anchor][contenteditable="true"]') ?? null;
+    const block = start?.closest<HTMLElement>(EDITABLE_SELECTOR) ?? null;
     return block && this.editRoot.contains(block) ? block : null;
   }
 
@@ -586,6 +755,9 @@ export class DocxEditor {
   /** Lossless DOCX bytes reflecting all edits. */
   save(): Uint8Array {
     this.assertOpen();
+    // Flush any in-progress typing first. A programmatic save() (no blur / caret-leave) must not
+    // silently drop text the user just typed — including table-cell paragraphs (S-1 smoke-test bug).
+    this.commitAllDirty();
     return this.exports.DocxSessionBridge.Save(this.handle);
   }
 
@@ -595,6 +767,9 @@ export class DocxEditor {
     this.closed = true;
     if (typeof document !== "undefined")
       document.removeEventListener("selectionchange", this.onSelectionChange);
+    // Detach the structural-input listeners so a re-open on the SAME container wires fresh handlers
+    // bound to the new instance (otherwise this closed instance keeps handling Enter/Backspace).
+    this.unwireRoot();
     this.exports.DocxSessionBridge.CloseSession(this.handle);
   }
 
@@ -640,7 +815,10 @@ export class DocxEditor {
       .join("");
     this.container.innerHTML = styles + parsed.body.innerHTML;
     this.editRoot = this.container;
-    if (this.options.editable) this.wireBlocks(this.container);
+    if (this.options.editable) {
+      this.makeRootEditable(this.container);
+      this.wireBlocks(this.container);
+    }
   }
 
   /** Paginated mount: flow blocks into page boxes via pagination.ts, wire the page clones. */
@@ -657,7 +835,10 @@ export class DocxEditor {
     const pageRoot =
       this.container.querySelector<HTMLElement>("#pagination-container") ?? this.container;
     this.editRoot = pageRoot;
-    if (this.options.editable) this.wireBlocks(pageRoot);
+    if (this.options.editable) {
+      this.makeRootEditable(pageRoot);
+      this.wireBlocks(pageRoot);
+    }
   }
 
   private wireBlocks(root: HTMLElement): void {
@@ -672,16 +853,41 @@ export class DocxEditor {
     // keys are kept inert inside a cell (see onKeydown / GAP3) so single-block editing can't corrupt
     // table structure. Anything the projection does not index (unstamped content) stays read-only.
     if (!unid || !this.unidToFullId.has(unid)) return;
-    el.setAttribute("contenteditable", "true");
+    // Single-root model: the EDITING HOST is the surface (see makeRootEditable), so a native
+    // selection spans blocks. A body block is editable by inheritance; it is NOT its own
+    // contenteditable host (nested same-value editing hosts would re-introduce the cross-block
+    // selection boundary). It IS made programmatically focusable with tabindex so block.focus()
+    // still enters it and `document.activeElement` is the block — tabindex is not an editing host,
+    // so it does not create a selection boundary. EXCEPTION — tables are a selection BOUNDARY: the
+    // table is a non-editable island and each cell paragraph is its own editing host, so a body
+    // selection can't cross into/through a table and cell editing keeps working exactly as before.
+    if (el.closest("table")) {
+      const table = el.closest("table");
+      if (table) table.setAttribute("contenteditable", "false");
+      el.setAttribute("contenteditable", "true");
+    } else {
+      el.setAttribute("tabindex", "-1");
+      el.style.outline = "none"; // suppress the focus ring tabindex would otherwise draw
+    }
+    el.setAttribute("data-editable", "1");
     // Generated list markers (number/bullet + suffix) are not editable content — keep the
     // caret out of them so offsets stay aligned with the paragraph's run text.
     el.querySelectorAll<HTMLElement>("[data-list-marker]").forEach((m) => m.setAttribute("contenteditable", "false"));
+    // The converter renders the generated number/bullet marker in the document-default font, so a
+    // re-fonted list item used to show its text in (say) Times while the "1." stayed Calibri — which
+    // read as the font change "skipping" list items. Make the marker glyph follow the paragraph's
+    // run font + size in the editor preview (the saved OOXML is unaffected — the marker font there
+    // comes from the numbering definition, and real renderers resolve it correctly).
+    syncMarkerFontToRun(el);
     // Baseline for the commit diff: CONTENT text (list markers + injected bidi marks excluded),
     // matching the session's flat run-text offset space.
     el.dataset.committedText = blockContentText(el);
+    // Per-block FOCUS only: a programmatic block.focus() sets the active target synchronously and
+    // makes document.activeElement the block. blur and keydown are NOT per-block — during real
+    // editing focus stays on the contenteditable ROOT (the editing host), so those events fire on
+    // the root, not the block (see makeRootEditable). Between-block commits come from
+    // selectionchange (the caret leaving a block) + the root blur.
     el.addEventListener("focus", () => { this.activeBlock = el; });
-    el.addEventListener("blur", () => this.commitBlock(el));
-    el.addEventListener("keydown", (ev) => this.onKeydown(el, ev as KeyboardEvent));
   }
 
   /**
@@ -762,6 +968,230 @@ export class DocxEditor {
     this.options.onEdit?.({ anchorId: newAnchor, unid: newUnid });
   }
 
+  /** Commit every editable block whose content changed since its last commit. `commitBlock` is a
+   *  no-op for an unchanged block, so this is cheap. Per-block blur already commits on focus loss;
+   *  this flushes blocks still holding the caret (e.g. before reading a multi-block selection, or
+   *  the public/test surface flushing freshly-typed text without moving the caret away). */
+  commitAllDirty(): void {
+    if (this.closed || this.replacing) return;
+    for (const el of this.editableList()) {
+      if (el.isConnected) this.commitBlock(el);
+    }
+  }
+
+  /** beforeinput router — populated in Task 5. */
+  /** Route a beforeinput event: single-block text/IME stays native (committed on blur); structural
+   *  and cross-block operations are intercepted and applied via the session, then re-rendered. */
+  private onBeforeInput(ev: InputEvent): void {
+    if (this.closed) return;
+    const model = this.selectionModel();
+    const isMulti = !!model && model.isMultiBlock;
+    const action = classifyBeforeInput(ev.inputType, ev.data, isMulti);
+    switch (action.kind) {
+      case "native":
+        return; // the browser edits the text node; the change commits on blur/selection-leave
+      case "format":
+        ev.preventDefault();
+        this.format(action.key as FormatKey);
+        return;
+      case "block":
+        ev.preventDefault();
+        return;
+      case "deleteSelection":
+        ev.preventDefault();
+        if (model) this.deleteSelection(model);
+        return;
+      case "typeOver":
+        ev.preventDefault();
+        if (model) this.typeOverSelection(model, action.text);
+        return;
+      case "splitAtSelection":
+        ev.preventDefault();
+        if (model) this.splitAtSelection(model);
+        return;
+      case "paste":
+        ev.preventDefault();
+        if (model) this.handlePaste(model, ev.dataTransfer?.getData("text/plain") ?? "");
+        return;
+    }
+  }
+
+  // ─── Compound cross-block edits ──────────────────────────────────────────
+
+  /** Full anchor id for a block element (via its bare unid), or null. */
+  private idOf(el: HTMLElement): string | null {
+    const unid = el.getAttribute("data-anchor");
+    return unid ? this.unidToFullId.get(unid) ?? null : null;
+  }
+
+  /** Perform the trim/delete/merge session ops for a multi-block selection — NO group/remount/caret
+   *  (callers wrap in group() and remount). Returns the surviving (merged) block's anchor id and the
+   *  caret/join content offset, or null if it couldn't run. Anchor ids are re-threaded across each op
+   *  because a text edit re-hashes a block's unid. */
+  private deleteSelectionInner(model: MultiBlockSelection): { id: string; offset: number } | null {
+    const blocks = model.blocks;
+    if (blocks.length < 2) return null;
+    const firstSel = blocks[0];
+    const lastSel = blocks[blocks.length - 1];
+    const firstFull = this.idOf(firstSel.el);
+    const lastFull = this.idOf(lastSel.el);
+    if (!firstFull || !lastFull) return null;
+
+    // Compute the retained prefix/suffix text BEFORE mutating, so we can undo MergeParagraphs'
+    // sentence-joining space (it inserts one space when both sides end/start non-whitespace — right
+    // for Backspace-join, wrong for a delete-selection where the halves must join seamlessly).
+    const firstText = blockContentText(firstSel.el);
+    const lastText = blockContentText(lastSel.el);
+    const prefix = firstSel.span ? firstText.slice(0, firstSel.span.start) : firstText;
+    const suffix = lastSel.span ? lastText.slice(lastSel.span.length) : "";
+    const offset = prefix.length; // caret/join lands at the end of the retained prefix
+    const joinAddsSpace =
+      prefix.length > 0 && suffix.length > 0 &&
+      !/\s$/.test(prefix) && !/^\s/.test(suffix);
+
+    // 1) trim the first block's selected tail.
+    let firstId = this.syncBlock(firstSel.el, firstFull);
+    if (firstSel.span && firstSel.span.length > 0) {
+      const r = this.parseEdit(this.exports.DocxSessionBridge.ReplaceTextAtSpan(
+        this.handle, firstId, firstSel.span.start, firstSel.span.length, ""));
+      if (r.success) firstId = r.modified?.[0]?.id ?? firstId;
+    }
+    // 2) trim the last block's selected head.
+    let lastId = this.syncBlock(lastSel.el, lastFull);
+    if (lastSel.span && lastSel.span.length > 0) {
+      const r = this.parseEdit(this.exports.DocxSessionBridge.ReplaceTextAtSpan(
+        this.handle, lastId, 0, lastSel.span.length, ""));
+      if (r.success) lastId = r.modified?.[0]?.id ?? lastId;
+    }
+    // 3) delete whole middle blocks.
+    for (let i = 1; i < blocks.length - 1; i++) {
+      const mid = this.idOf(blocks[i].el);
+      if (mid) this.parseEdit(this.exports.DocxSessionBridge.DeleteBlock(this.handle, mid));
+    }
+    // 4) merge the (trimmed) last block into the (trimmed) first block.
+    const m = this.parseEdit(this.exports.DocxSessionBridge.MergeParagraphs(this.handle, firstId, lastId));
+    let mergedId = m.modified?.[0]?.id ?? firstId;
+    // 5) remove MergeParagraphs' join space so the delete is seamless ("Al"+"arlie" → "Alarlie").
+    if (m.success && joinAddsSpace) {
+      const r = this.parseEdit(this.exports.DocxSessionBridge.ReplaceTextAtSpan(
+        this.handle, mergedId, offset, 1, ""));
+      if (r.success) mergedId = r.modified?.[0]?.id ?? mergedId;
+    }
+    return { id: mergedId, offset };
+  }
+
+  /** Delete a multi-block selection: collapse it (trim/delete/merge) as one atomic undo, then
+   *  re-render and place the caret at the join. */
+  private deleteSelection(model: MultiBlockSelection): void {
+    if (this.closed || !model.isMultiBlock) return;
+    const firstIdx = this.blockIndex(model.blocks[0].el);
+    const after = this.group(() => this.deleteSelectionInner(model));
+    this.remount(firstIdx, false);
+    const target = this.editableList()[Math.max(0, firstIdx)];
+    if (target && after) { this.activeBlock = target; placeCaretAtOffset(target, after.offset); }
+  }
+
+  /** The content offset where a collapsed multi-block selection lands (end of the first block's
+   *  retained prefix) — the caret/insert point after the selection is removed. */
+  private joinOffsetOf(model: MultiBlockSelection): number {
+    const first = model.blocks[0];
+    return first.span ? first.span.start : blockContentText(first.el).length;
+  }
+
+  /** Replace a multi-block selection with `text`: collapse it, then insert at the join. Collapse +
+   *  insert + commit are one atomic undo. Insertion uses the proven single-block native path (place
+   *  caret → execCommand insertText → commit) rather than fragile post-merge span math. */
+  private typeOverSelection(model: MultiBlockSelection, text: string): void {
+    if (this.closed || !model.isMultiBlock) return;
+    const firstIdx = this.blockIndex(model.blocks[0].el);
+    const offset = this.joinOffsetOf(model);
+    this.group(() => {
+      this.deleteSelectionInner(model);
+      this.remount(); // materialize the merged block before the native insert
+      const block = this.editableList()[Math.max(0, firstIdx)];
+      if (!block) return;
+      this.activeBlock = block;
+      placeCaretAtOffset(block, offset);
+      if (text && typeof document !== "undefined" && typeof document.execCommand === "function") {
+        document.execCommand("insertText", false, text); // collapsed single-block → routed native
+      }
+      const id = this.idOf(block);
+      if (id) this.syncBlock(block, id); // commit the typed text into the same undo group
+    });
+    const block = this.editableList()[Math.max(0, firstIdx)];
+    if (block) { this.activeBlock = block; placeCaretAtOffset(block, offset + text.length); }
+  }
+
+  /** Enter over a multi-block selection: collapse it, then split at the join — one atomic undo. */
+  private splitAtSelection(model: MultiBlockSelection): void {
+    if (this.closed || !model.isMultiBlock) return;
+    const firstIdx = this.blockIndex(model.blocks[0].el);
+    const offset = this.joinOffsetOf(model);
+    this.group(() => {
+      this.deleteSelectionInner(model);
+      this.remount();
+      const block = this.editableList()[Math.max(0, firstIdx)];
+      if (!block) return;
+      this.activeBlock = block;
+      placeCaretAtOffset(block, offset);
+      this.splitAtCaret(block); // splits at the placed caret (records into the group)
+    });
+  }
+
+  /** Plain-text paste over a multi-block selection (v1): replace it with the pasted text. */
+  private handlePaste(model: MultiBlockSelection, text: string): void {
+    this.typeOverSelection(model, text);
+  }
+
+  /** Turn `root` into the single contenteditable editing host so a native selection spans blocks.
+   *  Structural input (keydown for split/merge, beforeinput for cross-block routing, blur for
+   *  commit-on-exit) lives on the root, NOT per block — see wireBlock; the blocks are tabindex-
+   *  focusable but are not their own editing hosts.
+   *
+   *  Listeners are (re)attached PER OPEN, keyed on the element via `__docxEditorHandlers`, with
+   *  STABLE bound references so the browser de-dupes repeat calls (a continuous remount re-uses the
+   *  same container). A re-open on a re-used container must take over input from any prior instance:
+   *  this instance's `close()` unwires it, but we also defensively drop a leftover handler set the
+   *  element still carries (e.g. a host that re-opened without closing). The previous once-only
+   *  dataset guard left a now-closed instance's handlers bound after a re-open, so Enter/Backspace
+   *  fell through to native contenteditable — cloning a block's data-anchor → model corruption. */
+  private makeRootEditable(root: HTMLElement): void {
+    root.setAttribute("contenteditable", "true");
+    if (this.wiredRoot === root) return; // already this instance's host (continuous remount) — no double-wire
+    this.unwireRoot();                   // moved host (paginated reflow) — detach from the old one
+    removeRootHandlers(root);            // drop a different instance's leftover handlers (re-open without close)
+    const handlers: RootHandlers = {
+      beforeinput: this.boundBeforeInput,
+      keydown: this.boundKeydown,
+      blur: this.boundBlur,
+    };
+    root.addEventListener("beforeinput", handlers.beforeinput);
+    root.addEventListener("keydown", handlers.keydown);
+    root.addEventListener("blur", handlers.blur, true);
+    (root as RootWithHandlers).__docxEditorHandlers = handlers;
+    this.wiredRoot = root;
+  }
+
+  /** Detach this instance's structural listeners from its editing-host root. */
+  private unwireRoot(): void {
+    if (!this.wiredRoot) return;
+    removeRootHandlers(this.wiredRoot);
+    this.wiredRoot = null;
+  }
+
+  /** The block a keydown targets: the event's block (synthetic dispatch on a block), else the
+   *  caret's block (real typing focuses the root), else the cached active block. */
+  private keydownBlock(ev: Event): HTMLElement | null {
+    const fromTarget = this.editableBlockOf(ev.target as Node | null);
+    if (fromTarget) return fromTarget;
+    const sel = typeof window !== "undefined" ? window.getSelection() : null;
+    if (sel && sel.rangeCount > 0) {
+      const fromCaret = this.editableBlockOf(sel.getRangeAt(0).startContainer);
+      if (fromCaret) return fromCaret;
+    }
+    return this.activeBlock;
+  }
+
   // ─── M2: structural editing ──────────────────────────────────────────
 
   private onKeydown(el: HTMLElement, ev: KeyboardEvent): void {
@@ -773,6 +1203,10 @@ export class DocxEditor {
       if (fmt[k]) { ev.preventDefault(); this.format(fmt[k]); return; }
       if (k === "z") { ev.preventDefault(); ev.shiftKey ? this.redo() : this.undo(); return; }
       if (k === "y") { ev.preventDefault(); this.redo(); return; }
+      // Context-aware Select-All: native selectAll mis-selects the first contenteditable=false
+      // table island; intercept so Ctrl/Cmd+A selects all BODY blocks (tables a boundary) from the
+      // body, or all of a TABLE's cells from inside it (so one font applies to the whole table).
+      if (k === "a") { ev.preventDefault(); this.selectAllBlocks(el); return; }
     }
     // Inside a table cell, structural ops that change the TABLE GRID (cross-cell merge,
     // list-nest, focus-jumping Tab) stay INERT — the single-block model can't give them
@@ -794,6 +1228,11 @@ export class DocxEditor {
         return;
       }
     }
+    // Enter over a MULTI-BLOCK selection is a compound edit (collapse then split / line break):
+    // let beforeinput route it to splitAtSelection rather than splitting the active block here.
+    // (Backspace/Delete already fall through to beforeinput because their handlers require a
+    // collapsed caret.) Don't preventDefault so the beforeinput fires.
+    if (ev.key === "Enter" && !ev.isComposing && !!this.selectionModel()?.isMultiBlock) return;
     // Shift+Enter inserts an intra-paragraph line break (a real w:br on commit),
     // not a paragraph split. Deterministic across browsers and allowed in cells
     // (a line break changes no table structure).
@@ -991,17 +1430,43 @@ export class DocxEditor {
   /** The editable block immediately before `el` in document order, or null. */
   private previousEditable(el: HTMLElement): HTMLElement | null {
     const all = Array.from(
-      this.editRoot.querySelectorAll<HTMLElement>('[data-anchor][contenteditable="true"]'),
+      this.editRoot.querySelectorAll<HTMLElement>(EDITABLE_SELECTOR),
     );
     const i = all.indexOf(el);
     return i > 0 ? all[i - 1] : null;
   }
 
+  /** Parse a session mutation's EditResult AND record it for undo grouping (parseEdit is used only
+   *  for mutation results). A standalone (ungrouped) success pushes a group of 1 (single-edit UX is
+   *  unchanged); inside `group()`, successes accumulate into the surrounding group. */
   private parseEdit(json: string): EditResultLite {
+    let res: EditResultLite;
     try {
-      return JSON.parse(json) as EditResultLite;
+      res = JSON.parse(json) as EditResultLite;
     } catch {
-      return { success: false };
+      res = { success: false };
+    }
+    if (res.success) {
+      if (this.groupDepth > 0) this.groupOps++;
+      else { this.undoGroups.push(1); this.redoGroups.length = 0; }
+    }
+    return res;
+  }
+
+  /** Coalesce every session mutation performed in `fn` into ONE undo unit (atomic compound edit).
+   *  Returns whatever `fn` returns. */
+  private group<T>(fn: () => T): T {
+    this.groupDepth++;
+    const before = this.groupOps;
+    try {
+      return fn();
+    } finally {
+      this.groupDepth--;
+      if (this.groupDepth === 0) {
+        const n = this.groupOps - before;
+        this.groupOps = 0;
+        if (n > 0) { this.undoGroups.push(n); this.redoGroups.length = 0; }
+      }
     }
   }
 
@@ -1009,86 +1474,179 @@ export class DocxEditor {
 
   // ─── Multi-block selection helpers (format a whole stack of paragraphs at once) ──────
 
-  /** Editable blocks the current selection covers, in document order. Uses Range.comparePoint
-   *  (robust to a selection boundary that normalized onto a wrapper element rather than a block
-   *  or text node — Range.intersectsNode misses the end block at a `(block, childCount)` boundary).
-   *  A collapsed or single-block selection yields just the active block. */
+  /** The full multi-block selection model (covered body blocks + per-block spans), or null when the
+   *  selection is collapsed/empty/outside the body. Tables are a selection boundary. */
+  private selectionModel(): MultiBlockSelection | null {
+    return readSelection(this.editRoot, { contentOffsetOf, blockContentText, selectionSpanIn });
+  }
+
+  /** Editable blocks the current selection covers, in document order. A multi-block selection
+   *  yields all covered body blocks (via the selection model); otherwise just the active block. */
   private selectedBlocks(): HTMLElement[] {
-    const sel = typeof window !== "undefined" ? window.getSelection() : null;
-    const all = Array.from(
-      this.editRoot.querySelectorAll<HTMLElement>('[data-anchor][contenteditable="true"]'),
-    );
-    if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
-      const range = sel.getRangeAt(0);
-      const hit = all.filter((b) => {
-        try {
-          const startsAfterEnd = range.comparePoint(b, 0) > 0; // block begins after the selection ends
-          const endsBeforeStart = range.comparePoint(b, b.childNodes.length) < 0; // block ends before it starts
-          return !startsAfterEnd && !endsBeforeStart;
-        } catch {
-          return false;
-        }
-      });
-      if (hit.length > 1) return hit;
-    }
+    // A selection within ONE table covers cell-paragraph blocks. readSelection treats a table as a
+    // boundary and excludes its cells, so resolve that case explicitly (powers Ctrl+A-in-a-table →
+    // apply a font to every cell). Multiple cells → those cells; otherwise fall through.
+    const cells = this.selectedTableCells();
+    if (cells.length > 1) return cells;
+    const model = this.selectionModel();
+    if (model && model.isMultiBlock) return model.blocks.map((b) => b.el);
     return this.activeBlock ? [this.activeBlock] : [];
+  }
+
+  /** The cell-paragraph blocks a non-collapsed selection covers when it lies within a SINGLE table
+   *  (else []). Used so a whole-table selection (Ctrl+A inside a cell) formats every cell. */
+  private selectedTableCells(): HTMLElement[] {
+    const sel = typeof window !== "undefined" ? window.getSelection() : null;
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return [];
+    const range = sel.getRangeAt(0);
+    const startCell = this.editableBlockOf(range.startContainer);
+    const table = startCell?.closest("table");
+    if (!table || !this.editRoot.contains(table)) return [];
+    const endCell = this.editableBlockOf(range.endContainer);
+    if (!endCell || endCell.closest("table") !== table) return []; // selection escapes the table
+    return Array.from(table.querySelectorAll<HTMLElement>(EDITABLE_SELECTOR))
+      .filter((c) => range.intersectsNode(c));
+  }
+
+  /** Select-All for the single contenteditable root: from inside a TABLE, select that table's cell
+   *  paragraphs; otherwise select all BODY blocks (tables excluded — a v1 selection boundary). */
+  private selectAllBlocks(active: HTMLElement | null): void {
+    if (typeof window === "undefined") return;
+    const table = active?.closest("table");
+    const targets = table
+      ? Array.from(table.querySelectorAll<HTMLElement>(EDITABLE_SELECTOR))
+      : this.editableList().filter((b) => !b.closest("table"));
+    if (targets.length === 0) return;
+    const sel = window.getSelection();
+    if (!sel) return;
+    const range = document.createRange();
+    range.setStart(targets[0], 0);
+    const last = targets[targets.length - 1];
+    range.setEnd(last, last.childNodes.length);
+    sel.removeAllRanges();
+    sel.addRange(range);
   }
 
   /** The selection's span within `block`, clipped to the block (for inline ops across blocks):
    *  the first block runs selection-start→end-of-block, middle blocks are whole, the last block
-   *  runs start-of-block→selection-end. Returns null for a whole-block apply. */
+   *  runs start-of-block→selection-end. Returns null for a whole-block apply.
+   *
+   *  Offsets are mapped DOM→COMMITTED: the session trims leading/trailing whitespace (e.g. an empty
+   *  paragraph renders a placeholder space, and freshly-typed text lands after it), so a raw DOM
+   *  offset would overshoot the committed run and the op would be dropped — this is exactly why a
+   *  multi-block Bold over just-typed lines used to skip the last block. Clamping to the committed
+   *  length, and returning null when the selection covers the whole committed content, makes the
+   *  common "select these paragraphs → Bold" gesture format every block including the last. */
   private blockSpanForSelection(block: HTMLElement): { start: number; length: number } | null {
     const sel = typeof window !== "undefined" ? window.getSelection() : null;
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
     const range = sel.getRangeAt(0);
     const hasStart = block.contains(range.startContainer);
     const hasEnd = block.contains(range.endContainer);
-    if (hasStart && hasEnd) return selectionSpanIn(block);
-    const contentLen = blockContentText(block).length;
+    const content = blockContentText(block);
+    const committedLen = content.trim().length;
+    const toCommitted = (domOffset: number): number => toCommittedOffset(content, domOffset);
+    // A span covering the block's entire committed content is a whole-block apply (null): robust,
+    // offset-free, and the common case. Otherwise return the trimmed-clamped partial span.
+    const spanOrWhole = (start: number, end: number): { start: number; length: number } | null =>
+      start <= 0 && end >= committedLen ? null : { start, length: Math.max(0, end - start) };
+    if (hasStart && hasEnd) {
+      const s = selectionSpanIn(block);
+      if (!s) return null;
+      return spanOrWhole(toCommitted(s.start), toCommitted(s.start + s.length));
+    }
     if (hasStart) {
-      const start = contentOffsetOf(block, range.startContainer, range.startOffset);
-      return { start, length: Math.max(0, contentLen - start) };
+      return spanOrWhole(toCommitted(contentOffsetOf(block, range.startContainer, range.startOffset)), committedLen);
     }
     if (hasEnd) {
-      const end = contentOffsetOf(block, range.endContainer, range.endOffset);
-      return { start: 0, length: end };
+      return spanOrWhole(0, toCommitted(contentOffsetOf(block, range.endContainer, range.endOffset)));
     }
-    return { start: 0, length: contentLen }; // fully-spanned middle block
+    return null; // fully-spanned middle block → whole-block apply
+  }
+
+  /** Clamp a content-offset span (from `selectionSpanIn` or the `lastSelection` cache) to the
+   *  committed run, returning null for a whole-block (offset-free) apply. Without this, selecting a
+   *  freshly-typed line — whose DOM keeps a trailing placeholder space — yields a span one longer
+   *  than the committed run, so the engine's `ApplyFormat` overshoots and silently no-ops (the S-1
+   *  company-name font wouldn't apply). Used by the single-block format paths. */
+  private clampSpanToCommitted(
+    block: HTMLElement,
+    span: { start: number; length: number } | null,
+  ): { start: number; length: number } | null {
+    if (!span) return null;
+    const content = blockContentText(block);
+    const committedLen = content.trim().length;
+    const start = toCommittedOffset(content, span.start);
+    const end = toCommittedOffset(content, span.start + span.length);
+    if (end <= start) return null;
+    if (start <= 0 && end >= committedLen) return null; // whole block → robust offset-free apply
+    return { start, length: end - start };
   }
 
   /** Apply an inline ApplyFormat op to each block's slice of the selection, then re-render.
    *  Returns false (caller falls back to the single-block path) for a 1-block selection. */
   private applyInlineOpAcrossBlocks(blocks: HTMLElement[], op: object): boolean {
     if (blocks.length <= 1) return false;
+    const startIdx = this.blockIndex(blocks[0]);
+    const endIdx = this.blockIndex(blocks[blocks.length - 1]);
     const targets = blocks.map((b) => {
       const unid = b.getAttribute("data-anchor");
       return { block: b, fullId: unid ? this.unidToFullId.get(unid) : undefined, span: this.blockSpanForSelection(b) };
     });
-    for (const t of targets) {
-      if (!t.fullId || (t.span && t.span.length === 0)) continue;
-      const synced = this.syncBlock(t.block, t.fullId);
-      this.exports.DocxSessionBridge.ApplyFormat(
-        this.handle, synced, t.span ? JSON.stringify(t.span) : "", JSON.stringify(op),
-      );
-    }
+    // One atomic undo for the whole multi-block format (parseEdit records each op into the group).
+    this.group(() => {
+      for (const t of targets) {
+        if (!t.fullId || (t.span && t.span.length === 0)) continue;
+        const synced = this.syncBlock(t.block, t.fullId);
+        this.parseEdit(this.exports.DocxSessionBridge.ApplyFormat(
+          this.handle, synced, t.span ? JSON.stringify(t.span) : "", JSON.stringify(op),
+        ));
+      }
+    });
     this.remount();
+    this.restoreMultiBlockSelection(startIdx, endIdx); // keep the selection so commands can chain
     return true;
+  }
+
+  /** Re-establish a native selection spanning editable blocks [startIdx..endIdx] after a remount, so
+   *  a multi-block format leaves the same paragraphs selected and the next command applies to all of
+   *  them (no re-select). Indices are stable: a format op never adds/removes blocks. */
+  private restoreMultiBlockSelection(startIdx: number, endIdx: number): void {
+    if (typeof window === "undefined" || startIdx < 0 || endIdx <= startIdx) return;
+    const list = this.editableList();
+    const first = list[startIdx];
+    const last = list[endIdx];
+    if (!first || !last) return;
+    const sel = window.getSelection();
+    if (!sel) return;
+    const range = document.createRange();
+    range.setStart(first, 0);
+    range.setEnd(last, last.childNodes.length);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    this.activeBlock = first;
   }
 
   /** Apply a whole-block (paragraph-level) op to each selected block, then re-render.
    *  Returns false for a 1-block selection (caller uses the single-block path). */
   private applyParagraphOpAcrossBlocks(blocks: HTMLElement[], run: (fullId: string) => string): boolean {
     if (blocks.length <= 1) return false;
+    const startIdx = this.blockIndex(blocks[0]);
+    const endIdx = this.blockIndex(blocks[blocks.length - 1]);
     const targets = blocks.map((b) => {
       const unid = b.getAttribute("data-anchor");
       return { block: b, fullId: unid ? this.unidToFullId.get(unid) : undefined };
     });
-    for (const t of targets) {
-      if (!t.fullId) continue;
-      const synced = this.syncBlock(t.block, t.fullId);
-      run(synced);
-    }
+    // One atomic undo for the whole multi-block paragraph op (parseEdit records each into the group).
+    this.group(() => {
+      for (const t of targets) {
+        if (!t.fullId) continue;
+        const synced = this.syncBlock(t.block, t.fullId);
+        this.parseEdit(run(synced));
+      }
+    });
     this.remount();
+    this.restoreMultiBlockSelection(startIdx, endIdx); // keep the selection so commands can chain
     return true;
   }
 
@@ -1115,7 +1673,9 @@ export class DocxEditor {
     let fullId = this.unidToFullId.get(unid);
     if (!fullId) return;
 
-    const span = selectionSpanIn(block);
+    const raw = selectionSpanIn(block);
+    const span = this.clampSpanToCommitted(block, raw);
+    const caret = raw ? null : caretOffsetIn(block);
     const on = value ?? !selectionHasFormat(key, block);
     // Super/subscript map to the single-valued w:vertAlign; the rest are boolean toggles.
     const op =
@@ -1134,8 +1694,27 @@ export class DocxEditor {
     if (!res.success) return;
     if (this.affectsList(res)) { this.remount(this.blockIndex(block), false); return; }
     const fresh = this.swapBlock(block, unid, res.modified?.[0]);
-    if (fresh && span) selectRange(fresh, span.start, span.length);
-    else fresh?.focus();
+    this.restoreSingleBlockSelection(fresh, span, raw, caret);
+  }
+
+  /** After a single-block format re-render, keep the selection alive so commands chain: the partial
+   *  span if there was one, else the whole block when a covering selection was applied, else just
+   *  focus (a collapsed caret stays collapsed). */
+  private restoreSingleBlockSelection(
+    fresh: HTMLElement | null,
+    span: { start: number; length: number } | null,
+    hadSelection: { start: number; length: number } | null,
+    caretOffset: number | null = null,
+  ): void {
+    if (!fresh) return;
+    if (span) selectRange(fresh, span.start, span.length);
+    else if (hadSelection) selectWholeBlock(fresh);
+    // A collapsed caret: place a REAL caret back in the block (not just focus()). focus() alone
+    // leaves the selection anchored outside the block, so a chained command (e.g. setAlignment then
+    // Bold) reads stale state and no-ops — restoring the caret lets inline ops chain after a
+    // paragraph-level op.
+    else if (caretOffset != null) placeCaretAtOffset(fresh, caretOffset);
+    else fresh.focus();
   }
 
   /**
@@ -1154,8 +1733,10 @@ export class DocxEditor {
     if (!fullId) return;
     // Use the live selection; if the font-size combobox stole focus and collapsed it, fall back to
     // the last real selection cached for this block so a sub-range still sizes (finding 3).
-    let span = selectionSpanIn(block);
-    if (!span && this.lastSelection && this.lastSelection.unid === unid) span = this.lastSelection.span;
+    let rawSel = selectionSpanIn(block);
+    if (!rawSel && this.lastSelection && this.lastSelection.unid === unid) rawSel = this.lastSelection.span;
+    const span = this.clampSpanToCommitted(block, rawSel);
+    const caret = rawSel ? null : caretOffsetIn(block);
     fullId = this.syncBlock(block, fullId);
     const res = this.parseEdit(
       this.exports.DocxSessionBridge.ApplyFormat(
@@ -1168,8 +1749,7 @@ export class DocxEditor {
     if (!res.success) return;
     if (this.affectsList(res)) { this.remount(this.blockIndex(block), false); return; }
     const fresh = this.swapBlock(block, unid, res.modified?.[0]);
-    if (fresh && span) selectRange(fresh, span.start, span.length);
-    else fresh?.focus();
+    this.restoreSingleBlockSelection(fresh, span, rawSel, caret);
   }
 
   /**
@@ -1188,8 +1768,10 @@ export class DocxEditor {
     if (!unid) return;
     let fullId = this.unidToFullId.get(unid);
     if (!fullId) return;
-    let span = selectionSpanIn(block);
-    if (!span && this.lastSelection && this.lastSelection.unid === unid) span = this.lastSelection.span;
+    let rawSel = selectionSpanIn(block);
+    if (!rawSel && this.lastSelection && this.lastSelection.unid === unid) rawSel = this.lastSelection.span;
+    const span = this.clampSpanToCommitted(block, rawSel);
+    const caret = rawSel ? null : caretOffsetIn(block);
     fullId = this.syncBlock(block, fullId);
     const res = this.parseEdit(
       this.exports.DocxSessionBridge.ApplyFormat(
@@ -1202,8 +1784,7 @@ export class DocxEditor {
     if (!res.success) return;
     if (this.affectsList(res)) { this.remount(this.blockIndex(block), false); return; }
     const fresh = this.swapBlock(block, unid, res.modified?.[0]);
-    if (fresh && span) selectRange(fresh, span.start, span.length);
-    else fresh?.focus();
+    this.restoreSingleBlockSelection(fresh, span, rawSel, caret);
   }
 
   /** Set paragraph alignment (left/center/right/justify) on the active block. */
@@ -1240,10 +1821,63 @@ export class DocxEditor {
   }
 
   /**
+   * Insert a tab at the caret in the active paragraph, ensuring a tab stop of `alignment` on it
+   * (for "right", at the section's right content margin). Lets a single line hold left text + a tab
+   * + right-aligned text on one baseline — a filing masthead's "As filed… / Registration No." row —
+   * instead of faking it with a two-column table. Inert inside a table cell.
+   */
+  insertTab(alignment: "left" | "center" | "right" = "right"): void {
+    const block = this.activeBlock;
+    if (this.closed || !block || block.closest("table")) return;
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+    const idx = this.blockIndex(block);
+    const rawOffset = caretOffsetIn(block); // capture before commit
+    fullId = this.syncBlock(block, fullId); // flush any uncommitted typing first
+    const offset = rawOffset == null
+      ? blockContentText(block).trim().length // no caret resolved → end of the committed text
+      : trimmedSplitOffset(block, rawOffset);
+    const res = this.parseEdit(this.exports.DocxSessionBridge.InsertTab(this.handle, fullId, offset, alignment));
+    if (!res.success) return;
+    // Re-render this paragraph; put the caret at its end so the user types the right-side text
+    // after the tab.
+    this.remount(idx, true);
+  }
+
+  /**
    * Insert a `rows`×`cols` table after the active block. `options.cellContents` (row-major
    * markdown) seeds the cells, `options.borderless` makes an invisible layout table, and
    * `options.cellAlignment` aligns every cell. Re-renders fully (tables need document context).
    */
+  /** The run font family (primary family, unquoted) the active block renders in, so an inserted
+   *  table can match the surrounding document instead of the blank-doc default. If the anchor block
+   *  is empty (e.g. a horizontal-rule paragraph), borrow the nearest non-empty editable block's font
+   *  so a table inserted next to a rule still matches the body. */
+  private resolveInheritedFont(block: HTMLElement): string | undefined {
+    if (typeof getComputedStyle !== "function") return undefined;
+    const primary = (el: HTMLElement): string | undefined => {
+      // The run font lives on the rendered <span> (w:rFonts), not the <p> (which keeps the
+      // paragraph-style default) — read the first run span, falling back to the block itself.
+      const target = (el.querySelector("span") as HTMLElement | null) ?? el;
+      const fam = getComputedStyle(target).fontFamily;
+      if (!fam) return undefined;
+      const first = fam.split(",")[0].trim().replace(/^["']|["']$/g, "");
+      return first || undefined;
+    };
+    if (blockContentText(block).trim().length > 0) return primary(block);
+    const list = this.editableList();
+    const i = list.indexOf(block);
+    for (let d = 1; d < list.length; d++) {
+      const prev = i - d >= 0 ? list[i - d] : null;
+      const next = i + d < list.length ? list[i + d] : null;
+      for (const cand of [prev, next])
+        if (cand && blockContentText(cand).trim().length > 0) return primary(cand);
+    }
+    return primary(block);
+  }
+
   insertTable(
     rows: number,
     cols: number,
@@ -1252,7 +1886,9 @@ export class DocxEditor {
       cellContents?: string[];
       cellAlignment?: EditorAlignment;
       columnWidths?: number[];
+      cellFontFamily?: string;
     },
+    position?: "above" | "below",
   ): void {
     const block = this.activeBlock;
     if (this.closed || !block) return;
@@ -1267,14 +1903,20 @@ export class DocxEditor {
     // a reachable paragraph below (S-1 smoke-test findings 2 + 4). Otherwise insert after.
     const emptyHere =
       !block.closest("table") && blockContentText(block).replace(/[\s ]+/g, "").length === 0;
+    // An explicit position wins (the demo's Above/Below selector — a table can go ABOVE a non-empty
+    // block); otherwise keep the empty-paragraph smart default.
+    const where = position ? (position === "above" ? "before" : "after") : emptyHere ? "before" : "after";
+    // Inherit the document font so cells aren't stranded on the blank-doc default (Calibri).
+    const cellFontFamily = options?.cellFontFamily ?? this.resolveInheritedFont(block);
+    const merged = cellFontFamily ? { ...options, cellFontFamily } : options;
     const res = this.parseEdit(
       this.exports.DocxSessionBridge.InsertTable(
         this.handle,
         fullId,
-        emptyHere ? "before" : "after",
+        where,
         rows,
         cols,
-        options ? JSON.stringify(options) : "",
+        merged ? JSON.stringify(merged) : "",
       ),
     );
     if (!res.success) return;
@@ -1329,11 +1971,18 @@ export class DocxEditor {
    * `deltaTwips` (default ±720 = 0.5"), clamped at 0.
    */
   indent(deltaTwips = 720): void {
-    if (this.activeBlock && isListBlock(this.activeBlock)) {
+    const block = this.activeBlock;
+    if (block && isListBlock(block)) {
       this.setListLevel(deltaTwips >= 0 ? 1 : -1);
       return;
     }
     this.applyParagraphFormat({ indentDelta: deltaTwips });
+  }
+
+  /** Set absolute left and/or signed first-line indent (twips). firstLine >0 = first-line indent,
+   *  <0 = hanging, 0 = clear. Multi-block aware (applies to every selected block). */
+  setIndent(opts: { left?: number; firstLine?: number }): void {
+    this.applyParagraphFormat({ leftIndent: opts.left, firstLineIndent: opts.firstLine });
   }
 
   /** Change the active list item's nesting level by `delta` (+1 deeper, −1 shallower). */
@@ -1344,13 +1993,27 @@ export class DocxEditor {
     if (!unid) return;
     let fullId = this.unidToFullId.get(unid);
     if (!fullId) return;
+    const caret = caretOffsetIn(block); // capture BEFORE the op, like format()/splitAtCaret()
     const idx = this.blockIndex(block);
     fullId = this.syncBlock(block, fullId);
     const res = this.parseEdit(this.exports.DocxSessionBridge.SetListLevel(this.handle, fullId, delta));
     if (!res.success) return;
     // A level change ripples through the whole list's numbering — re-render with full document
-    // context (a single-block render can't compute nested numbering), keeping the caret in place.
-    this.remount(idx, false);
+    // context (a single-block render can't compute nested numbering). A level change leaves the
+    // item's text unchanged, so restore the caret to where the user was (not offset 0); otherwise a
+    // following Enter splits at the start and the item's text migrates into the next item, so
+    // type → Tab → Enter → type would corrupt the list. Fall back to the line end if there was no
+    // caret (e.g. a button-driven changeListLevel with no live selection).
+    this.remount(idx, caret == null, caret);
+  }
+
+  /**
+   * Change the active list item's outline level: `delta > 0` demotes it deeper (e.g. 1. → 1.1),
+   * `delta < 0` promotes it shallower. The button-driven equivalent of Tab / Shift+Tab for the
+   * legal-numbering outline; a no-op on a non-list block.
+   */
+  changeListLevel(delta: number): void {
+    this.setListLevel(delta);
   }
 
   /** Toggle (or set) page-break-before on the active block. */
@@ -1379,14 +2042,62 @@ export class DocxEditor {
       membership.format.toLowerCase().startsWith(kind === "bullet" ? "bullet" : "decimal");
 
     const idx = this.blockIndex(block); // capture before the op
+    const caret = caretOffsetIn(block); // and the caret, so a full remount keeps it in place
     fullId = this.syncBlock(block, fullId);
     const res = this.parseEdit(
       this.exports.DocxSessionBridge.ApplyListFormat(this.handle, fullId, isThisKind ? "none" : kind),
     );
     if (!res.success) return;
     // Numbering continuation across the list needs whole-document context — re-render fully
-    // (a single-block render would show every numbered item as "1.").
-    this.remount(idx, false);
+    // (a single-block render would show every numbered item as "1."). Toggling list membership
+    // leaves the text unchanged, so restore the caret (not offset 0) — see setListLevel.
+    this.remount(idx, caret == null, caret);
+  }
+
+  /** Apply the built-in legal outline numbering (1. / 1.1 / (a) / (i) …) to the active block — or
+   *  remove it when the block is already a list item. Tab/Shift+Tab change level (existing wiring).
+   *  Multi-block aware (applies to every selected block). */
+  toggleLegalNumbering(): void {
+    const block = this.activeBlock;
+    if (this.closed || !block) return;
+    const blocks = this.selectedBlocks();
+    if (blocks.length > 1) {
+      const startIdx = this.blockIndex(blocks[0]);
+      const endIdx = this.blockIndex(blocks[blocks.length - 1]);
+      this.group(() => {
+        for (const b of blocks) {
+          const unid = b.getAttribute("data-anchor");
+          if (!unid) continue;
+          const fid = this.unidToFullId.get(unid);
+          if (!fid) continue;
+          const synced = this.syncBlock(b, fid);
+          this.parseEdit(this.exports.DocxSessionBridge.ApplyMultilevelNumbering(
+            this.handle, synced, JSON.stringify(DEFAULT_OUTLINE), 0, false));
+        }
+      });
+      this.remount();
+      this.restoreMultiBlockSelection(startIdx, endIdx);
+      return;
+    }
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+    const idx = this.blockIndex(block);
+    const caret = caretOffsetIn(block); // preserve caret across the full remount (see setListLevel)
+    fullId = this.syncBlock(block, fullId);
+    const res = this.parseEdit(
+      isListBlock(block)
+        ? this.exports.DocxSessionBridge.RemoveListMembership(this.handle, fullId)
+        : this.exports.DocxSessionBridge.ApplyMultilevelNumbering(
+            this.handle, fullId, JSON.stringify(DEFAULT_OUTLINE), 0, false),
+    );
+    if (!res.success) return;
+    // Numbering continuation needs whole-document context (a single-block render shows "1." for all).
+    // Numbering doesn't change the text, so keep the caret where it was — otherwise a following
+    // Enter splits at offset 0 and the item's text migrates into the next item (type → #legalNum →
+    // Enter → type would corrupt the list, the way Tab did before).
+    this.remount(idx, caret == null, caret);
   }
 
   /** Clear all paragraph borders (e.g. remove an inserted horizontal rule) on the active block —
@@ -1421,6 +2132,8 @@ export class DocxEditor {
   private applyParagraphFormat(op: {
     alignment?: EditorAlignment;
     indentDelta?: number;
+    leftIndent?: number;
+    firstLineIndent?: number;
     pageBreakBefore?: boolean;
     clearBorders?: boolean;
   }): void {
@@ -1439,6 +2152,8 @@ export class DocxEditor {
     let fullId = this.unidToFullId.get(unid);
     if (!fullId) return;
     const idx = this.blockIndex(block);
+    const raw = selectionSpanIn(block);
+    const caret = raw ? null : caretOffsetIn(block);
     fullId = this.syncBlock(block, fullId);
     const res = this.parseEdit(
       this.exports.DocxSessionBridge.SetParagraphFormat(this.handle, fullId, JSON.stringify(op)),
@@ -1447,7 +2162,8 @@ export class DocxEditor {
     // A border change adds/removes the wrapping border <div>, so a single-block swap can't restructure
     // it correctly — re-render fully (like list edits) so the wrapper appears/disappears cleanly.
     if (this.affectsList(res) || op.clearBorders) { this.remount(idx, false); return; }
-    this.swapBlock(block, unid, res.modified?.[0])?.focus();
+    const fresh = this.swapBlock(block, unid, res.modified?.[0]);
+    this.restoreSingleBlockSelection(fresh, this.clampSpanToCommitted(block, raw), raw, caret);
   }
 
   /** Set the paragraph style of the active block — or of every block in a multi-block selection
@@ -1475,16 +2191,45 @@ export class DocxEditor {
     this.swapBlock(block, unid, res.modified?.[0])?.focus();
   }
 
-  /** Undo the last edit (re-renders the document). */
-  undo(): void {
-    if (this.closed) return;
-    if (this.exports.DocxSessionBridge.Undo(this.handle)) this.remount();
+  /** Block index to re-focus after an undo/redo remount so CONSECUTIVE keyboard history shortcuts
+   *  keep working: the root keydown handler dispatches only when keydownBlock(ev) resolves a block,
+   *  but a history remount with focusIndex -1 leaves the caret on the bare host with activeBlock
+   *  null, so the next Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y is silently dropped. Re-focus the pre-op active
+   *  block when there is one (remount clamps the index to the new block count), else the first
+   *  editable block. */
+  private historyFocusIndex(): number {
+    const idx = this.activeBlock ? this.blockIndex(this.activeBlock) : -1;
+    return idx >= 0 ? idx : 0;
   }
 
-  /** Redo the last undone edit (re-renders the document). */
+  /** Undo the last edit GROUP (re-renders the document). A compound edit (multi-block format,
+   *  cross-block delete/type-over) was recorded as one group of N session ops, so it reverses in a
+   *  single call. Falls back to a single session Undo for any ungrouped history. */
+  undo(): void {
+    if (this.closed) return;
+    const focus = this.historyFocusIndex();
+    const n = this.undoGroups.pop();
+    if (n === undefined) {
+      if (this.exports.DocxSessionBridge.Undo(this.handle)) this.remount(focus, false, null, false);
+      return;
+    }
+    let undone = 0;
+    for (let i = 0; i < n; i++) if (this.exports.DocxSessionBridge.Undo(this.handle)) undone++;
+    if (undone > 0) { this.redoGroups.push(undone); this.remount(focus, false, null, false); }
+  }
+
+  /** Redo the last undone edit GROUP (re-renders the document). */
   redo(): void {
     if (this.closed) return;
-    if (this.exports.DocxSessionBridge.Redo(this.handle)) this.remount();
+    const focus = this.historyFocusIndex();
+    const n = this.redoGroups.pop();
+    if (n === undefined) {
+      if (this.exports.DocxSessionBridge.Redo(this.handle)) this.remount(focus, false, null, false);
+      return;
+    }
+    let redone = 0;
+    for (let i = 0; i < n; i++) if (this.exports.DocxSessionBridge.Redo(this.handle)) redone++;
+    if (redone > 0) { this.undoGroups.push(redone); this.remount(focus, false, null, false); }
   }
 
   /** Which inline formats the current selection carries — for ribbon button highlighting. */
@@ -1518,7 +2263,7 @@ export class DocxEditor {
 
   /** Editable blocks in document order. */
   private editableList(): HTMLElement[] {
-    return Array.from(this.editRoot.querySelectorAll<HTMLElement>('[data-anchor][contenteditable="true"]'));
+    return Array.from(this.editRoot.querySelectorAll<HTMLElement>(EDITABLE_SELECTOR));
   }
 
   private blockIndex(el: HTMLElement): number {
@@ -1540,7 +2285,14 @@ export class DocxEditor {
    * `focusIndex` (caret at start, or end if `caretAtEnd`) — addressed by index because a
    * block's content-hashed unid changes across the save/reproject a remount performs.
    */
-  private remount(focusIndex = -1, caretAtEnd = false): void {
+  private remount(focusIndex = -1, caretAtEnd = false, caretOffset: number | null = null, flushDirty = true): void {
+    // Flush any block still holding uncommitted typed text into the session BEFORE re-rendering from
+    // it; otherwise a structural edit's full re-render silently wipes a sibling block the user typed
+    // into but never synced (e.g. the last clause typed before formatting an earlier list caption —
+    // the editor commits a block on a collapsed caret move-away, but a non-collapsed selection or a
+    // focus-first click can leave it uncommitted). Undo/redo opt out: they must not commit pending
+    // typing as a new edit before reversing history.
+    if (flushDirty) this.commitAllDirty();
     this.refreshAnchorMap();
     const bytes = this.exports.DocxSessionBridge.Save(this.handle);
     const fullHtml = this.exports.DocumentConverter.ConvertDocxToHtmlComplete(
@@ -1554,7 +2306,15 @@ export class DocxEditor {
       const target = blocks[Math.min(focusIndex, blocks.length - 1)];
       if (target) {
         this.activeBlock = target;
-        placeCaretAtOffset(target, caretAtEnd ? (target.textContent ?? "").length : 0);
+        // Prefer an explicit content offset (clamped to the re-rendered block) so a caller that
+        // captured the caret before the op can keep it in place; else end (caretAtEnd) or start.
+        const offset =
+          caretOffset != null
+            ? Math.min(caretOffset, blockContentText(target).length)
+            : caretAtEnd
+              ? (target.textContent ?? "").length
+              : 0;
+        placeCaretAtOffset(target, offset);
       }
     }
   }

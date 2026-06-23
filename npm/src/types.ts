@@ -978,6 +978,7 @@ export interface DocxodusWasmExports {
     SplitParagraph: (handle: number, anchor: string, offset: number) => string;
     MergeParagraphs: (handle: number, first: string, second: string) => string;
     InsertHorizontalRule: (handle: number, anchor: string, pos: string, ruleJson: string) => string;
+    InsertTab: (handle: number, anchor: string, characterOffset: number, alignment: string) => string;
     InsertTable: (handle: number, anchor: string, pos: string, rows: number, cols: number, optionsJson: string) => string;
     InsertTableRow: (handle: number, cellAnchor: string, pos: string) => string;
     InsertTableColumn: (handle: number, cellAnchor: string, pos: string) => string;
@@ -990,6 +991,7 @@ export interface DocxodusWasmExports {
     SetListLevel: (handle: number, anchor: string, delta: number) => string;
     RemoveListMembership: (handle: number, anchor: string) => string;
     ApplyListFormat: (handle: number, anchor: string, kind: string) => string;
+    ApplyMultilevelNumbering: (handle: number, anchor: string, levelsJson: string, level: number, restart: boolean) => string;
     ReplaceCellContent: (handle: number, anchor: string, md: string) => string;
     RawGetXml: (handle: number, anchor: string) => string;
     RawInsertXml: (handle: number, anchor: string, pos: string, xml: string) => string;
@@ -1151,6 +1153,10 @@ export interface ParagraphFormatOp {
   alignment?: "left" | "center" | "right" | "justify";
   /** Adjust the left indent by this many twips (1440 = 1 inch); clamped at 0. */
   indentDelta?: number;
+  /** Absolute left indent in twips (w:ind/@w:left). Omit to leave unchanged. */
+  leftIndent?: number;
+  /** Signed special indent in twips: >0 first-line, <0 hanging, 0 clears both. Omit = unchanged. */
+  firstLineIndent?: number;
   /** Page-break-before: true to add, false to remove. */
   pageBreakBefore?: boolean;
   /** Top paragraph border (`w:pBdr/w:top`). Omit to leave unchanged. */
@@ -1159,6 +1165,23 @@ export interface ParagraphFormatOp {
   bottomBorder?: ParagraphBorderEdge;
   /** Remove all paragraph borders before applying any top/bottom border in this op. */
   clearBorders?: boolean;
+}
+
+/** One level of a configurable multi-level numbering scheme for `DocxSession.applyMultilevelNumbering`. */
+export interface NumberingLevel {
+  format: "decimal" | "lowerLetter" | "upperLetter" | "lowerRoman" | "upperRoman" | "bullet";
+  /** w:lvlText template, e.g. "%1.", "%1.%2", "(%3)" (or the literal glyph for bullet). */
+  levelText: string;
+  /** Starting number (default 1). */
+  start?: number;
+  /** Left indent in twips; default 720*(level+1). */
+  indentLeft?: number;
+  /** Hanging indent in twips; default 360. */
+  hanging?: number;
+  /** Level justification; default left. */
+  justify?: "left" | "center" | "right";
+  /** Font for a bullet glyph; only meaningful for format: "bullet". */
+  bulletFont?: string;
 }
 
 /** Options for `DocxSession.insertTable`. */
@@ -1173,6 +1196,10 @@ export interface TableInsertOptions {
    *  whose length != the column count is rejected. Drives unequal layouts like the S-1's
    *  wide-left / narrow-right filing-header row. */
   columnWidths?: number[];
+  /** Run font family stamped on every cell so the table matches the surrounding document font
+   *  instead of the blank-doc default. Empty cells carry it on the paragraph mark so typing
+   *  inherits it. Omit/"" ⇒ cells inherit docDefaults. The editor passes this automatically. */
+  cellFontFamily?: string;
 }
 
 export interface DocxSessionSettings {
