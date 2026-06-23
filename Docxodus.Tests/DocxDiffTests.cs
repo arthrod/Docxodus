@@ -161,6 +161,65 @@ public class DocxDiffTests
     }
 
     [Fact]
+    public void GetRevisions_TableColumnChange_ReportsWholeTableReplace()
+    {
+        // A column add/remove bails the MARKUP renderer to a whole-table del(left)+ins(right) fallback
+        // (see Compare_DeletedTableColumn_RejectRestoresTheColumn). GetRevisions must mirror that: it
+        // previously returned ZERO revisions for a column-count change (the per-cell path drops the
+        // surplus cell), diverging from the WmlComparer oracle — which reports a Deleted + Inserted pair —
+        // and silently hiding the change from revision consumers even though the markup tracks it.
+        var left = TableDoc(new[] { "a", "b" });          // 1 row, 2 columns
+        var right = TableDoc(new[] { "a", "b", "c" });    // 1 row, 3 columns — a column added
+
+        var revisions = DocxDiff.GetRevisions(left, right);
+
+        Assert.Contains(revisions, r => r.Type == DocxDiffRevisionType.Deleted);
+        Assert.Contains(revisions, r => r.Type == DocxDiffRevisionType.Inserted);
+    }
+
+    // A document whose body paragraph has lead text followed by an INLINE content control (w:sdt) wrapping
+    // a run — the shape that exposed the unwrapped-sdt-insertion bug.
+    private static WmlDocument DocWithInlineSdt(string leadText, string sdtText)
+    {
+        using var stream = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(stream, WordprocessingDocumentType.Document))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+            var sdt = new SdtRun(
+                new SdtProperties(new SdtId { Val = 9001 }),
+                new SdtContentRun(new Run(new Text(sdtText) { Space = SpaceProcessingModeValues.Preserve })));
+            mainPart.Document = new Document(new Body(
+                new Paragraph(new Run(new Text(leadText)), sdt)));
+            var stylesPart = mainPart.AddNewPart<StyleDefinitionsPart>();
+            stylesPart.Styles = new Styles(new DocDefaults(
+                new RunPropertiesDefault(new RunPropertiesBaseStyle(
+                    new RunFonts { Ascii = "Calibri" }, new FontSize { Val = "22" })),
+                new ParagraphPropertiesDefault()));
+            mainPart.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+            doc.Save();
+        }
+        return new WmlDocument("test.docx", stream.ToArray());
+    }
+
+    [Fact]
+    public void Compare_InsertedContentControl_RejectStripsTheInsertedText()
+    {
+        // A run inserted INSIDE a w:sdt (content control) must be wrapped in w:ins, else RejectRevisions
+        // (which strips w:ins/w:del) leaves it — violating the core contract reject ≡ left and silently
+        // retaining content the user rejected. The markup renderer wrapped a w:sdt's DIRECT children but
+        // not the runs nested under w:sdtContent, so inserted content-control text leaked through on reject.
+        var left = Doc("Hello world");
+        var right = DocWithInlineSdt("Hello world", " controlled text");
+
+        var result = DocxDiff.Compare(left, right);
+        var rejected = RevisionProcessor.RejectRevisions(result);
+        var accepted = RevisionProcessor.AcceptRevisions(result);
+
+        Assert.Equal(BodyTexts(left), BodyTexts(rejected));    // reject ⇒ left (sdt text removed)
+        Assert.Equal(BodyTexts(right), BodyTexts(accepted));   // accept ⇒ right (sdt text kept)
+    }
+
+    [Fact]
     public void Compare_IdenticalDocuments_HasNoTrackedChanges()
     {
         var doc = Doc("Unchanged paragraph one.", "Unchanged paragraph two.");
