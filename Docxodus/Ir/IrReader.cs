@@ -2140,9 +2140,11 @@ internal static class IrReader
                 if (retain)
                     sources[part.Uri] = part.GetXDocument();
 
-                var kind = ResolveHeaderFooterKind(main, body, part, referenceName);
+                var references = CollectHeaderFooterReferences(main, body, part, referenceName);
+                var kind = references.Count > 0 ? references[0].Kind : IrHeaderFooterKind.Default;
                 result.Add(new IrHeaderFooter(scopeName, kind,
-                    new IrScope(scopeName, IrNodeList.From(blocks), part.Uri)));
+                    new IrScope(scopeName, IrNodeList.From(blocks), part.Uri))
+                    { References = references });
             }
             catch (Exception e) when (IsTolerableRegistryException(e))
             {
@@ -2153,29 +2155,36 @@ internal static class IrReader
     }
 
     /// <summary>
-    /// Resolve a header/footer part's occurrence kind from the body section properties. The first
-    /// <paramref name="referenceName"/> reference (across all body <c>w:sectPr</c>) whose <c>@r:id</c>
-    /// resolves to <paramref name="part"/> wins: <c>@w:type</c> <c>first</c>/<c>even</c> map to the
-    /// matching kind, everything else (including <c>default</c> and absent) to
-    /// <see cref="IrHeaderFooterKind.Default"/>. A part no section references → Default.
+    /// Collect every body <c>w:sectPr</c> reference to a header/footer part, in section document order:
+    /// each <paramref name="referenceName"/> reference whose <c>@r:id</c> resolves to
+    /// <paramref name="part"/> yields one <see cref="IrHeaderFooterRef"/> carrying the referencing
+    /// section's document-order ordinal and the reference's <c>@w:type</c> kind (<c>first</c>/<c>even</c>
+    /// map to the matching kind, everything else — including <c>default</c> and absent — to
+    /// <see cref="IrHeaderFooterKind.Default"/>). A part no section references → empty list; the part's
+    /// display <see cref="IrHeaderFooter.Kind"/> is the first entry's kind (or Default when empty).
     /// </summary>
-    private static IrHeaderFooterKind ResolveHeaderFooterKind(
+    private static IrNodeList<IrHeaderFooterRef> CollectHeaderFooterReferences(
         MainDocumentPart main, XElement body, OpenXmlPart part, XName referenceName)
     {
         string? relId = null;
         try { relId = main.GetIdOfPart(part); }
-        catch (Exception e) when (IsTolerableRegistryException(e)) { return IrHeaderFooterKind.Default; }
+        catch (Exception e) when (IsTolerableRegistryException(e)) { return IrNodeList.Empty<IrHeaderFooterRef>(); }
 
+        var refs = new List<IrHeaderFooterRef>();
+        int sectionIndex = 0;
         foreach (var sectPr in body.Descendants(W + "sectPr"))
+        {
             foreach (var reference in sectPr.Elements(referenceName))
                 if ((string?)reference.Attribute(R + "id") == relId)
-                    return (string?)reference.Attribute(W + "type") switch
+                    refs.Add(new IrHeaderFooterRef(sectionIndex, (string?)reference.Attribute(W + "type") switch
                     {
                         "first" => IrHeaderFooterKind.First,
                         "even" => IrHeaderFooterKind.Even,
                         _ => IrHeaderFooterKind.Default,
-                    };
-        return IrHeaderFooterKind.Default;
+                    }));
+            sectionIndex++;
+        }
+        return IrNodeList.From(refs);
     }
 
     /// <summary>

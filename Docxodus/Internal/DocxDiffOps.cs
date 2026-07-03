@@ -137,6 +137,8 @@ internal static class DocxDiffOps
             settings.FormatComparison = fmt.GetInt32() == 1
                 ? DocxDiffFormatComparison.Full
                 : DocxDiffFormatComparison.ModeledOnly;
+        if (TryGetBool(root, "compareHeadersFooters", out var compareHf))
+            settings.CompareHeadersFooters = compareHf;
 
         return settings;
     }

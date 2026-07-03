@@ -672,6 +672,23 @@ public sealed class DocxDiffSettings
     /// </summary>
     public bool PreAcceptInputRevisions { get; set; }
 
+    /// <summary>
+    /// When true (the DEFAULT — matching Word Compare's "Headers and footers" comparison setting, which
+    /// is also on by default), header/footer stories are compared: each section's effective
+    /// default/first/even header and footer stories pair across the two documents (Word's
+    /// previous-section inheritance rule applies), a changed story is rebuilt in the output with native
+    /// <c>w:ins</c>/<c>w:del</c> markup inside its header/footer part, a right-only story is added (its
+    /// content inserted), a left-only story's content is marked deleted — so the round-trip contract
+    /// (<c>accept ≡ right</c>, <c>reject ≡ left</c> at the per-block text level) extends to header/footer
+    /// scopes. <see cref="DocxDiff.GetRevisions"/> reports hdr/ftr-anchored revisions in
+    /// <see cref="DocxDiffRevisionGranularity.Fine"/> mode (the compatible mode excludes them — the
+    /// legacy comparer's revision set has none), and <see cref="DocxDiff.GetEditScriptJson"/> carries a
+    /// <c>headerFooterOps</c> array. When false, header/footer scopes are ignored — the pre-campaign
+    /// behavior: the output carries the left document's headers/footers verbatim and a header/footer
+    /// change is silently invisible.
+    /// </summary>
+    public bool CompareHeadersFooters { get; set; } = true;
+
     /// <summary>Map this public settings object onto the internal <c>IrDiffSettings</c>.</summary>
     internal IrDiffSettings ToIrDiffSettings()
     {
@@ -717,6 +734,7 @@ public sealed class DocxDiffSettings
             FormatComparison = FormatComparison == DocxDiffFormatComparison.Full
                 ? IrFormatComparison.Full
                 : IrFormatComparison.ModeledOnly,
+            CompareHeadersFooters = CompareHeadersFooters,
         };
     }
 }

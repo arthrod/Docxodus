@@ -452,6 +452,14 @@ export interface DocxDiffSettings {
   revisionGranularity?: DocxDiffRevisionGranularity;
   /** Run-format comparison policy (default ModeledOnly). */
   formatComparison?: DocxDiffFormatComparison;
+  /**
+   * Compare header/footer stories (default true — Word Compare's own default).
+   * Changed stories get native tracked-changes markup inside their parts;
+   * Fine-mode revisions carry `hdr`/`ftr`-scoped anchors; the edit script
+   * carries `headerFooterOps`. Set false to ignore header/footer scopes (the
+   * pre-campaign behavior: left's headers/footers carried verbatim).
+   */
+  compareHeadersFooters?: boolean;
 }
 
 /**

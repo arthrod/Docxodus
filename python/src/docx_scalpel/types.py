@@ -798,6 +798,11 @@ class DocxDiffSettings:
     move_minimum_word_count: int = 3
     revision_granularity: DocxDiffRevisionGranularity = DocxDiffRevisionGranularity.FINE
     format_comparison: DocxDiffFormatComparison = DocxDiffFormatComparison.MODELED_ONLY
+    #: Compare header/footer stories (default True — Word Compare's own default).
+    #: Changed stories get native tracked-changes markup inside their parts; FINE
+    #: revisions carry hdr/ftr-scoped anchors; the edit script carries
+    #: ``headerFooterOps``. False ignores header/footer scopes entirely.
+    compare_headers_footers: bool = True
 
     def to_wire(self) -> dict[str, Any]:
         """camelCase keys the host's ``DocxDiffOps.ParseSettings`` reads. Only
@@ -827,6 +832,8 @@ class DocxDiffSettings:
             wire["revisionGranularity"] = int(self.revision_granularity)
         if self.format_comparison != DocxDiffFormatComparison.MODELED_ONLY:
             wire["formatComparison"] = int(self.format_comparison)
+        if not self.compare_headers_footers:
+            wire["compareHeadersFooters"] = False
         return wire
 
 

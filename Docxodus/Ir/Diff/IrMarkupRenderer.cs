@@ -180,6 +180,14 @@ internal static class IrMarkupRenderer
                 if (script.NoteOps is { Count: > 0 })
                     RenderNoteScopes(script.NoteOps, state, wDoc, main, wDocRight, settings);
 
+                // Header/footer story markup (2026-07-03 campaign): apply each changed story's edit ops
+                // INSIDE its header/footer part (the output package carries the LEFT parts; a changed
+                // story is rebuilt from its ops with native w:ins/w:del markup, so accept/reject
+                // round-trips header/footer content too). Unchanged stories keep the verbatim carry-over.
+                if (script.HeaderFooterOps is { Count: > 0 })
+                    RenderHeaderFooterScopes(script.HeaderFooterOps, state, main,
+                        wDocRight.MainDocumentPart, settings, streamDoc, rightStream);
+
                 // Note-id renumber pass (M2.6 Task 1): mirror the oracle's ChangeFootnoteEndnoteReferencesToUniqueRange.
                 // Walk the produced body in document order; every footnote/endnote reference gets a sequential id
                 // (body-reference order, base 1), each note DEFINITION is renumbered + reordered to match, and the
@@ -1194,6 +1202,232 @@ internal static class IrMarkupRenderer
                 attr.Remove();
             part.PutXDocument();
         }
+    }
+
+    // ----------------------------------------------------------------- header/footer story markup (2026-07-03)
+
+    /// <summary>
+    /// Apply header/footer story edit ops inside the output package's header/footer parts. A MATCHED
+    /// story (both part URIs set) locates the LEFT part by URI — the output is a left-package clone, so
+    /// left URIs resolve directly — renders its ops through the shared <see cref="RenderBlockOp"/>
+    /// dispatch (story anchors resolve in the shared AnchorIndex; revision ids draw from the same
+    /// <see cref="RenderState"/> counter as the body, staying document-unique), and replaces the part
+    /// root's block-level children. Right-sourced clones inside a story import their media/hyperlink
+    /// relationships into THAT part (header/footer parts own their relationships — the main-part import
+    /// cannot resolve them).
+    /// </summary>
+    private static void RenderHeaderFooterScopes(
+        IReadOnlyList<IrHeaderFooterDiff> hfOps, RenderState state, MainDocumentPart main,
+        MainDocumentPart? rightMain, IrDiffSettings settings,
+        OpenXmlMemoryStreamDocument leftStreamDoc, OpenXmlMemoryStreamDocument rightStreamDoc)
+    {
+        foreach (var diff in hfOps)
+        {
+            if (diff.LeftPartUri is { } leftUri)
+            {
+                // Matched (rebuild with token-level markup) or deleted-only (all content marked w:del —
+                // the part and its reference stay; accept leaves an empty story, Word's own behavior).
+                var part = FindHeaderFooterPart(main, diff.IsHeader, leftUri);
+                if (part is null)
+                    continue; // left part vanished (malformed input) — keep the carry-over
+                ApplyHeaderFooterDiffToPart(diff, part, state, settings, rightMain, leftStreamDoc, rightStreamDoc);
+            }
+            else
+            {
+                InsertHeaderFooterStory(diff, state, main, rightMain, settings, leftStreamDoc, rightStreamDoc);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Render a RIGHT-only (inserted) story: create a fresh header/footer part seeded from the right
+    /// part's root shell, render the all-insert ops into it, attach a <c>w:headerReference</c>/
+    /// <c>w:footerReference</c> (typed by the story's kind) to the output body's sectPr at the story's
+    /// section ordinal, and ensure the visibility flag the story needs — <c>w:titlePg</c> on that sectPr
+    /// for a First story, <c>w:evenAndOddHeaders</c> in the settings part for an Even story (ensured,
+    /// not revision-tracked — sectPr/settings changes are outside w:sectPrChange scope in v1). Accept
+    /// keeps the inserted content; reject strips it, leaving an EMPTY story — text-level ≡ the left's
+    /// absent story, matching Word's own reject behavior for an inserted header.
+    /// </summary>
+    private static void InsertHeaderFooterStory(
+        IrHeaderFooterDiff diff, RenderState state, MainDocumentPart main, MainDocumentPart? rightMain,
+        IrDiffSettings settings, OpenXmlMemoryStreamDocument leftStreamDoc,
+        OpenXmlMemoryStreamDocument rightStreamDoc)
+    {
+        if (rightMain is null || diff.RightPartUri is null)
+            return;
+        var rightPart = FindHeaderFooterPart(rightMain, diff.IsHeader, diff.RightPartUri);
+        var rightRoot = rightPart?.GetXDocument().Root;
+        if (rightRoot is null)
+            return;
+
+        // Locate the target sectPr FIRST — a story that cannot attach must not create an orphan part.
+        // Document-order sectPr enumeration matches the reader's section ordinals. A section ordinal the
+        // output body cannot represent (the section structure itself changed) is skipped: the revisions
+        // surface still reports the story, the markup omission is a documented v1 ceiling.
+        var mainXDoc = main.GetXDocument();
+        var body = mainXDoc.Root?.Element(W.body);
+        if (body is null)
+            return;
+        var sectPrs = body.Descendants(W.sectPr).ToList();
+        if (diff.SectionIndex >= sectPrs.Count)
+            return;
+        var sectPr = sectPrs[diff.SectionIndex];
+
+        OpenXmlPart newPart = diff.IsHeader
+            ? main.AddNewPart<HeaderPart>()
+            : main.AddNewPart<FooterPart>();
+        var newRoot = new XElement(rightRoot.Name, rightRoot.Attributes());
+        var xDoc = newPart.GetXDocument();
+        if (xDoc.Root == null)
+            xDoc.Add(newRoot);
+        else
+            xDoc.Root.ReplaceWith(newRoot);
+
+        int clonesBefore = state.RightSourcedClones.Count;
+        var blocks = new List<XElement>();
+        foreach (var op in diff.Ops)
+            RenderBlockOp(op, state, blocks);
+        if (settings is { RenderMoves: true, SimplifyMoveMarkup: true })
+            foreach (var b in blocks)
+                SimplifyMoveMarkup(b);
+        newRoot.Add(blocks);
+
+        ImportStorySourcedRelationships(diff, state, clonesBefore, newPart, rightMain,
+            leftStreamDoc, rightStreamDoc);
+
+        foreach (var attr in newRoot.DescendantsAndSelf().Attributes()
+                     .Where(a => a.Name.Namespace == PtOpenXml.pt).ToList())
+            attr.Remove();
+        newPart.PutXDocument();
+
+        // Attach the reference (header/footer references lead the CT_SectPr sequence, so AddFirst is
+        // always schema-ordered — the DocumentBuilder convention) and ensure the visibility flag.
+        var refName = diff.IsHeader ? W.headerReference : W.footerReference;
+        string typeValue = diff.Kind switch
+        {
+            IrHeaderFooterKind.First => "first",
+            IrHeaderFooterKind.Even => "even",
+            _ => "default",
+        };
+        sectPr.AddFirst(new XElement(refName,
+            new XAttribute(W.type, typeValue),
+            new XAttribute(R.id, main.GetIdOfPart(newPart))));
+        if (diff.Kind == IrHeaderFooterKind.First && sectPr.Element(W.titlePg) is null)
+            InsertIntoSectPr(sectPr, new XElement(W.titlePg));
+        if (diff.Kind == IrHeaderFooterKind.Even)
+            EnsureEvenAndOddHeaders(main);
+        main.PutXDocument();
+    }
+
+    /// <summary>Elements that FOLLOW <c>w:titlePg</c> in the CT_SectPr sequence — an insertion lands
+    /// before the first of these (or at the end), keeping the sectPr schema-ordered.</summary>
+    private static readonly XName[] SectPrAfterTitlePg =
+        { W.textDirection, W.bidi, W.rtlGutter, W.docGrid, W.printerSettings, W.sectPrChange };
+
+    private static void InsertIntoSectPr(XElement sectPr, XElement element)
+    {
+        var firstTail = sectPr.Elements().FirstOrDefault(e => SectPrAfterTitlePg.Contains(e.Name));
+        if (firstTail is null)
+            sectPr.Add(element);
+        else
+            firstTail.AddBeforeSelf(element);
+    }
+
+    /// <summary>Ensure the settings part carries <c>w:evenAndOddHeaders</c> (required for an Even story
+    /// to be effective), reordering the settings children per the standard afterwards.</summary>
+    private static void EnsureEvenAndOddHeaders(MainDocumentPart main)
+    {
+        var settingsPart = main.DocumentSettingsPart ?? main.AddNewPart<DocumentSettingsPart>();
+        var xDoc = settingsPart.GetXDocument();
+        var root = xDoc.Root;
+        if (root is null)
+        {
+            root = new XElement(W.settings, new XAttribute(XNamespace.Xmlns + "w", W.w));
+            xDoc.Add(root);
+        }
+        if (root.Element(W.evenAndOddHeaders) is null)
+        {
+            root.Add(new XElement(W.evenAndOddHeaders));
+            var ordered = (XElement)WordprocessingMLUtil.WmlOrderElementsPerStandard(root);
+            root.ReplaceWith(ordered);
+        }
+        settingsPart.PutXDocument();
+    }
+
+    /// <summary>The output package's header (or footer) part with the given URI, or null.</summary>
+    private static OpenXmlPart? FindHeaderFooterPart(MainDocumentPart main, bool isHeader, Uri partUri)
+    {
+        var parts = isHeader ? main.HeaderParts.Cast<OpenXmlPart>() : main.FooterParts.Cast<OpenXmlPart>();
+        return parts.FirstOrDefault(p => p.Uri == partUri);
+    }
+
+    /// <summary>
+    /// Render one story diff's ops into <paramref name="part"/>: same recipe as a note scope — render,
+    /// simplify moves, strip pt bookkeeping, replace the root's block-level children (keeping any
+    /// non-block prelude) — plus the PER-PART media import: clones registered while rendering THIS
+    /// story's ops are right-HEADER-part-sourced, so their relationships import from the right story
+    /// part into this output part (not the main part).
+    /// </summary>
+    private static void ApplyHeaderFooterDiffToPart(
+        IrHeaderFooterDiff diff, OpenXmlPart part, RenderState state, IrDiffSettings settings,
+        MainDocumentPart? rightMain, OpenXmlMemoryStreamDocument leftStreamDoc,
+        OpenXmlMemoryStreamDocument rightStreamDoc)
+    {
+        var xDoc = part.GetXDocument();
+        var root = xDoc.Root;
+        if (root is null)
+            return;
+
+        // Slice the clone registry around this story's render so ONLY its clones import into this part.
+        int clonesBefore = state.RightSourcedClones.Count;
+        var blocks = new List<XElement>();
+        foreach (var op in diff.Ops)
+            RenderBlockOp(op, state, blocks);
+        if (settings is { RenderMoves: true, SimplifyMoveMarkup: true })
+            foreach (var b in blocks)
+                SimplifyMoveMarkup(b);
+
+        root.Elements().Where(e => e.Name == W.p || e.Name == W.tbl).Remove();
+        root.Add(blocks);
+
+        ImportStorySourcedRelationships(diff, state, clonesBefore, part, rightMain,
+            leftStreamDoc, rightStreamDoc);
+
+        foreach (var attr in root.DescendantsAndSelf().Attributes()
+                     .Where(a => a.Name.Namespace == PtOpenXml.pt).ToList())
+            attr.Remove();
+        part.PutXDocument();
+    }
+
+    /// <summary>
+    /// Import media parts + hyperlink/external relationships referenced by the clones registered during
+    /// one story's render (<paramref name="clonesBefore"/> marks the registry watermark) from the RIGHT
+    /// story part into the output story part. Relationship ids are part-scoped in OOXML, which is why the
+    /// body's main-part import cannot serve header/footer content.
+    /// </summary>
+    private static void ImportStorySourcedRelationships(
+        IrHeaderFooterDiff diff, RenderState state, int clonesBefore, OpenXmlPart outputPart,
+        MainDocumentPart? rightMain, OpenXmlMemoryStreamDocument leftStreamDoc,
+        OpenXmlMemoryStreamDocument rightStreamDoc)
+    {
+        if (rightMain is null || diff.RightPartUri is null)
+            return;
+        var storyClones = state.RightSourcedClones.Skip(clonesBefore).ToList();
+        if (storyClones.Count == 0)
+            return;
+        var rightPart = FindHeaderFooterPart(rightMain, diff.IsHeader, diff.RightPartUri);
+        if (rightPart is null)
+            return;
+
+        ImportHyperlinkAndExternalRelationships(storyClones, outputPart, rightPart);
+
+        var outPkgPart = leftStreamDoc.GetPackage().GetPart(outputPart.Uri);
+        var rightPkgPart = rightStreamDoc.GetPackage().GetPart(rightPart.Uri);
+        foreach (var clone in storyClones)
+            WmlComparer.MoveRelatedPartsToDestination(
+                rightPkgPart, outPkgPart, clone, skipDanglingRelationships: true,
+                skipHeaderFooterReferences: true);
     }
 
     // ----------------------------------------------------------------- note-id renumber (M2.6 Task 1)
@@ -3065,7 +3299,7 @@ internal static class IrMarkupRenderer
     /// when that id is free in the left part (the common case — ids rarely collide across the two documents).
     /// </summary>
     private static void ImportHyperlinkAndExternalRelationships(
-        List<XElement> rightClones, MainDocumentPart leftMain, MainDocumentPart rightMain)
+        List<XElement> rightClones, OpenXmlPart leftMain, OpenXmlPart rightMain)
     {
         var leftHyper = leftMain.HyperlinkRelationships.ToDictionary(r => r.Id, StringComparer.Ordinal);
         var leftExternalIds = new HashSet<string>(leftMain.ExternalRelationships.Select(r => r.Id), StringComparer.Ordinal);
@@ -3133,7 +3367,7 @@ internal static class IrMarkupRenderer
     /// hyperlinks, external links, and data-part references alike). Deterministic: the first free
     /// <c>rIdRemap{n}</c> (n ascending from 1). The dedicated <c>rIdRemap</c> prefix avoids colliding with the
     /// document's own <c>rId{n}</c> numbering — the very collision this remap exists to resolve.</summary>
-    private static string FreshRelationshipId(MainDocumentPart leftMain)
+    private static string FreshRelationshipId(OpenXmlPart leftMain)
     {
         var used = new HashSet<string>(StringComparer.Ordinal);
         foreach (var rel in leftMain.Parts) used.Add(rel.RelationshipId);

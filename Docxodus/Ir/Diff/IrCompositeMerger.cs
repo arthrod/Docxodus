@@ -27,6 +27,14 @@ internal static class IrCompositeMerger
         Docxodus.ConflictResolution policy,
         IrDiffSettings settings)
     {
+        // v1 ceiling (header/footer campaign, 2026-07-03): header/footer scopes are NOT consolidated.
+        // The two-way engine diffs them (IrEditScript.HeaderFooterOps), but the composite merger has no
+        // MergeHeaderFooterScopes yet — forcing the scope OFF here makes that explicit and deterministic
+        // (nothing is generated, so nothing is silently dropped), pinned by
+        // IrHeaderFooterDiffTests.Consolidate_ignores_header_changes_v1_ceiling. Follow-on: mirror
+        // MergeNoteScopes (simpler — story pairing is by scope, no id-map machinery needed).
+        settings = settings with { CompareHeadersFooters = false };
+
         // 1. Raw pairwise scripts, NOT yet lowered — so PlanMoves can inspect every reviewer's move groups
         //    against the shared base anchor space before any move is collapsed to del/ins.
         var rawScripts = reviewers

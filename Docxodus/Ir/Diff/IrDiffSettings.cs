@@ -254,6 +254,18 @@ internal sealed record IrDiffSettings
     public int SplitMaxRunLength { get; init; } = 8;
 
     /// <summary>
+    /// DIFF-TIME setting (header/footer campaign, 2026-07-03). When true (the DEFAULT — Word's own
+    /// Compare "Headers and footers" granularity default), <see cref="IrEditScriptBuilder"/> diffs the
+    /// header/footer stories (paired per section ordinal × occurrence kind, with Word's
+    /// previous-section inheritance rule) into <see cref="IrEditScript.HeaderFooterOps"/>, the markup
+    /// renderer rebuilds changed stories with native tracked-changes markup, and Fine-granularity
+    /// revisions include hdr/ftr-anchored entries. When false, header/footer scopes are ignored
+    /// entirely — the pre-campaign behavior: the output carries the LEFT package's header/footer parts
+    /// verbatim and no header change is reported anywhere.
+    /// </summary>
+    public bool CompareHeadersFooters { get; init; } = true;
+
+    /// <summary>
     /// REVISIONS-SURFACE setting (M2.3 Task 1). Author name stamped on every <see cref="IrRevision"/>'s
     /// <see cref="IrRevision.Author"/>. Default <c>"Open-Xml-PowerTools"</c> — copied verbatim from
     /// <c>WmlComparerSettings.AuthorForRevisions</c> (Docxodus/WmlComparer.cs ~line 54) so an IR-rendered

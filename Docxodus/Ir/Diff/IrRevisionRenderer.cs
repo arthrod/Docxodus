@@ -89,6 +89,18 @@ internal static class IrRevisionRenderer
                 foreach (var op in noteDiff.Ops)
                     RenderBlockOp(op, ctx, revisions);
 
+        // Header/footer scopes (2026-07-03 campaign): appended AFTER note revisions (strictly additive
+        // ordering — existing consumers' body/note indices never shift), one revision per op like notes
+        // (a story is its own grouping unit; no cross-block coalescing). EXCLUDED in WmlComparerCompatible
+        // mode: that granularity is defined as "match the legacy comparer's revision set", and WmlComparer
+        // does not diff header/footer scopes at all — so the compatible projection reports none, keeping
+        // count parity with the oracle by construction. Fine mode (the default) reports them.
+        if (settings.RevisionGranularity == RevisionGranularity.Fine &&
+            script.HeaderFooterOps is { } headerFooterOps)
+            foreach (var hfDiff in headerFooterOps)
+                foreach (var op in hfDiff.Ops)
+                    RenderBlockOp(op, ctx, revisions);
+
         // Section-break zero-width prune (M2.4 Task 2, prelim a). A whole-block Inserted/Deleted over a
         // SECTION-BREAK block (a `sec:` anchor) carries no surface text and is a structural-only change that
         // WmlComparer does not report as a revision. Suppress it in compatible mode so it never inflates the
@@ -1420,6 +1432,10 @@ internal static class IrRevisionRenderer
                 return t;
         foreach (var scope in doc.Endnotes.Notes.Values)
             if (RowTextInBlocks(anchor, scope.Blocks, settings) is { } t)
+                return t;
+        // Header/footer scopes (2026-07-03 campaign): a story may contain a table too.
+        foreach (var hf in doc.Headers.Concat(doc.Footers))
+            if (RowTextInBlocks(anchor, hf.Scope.Blocks, settings) is { } t)
                 return t;
         return string.Empty;
     }
