@@ -245,7 +245,54 @@ public class IrMarkupRendererTests
             $"ACCEPT-NOTES≠RIGHT {label}\n  accept: [{string.Join(", ", acceptNotes)}]\n  right:  [{string.Join(", ", rightNotes)}]");
         Assert.True(rejectNotes.SequenceEqual(leftNotes),
             $"REJECT-NOTES≠LEFT {label}\n  reject: [{string.Join(", ", rejectNotes)}]\n  left:   [{string.Join(", ", leftNotes)}]");
+
+        // STRENGTHENED (2026-07-03): header/footer STORY content must round-trip too. Referenced stories
+        // only, empty ≡ absent (accepting a deleted story / rejecting an inserted one leaves an EMPTY
+        // story — Word's own behavior — which must compare equal to the other side's absent story).
+        var acceptStories = StoryContentHashes(accepted);
+        var rightStories = StoryContentHashes(right);
+        var rejectStories = StoryContentHashes(rejected);
+        var leftStories = StoryContentHashes(left);
+        Assert.True(acceptStories.SequenceEqual(rightStories),
+            $"ACCEPT-STORIES≠RIGHT {label}\n  accept: [{string.Join(", ", acceptStories)}]\n  right:  [{string.Join(", ", rightStories)}]");
+        Assert.True(rejectStories.SequenceEqual(leftStories),
+            $"REJECT-STORIES≠LEFT {label}\n  reject: [{string.Join(", ", rejectStories)}]\n  left:   [{string.Join(", ", leftStories)}]");
     }
+
+    /// <summary>
+    /// The referenced header/footer STORY content-hash projection (2026-07-03 campaign): for every
+    /// explicit body reference cell (section ordinal × kind, headers then footers, deterministic order),
+    /// the story's per-block ContentHashes — skipping stories with no visible text (an empty story ≡ an
+    /// absent story: the round-trip's reject-of-inserted / accept-of-deleted leaves an empty part).
+    /// </summary>
+    private static List<string> StoryContentHashes(WmlDocument doc)
+    {
+        var ir = IrReader.Read(doc, ReadOpts);
+        var result = new List<string>();
+        foreach (var (tag, stories) in new[] { ("hdr", ir.Headers), ("ftr", ir.Footers) })
+        {
+            var cells = new List<(int Section, IrHeaderFooterKind Kind, IrHeaderFooter Story)>();
+            foreach (var hf in stories)
+                foreach (var r in hf.References)
+                    cells.Add((r.SectionIndex, r.Kind, hf));
+            foreach (var (section, kind, story) in cells.OrderBy(c => c.Section).ThenBy(c => c.Kind))
+            {
+                if (!story.Scope.Blocks.Any(BlockHasVisibleText))
+                    continue;
+                result.Add($"{tag}@s{section}:{kind}");
+                foreach (var b in story.Scope.Blocks)
+                    CollectHashes(b, result);
+            }
+        }
+        return result;
+    }
+
+    private static bool BlockHasVisibleText(IrBlock block) => block switch
+    {
+        IrParagraph p => p.Inlines.OfType<IrTextRun>().Any(r => !string.IsNullOrWhiteSpace(r.Text)),
+        IrTable t => t.Rows.Any(row => row.Cells.Any(c => c.Blocks.Any(BlockHasVisibleText))),
+        _ => true, // opaque/image blocks count as content
+    };
 
     // ----------------------------------------------------------------- targeted unit shapes
 
