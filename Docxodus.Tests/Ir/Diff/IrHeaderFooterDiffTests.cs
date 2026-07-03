@@ -384,6 +384,47 @@ public class IrHeaderFooterDiffTests
         Assert.DoesNotContain("headerFooterOps", json);
     }
 
+    // ------------------------------------------------------------------ consolidate v1 ceiling
+
+    [Fact]
+    public void Consolidate_ignores_header_changes_v1_ceiling()
+    {
+        // v1: header/footer scopes are NOT consolidated (documented ceiling — the merger forces the
+        // scope off for its per-reviewer diffs, so nothing is generated and nothing silently dropped).
+        var baseDoc = HeaderFooterFixtures.Simple(new[] { "Body" }, headerParas: new[] { "Header v1" });
+        var reviewer = HeaderFooterFixtures.Simple(new[] { "Body" }, headerParas: new[] { "Header v2" });
+
+        var result = DocxDiff.Consolidate(baseDoc,
+            new[] { new DocxDiffReviewer { Document = reviewer, Author = "Alice" } });
+
+        var headerXml = Assert.Single(HeaderFooterFixtures.StoryPartsXml(result));
+        Assert.DoesNotContain("<w:ins", headerXml);
+        Assert.Contains("Header v1", headerXml);
+
+        var revisions = DocxDiff.GetConsolidatedRevisions(baseDoc,
+            new[] { new DocxDiffReviewer { Document = reviewer, Author = "Alice" } });
+        Assert.DoesNotContain(revisions, r =>
+            (r.LeftAnchor ?? r.RightAnchor) is { } a && (a.Contains(":hdr") || a.Contains(":ftr")));
+    }
+
+    // ------------------------------------------------------------------ compatibility inspector
+
+    [Fact]
+    public void Inspector_catalog_marks_headers_footers_covered()
+    {
+        var feature = Assert.Single(DocxDiffCompatibility.Catalog, f => f.Id == "headersFooters");
+        Assert.Equal(DocxDiffCoverage.Covered, feature.Coverage);
+    }
+
+    [Fact]
+    public void Inspector_detects_header_reference_as_covered_present()
+    {
+        var doc = HeaderFooterFixtures.Simple(new[] { "Body" }, headerParas: new[] { "H" });
+        var report = DocxDiffCompatibility.Inspect(doc.DocumentByteArray);
+        Assert.Contains(report.CoveredPresent, f => f.Id == "headersFooters");
+        Assert.DoesNotContain(report.Warnings, w => w.Feature.Id == "headersFooters");
+    }
+
     [Fact]
     public void Public_settings_map_compare_headers_footers()
     {
