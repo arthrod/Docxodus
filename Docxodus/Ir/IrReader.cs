@@ -1816,6 +1816,22 @@ internal static class IrReader
 
     // --- table ------------------------------------------------------------
 
+    /// <summary>
+    /// Canonical hash of the FLATTENED children of a set of shell wrappers (w:tblPr / w:tblGrid / w:trPr).
+    /// Hashing the children — not the wrapper element — makes an EMPTY shell (`&lt;w:trPr/&gt;`) hash-equal
+    /// to an ABSENT shell, so the empty shell a render→reject cycle can leave behind is not a spurious
+    /// change (this mirrors <c>IrMarkupRenderer.CleanShell</c>). Any property change inside a shell still
+    /// flips the hash, so table/row fingerprints stay as discriminating as the pre-split single lump.
+    /// </summary>
+    private static IrHash ShellChildrenDigest(IEnumerable<XElement> wrappers)
+    {
+        var container = new XElement("shell");
+        foreach (var wrapper in wrappers)
+            foreach (var child in wrapper.Elements())
+                container.Add(new XElement(child));
+        return IrHasher.CanonicalHash(container);
+    }
+
     private static IrTable BuildTable(XElement tbl, ReadContext ctx)
     {
         var rows = new List<IrRow>();
@@ -1837,17 +1853,17 @@ internal static class IrReader
             cellFingerprints.AddRange(cellFingerprintsForRow);
         }
 
-        // Non-tr children of the table (tblPr, tblGrid) + non-tc children of each tr (trPr) fold into
-        // one unmodeled container so any table-level prop change flips the fingerprint. A row-delivering
-        // w:sdt wrapper is excluded — its meaningful content (the rows) is now modeled above, so folding
-        // the wrapper too would double-count and re-introduce the very content the rows path captures.
-        var unmodeledContainer = new XElement("unmodeled");
-        foreach (var child in tbl.Elements().Where(e => e.Name != W + "tr" && e.Name != W + "sdt"))
-            unmodeledContainer.Add(new XElement(child));
-        foreach (var (tr, _) in EnumerateTableRows(tbl))
-            foreach (var child in tr.Elements().Where(e => e.Name != W + "tc" && e.Name != W + "sdt"))
-                unmodeledContainer.Add(new XElement(child));
-        var tablePropsDigest = IrHasher.CanonicalHash(unmodeledContainer);
+        // Per-element table shell digests (split from the pre-2026-07-03 single lump so the markup renderer
+        // can attribute w:tblPrChange / w:tblGridChange separately). A row-delivering w:sdt wrapper is
+        // excluded — its rows are modeled above, so folding the wrapper too would double-count content.
+        //   TblPrDigest   = flattened children of all non-tr/non-sdt/non-tblGrid table shells (w:tblPr + stray)
+        //   TblGridDigest = flattened children of w:tblGrid (its w:gridCol run)
+        // Flattening (see ShellChildrenDigest) makes empty ≡ absent; distinctions are still preserved, so
+        // table fingerprints stay as discriminating as the old lump (only the byte layout changed → snapshots regen).
+        var tblGrid = tbl.Element(W + "tblGrid");
+        var tblPrDigest = ShellChildrenDigest(
+            tbl.Elements().Where(e => e.Name != W + "tr" && e.Name != W + "sdt" && e.Name != W + "tblGrid"));
+        var tblGridDigest = ShellChildrenDigest(tblGrid != null ? new[] { tblGrid } : System.Array.Empty<XElement>());
 
         var contentBuilder = new IrContentHashBuilder();
         foreach (var h in rowHashes)
@@ -1855,7 +1871,10 @@ internal static class IrReader
         var contentHash = contentBuilder.Build();
 
         var fpBuilder = new IrContentHashBuilder();
-        fpBuilder.AppendHash(tablePropsDigest);
+        fpBuilder.AppendHash(tblPrDigest);
+        fpBuilder.AppendHash(tblGridDigest);
+        foreach (var r in rows)
+            fpBuilder.AppendHash(r.TrPrDigest);
         foreach (var fp in cellFingerprints)
             fpBuilder.AppendHash(fp);
         var formatFingerprint = fpBuilder.Build();
@@ -1864,7 +1883,8 @@ internal static class IrReader
         {
             Anchor = AnchorFor(IrAnchorKind.Tbl, tbl, ctx),
             Rows = IrNodeList.From(rows),
-            UnmodeledTablePropsDigest = tablePropsDigest,
+            TblPrDigest = tblPrDigest,
+            TblGridDigest = tblGridDigest,
             ContentHash = contentHash,
             FormatFingerprint = formatFingerprint,
             Source = ctx.Provenance(tbl),
@@ -1895,9 +1915,17 @@ internal static class IrReader
             rowBuilder.AppendHash(cell.ContentHash);
         }
 
+        // Row shell digest: the FLATTENED children of every non-tc/non-sdt row shell (w:trPr + w:tblPrEx +
+        // stray). Folded into the table's format fingerprint by BuildTable, and consulted per-element by the
+        // markup renderer for w:trPrChange attribution. Flattening the wrapper's children (rather than hashing
+        // the wrapper element) makes an EMPTY shell hash-equal to an ABSENT shell — so an empty `<w:trPr/>`
+        // left by a render→reject cycle is not a spurious change (matching the renderer's CleanShell rule).
+        var trPrDigest = ShellChildrenDigest(tr.Elements().Where(e => e.Name != W + "tc" && e.Name != W + "sdt"));
+
         var row = new IrRow(AnchorFor(IrAnchorKind.Tr, tr, ctx), IrNodeList.From(cells), rowBuilder.Build())
         {
             Source = ctx.Provenance(tr),
+            TrPrDigest = trPrDigest,
         };
         return (row, cellFingerprints);
     }

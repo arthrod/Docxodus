@@ -219,8 +219,22 @@ namespace Docxodus
                 if (element.Name == W.sectPr &&
                     element.Element(W.sectPrChange) != null)
                 {
-                    var newSectPr = element.Element(W.sectPrChange).Element(W.sectPr);
-                    return RejectRevisionsForPartTransform(newSectPr);
+                    // The sectPrChange inner is CT_SectPrBase — the OLD section PROPERTIES only; it
+                    // excludes the header/footer references (EG_HdrFtrReferences) and the change marker,
+                    // which are OUTSIDE the tracked property change. Rebuild the rejected sectPr by keeping
+                    // the CURRENT references and restoring the old properties (Word's own behavior), rather
+                    // than replacing the whole element with the reference-less inner — otherwise rejecting a
+                    // sectPrChange would silently drop the section's headers/footers.
+                    var oldSectPr = element.Element(W.sectPrChange).Element(W.sectPr);
+                    var rebuilt = new XElement(W.sectPr,
+                        oldSectPr?.Attributes() ?? element.Attributes());
+                    foreach (var refEl in element.Elements()
+                                 .Where(e => e.Name == W.headerReference || e.Name == W.footerReference))
+                        rebuilt.Add(new XElement(refEl));
+                    if (oldSectPr != null)
+                        foreach (var propEl in oldSectPr.Elements())
+                            rebuilt.Add(new XElement(propEl));
+                    return RejectRevisionsForPartTransform(rebuilt);
                 }
 
                 ////////////////////////////////////////////////////////////////////////////////////

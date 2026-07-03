@@ -98,19 +98,38 @@ internal sealed record IrParagraph : IrBlock
     public bool IsListItemForLayout { get; init; }
 }
 
-/// <summary>A table: its rows plus a digest of the unmodeled `w:tblPr`/`w:tblGrid` properties.</summary>
+/// <summary>A table: its rows plus per-element digests of its shell (`w:tblPr` and `w:tblGrid`).</summary>
 internal sealed record IrTable : IrBlock
 {
     public required IrNodeList<IrRow> Rows { get; init; }
 
-    /// <summary>Canonical hash of unmodeled table-level props (`w:tblPr`/`w:tblGrid`).</summary>
-    public required IrHash UnmodeledTablePropsDigest { get; init; }
+    /// <summary>
+    /// Canonical hash of the table's `w:tblPr` shell — precisely, all non-`w:tr`/non-`w:sdt`/non-`w:tblGrid`
+    /// table children (the `w:tblPr` element plus any stray markup). Folded into
+    /// <see cref="IrBlock.FormatFingerprint"/> (not <see cref="IrBlock.ContentHash"/>) so a table-property-only
+    /// change classifies FormatOnly; split out from the pre-2026-07-03 single lump so the markup renderer can
+    /// attribute a `w:tblPrChange` to exactly the tblPr edit.
+    /// </summary>
+    public required IrHash TblPrDigest { get; init; }
+
+    /// <summary>Canonical hash of the table's `w:tblGrid` (empty-container hash when absent). Folded into
+    /// <see cref="IrBlock.FormatFingerprint"/>; drives `w:tblGridChange` attribution.</summary>
+    public required IrHash TblGridDigest { get; init; }
 }
 
 /// <summary>A table row. <paramref name="Source"/> is equality-neutral provenance.</summary>
 internal sealed record IrRow(IrAnchor Anchor, IrNodeList<IrCell> Cells, IrHash ContentHash)
 {
     public IrProvenance Source { get; init; } = new();
+
+    /// <summary>
+    /// Canonical hash of the row's SHELL — all non-`w:tc`/non-`w:sdt` row children (the `w:trPr` element
+    /// plus any `w:tblPrEx`/stray markup). Folded into the table's <see cref="IrBlock.FormatFingerprint"/>
+    /// (not <see cref="IrBlock.ContentHash"/>) so a row-property-only change classifies FormatOnly. The markup
+    /// renderer compares the `w:trPr` element specifically for `w:trPrChange` attribution — a `w:tblPrEx`-only
+    /// change flips this digest (so it is detected) but emits no `w:trPrChange` (documented v1 untracked).
+    /// </summary>
+    public IrHash TrPrDigest { get; init; }
 
     /// <summary>
     /// True when this row was delivered by a table-level <c>w:sdt</c> wrapping a <c>w:tr</c> (e.g. a

@@ -113,6 +113,21 @@ internal static class IrRevisionRenderer
         // BOTH modes: a placeholder token carries no surface text, so reporting it as an empty Inserted/Deleted
         // is a spurious revision regardless of granularity (the real textbox change is reported through the
         // nested TextboxDiffs). See the two-textbox test.
+        // Trailing section-property change (block-format-change family, Phase 3): compare the two documents'
+        // trailing section formats and, when the MODELED fields differ, append one Section-scope FormatChanged
+        // (mirrors the markup renderer's w:sectPrChange on the trailing sectPr). Appended after all body/note/
+        // header-footer ops (additive ordering). Excluded from WmlComparerCompatible by the scope filter below.
+        if (settings.TrackBlockFormatChanges
+            && ctx.Left.Body.Blocks.Count > 0 && ctx.Left.Body.Blocks[^1] is IrSectionBreak lsec
+            && ctx.Right.Body.Blocks.Count > 0 && ctx.Right.Body.Blocks[^1] is IrSectionBreak rsec)
+        {
+            var details = IrModeledFormat.SectionFormatChangeDetails(lsec.Format, rsec.Format);
+            if (details.ChangedPropertyNames.Count > 0)
+                revisions.Add(new IrRevision(IrRevisionType.FormatChanged, string.Empty, ctx.Author, ctx.Date,
+                    FormatChange: details,
+                    LeftAnchor: lsec.Anchor.ToString(), RightAnchor: rsec.Anchor.ToString()));
+        }
+
         if (settings.RevisionGranularity == RevisionGranularity.WmlComparerCompatible)
         {
             revisions.RemoveAll(IsSectionBreakZeroWidth);
@@ -541,6 +556,10 @@ internal static class IrRevisionRenderer
                 return;
             }
             RenderTableDiff(tableDiff, ctx, sink);
+            // Block-format-change family (2026-07-03): report table/row/cell SHELL changes (tblPr/tblGrid/
+            // trPr/tcPr) as digest-grade FormatChanged revisions, after the cell text revisions.
+            if (ResolveTable(op.LeftAnchor, ctx.Left) is { } lt && ResolveTable(op.RightAnchor, ctx.Right) is { } rt)
+                EmitTableModifiedShellRevisions(lt, rt, tableDiff, ctx, sink);
             return;
         }
 
@@ -1235,9 +1254,17 @@ internal static class IrRevisionRenderer
         // WmlComparerCompatible mode by the scope filter in Render.
         bool paraEmitted = EmitParagraphScopeFormatChanged(op, ctx, sink);
 
-        // Non-paragraph FormatOnly (no tokens on either side): nothing describable at token grain.
+        // Non-paragraph FormatOnly (no tokens on either side): a TABLE reports its shell changes
+        // (tblPr/tblGrid/trPr — content-equal, so rows/cells pair positionally); anything else is
+        // nothing describable at token grain.
         if (leftTokens.Count == 0 && rightTokens.Count == 0)
+        {
+            if (!paraEmitted
+                && ResolveTable(op.LeftAnchor, ctx.Left) is { } lt
+                && ResolveTable(op.RightAnchor, ctx.Right) is { } rt)
+                EmitTableFormatOnlyShellRevisions(lt, rt, ctx, sink);
             return;
+        }
 
         if (leftTokens.Count == rightTokens.Count)
         {
@@ -1427,6 +1454,80 @@ internal static class IrRevisionRenderer
                     break;
             }
         }
+    }
+
+    // ------------------------------------------------ table-shell format revisions (block-format family)
+
+    /// <summary>Resolve a table by anchor; null for a missing/non-table anchor.</summary>
+    private static IrTable? ResolveTable(string? anchor, IrDocument doc)
+        => anchor is not null && doc.AnchorIndex.TryGetValue(anchor, out var b) ? b as IrTable : null;
+
+    /// <summary>One digest-grade table-family FormatChanged revision (empty property dictionaries; a single
+    /// changed-name token — "shell" or "grid"). Text is empty (a shell change carries no surface text).</summary>
+    private static IrRevision TableShellRevision(
+        IrFormatChangeScope scope, string changed, string leftAnchor, string rightAnchor, in Context ctx)
+        => new IrRevision(IrRevisionType.FormatChanged, string.Empty, ctx.Author, ctx.Date,
+            FormatChange: new IrFormatChangeDetails(
+                EmptyProps, EmptyProps, new[] { changed }, scope),
+            LeftAnchor: leftAnchor, RightAnchor: rightAnchor);
+
+    private static readonly IReadOnlyDictionary<string, string> EmptyProps =
+        new Dictionary<string, string>();
+
+    /// <summary>Report shell changes for a content-equal (FormatOnly) table pair: tblPr/tblGrid at the table,
+    /// then trPr/tcPr walking rows and cells positionally (content-equality guarantees the alignment).</summary>
+    private static void EmitTableFormatOnlyShellRevisions(IrTable left, IrTable right, in Context ctx, List<IrRevision> sink)
+    {
+        EmitTableLevelShellRevisions(left, right, ctx, sink);
+
+        int rn = System.Math.Min(left.Rows.Count, right.Rows.Count);
+        for (int i = 0; i < rn; i++)
+            EmitRowAndCellShellRevisions(left.Rows[i], right.Rows[i], ctx, sink);
+    }
+
+    /// <summary>Report shell changes for a Modified table pair: tblPr/tblGrid at the table, then trPr/tcPr for
+    /// each Equal/Modify row op (paired by base/right row anchor — inserted/deleted rows have no old/new pair).</summary>
+    private static void EmitTableModifiedShellRevisions(
+        IrTable left, IrTable right, IrTableDiff diff, in Context ctx, List<IrRevision> sink)
+    {
+        EmitTableLevelShellRevisions(left, right, ctx, sink);
+
+        var leftRows = new Dictionary<string, IrRow>(System.StringComparer.Ordinal);
+        foreach (var r in left.Rows) leftRows[r.Anchor.ToString()] = r;
+        var rightRows = new Dictionary<string, IrRow>(System.StringComparer.Ordinal);
+        foreach (var r in right.Rows) rightRows[r.Anchor.ToString()] = r;
+
+        foreach (var rowOp in diff.RowOps)
+        {
+            if (rowOp.Kind is not (IrRowOpKind.EqualRow or IrRowOpKind.ModifyRow))
+                continue;
+            if (rowOp.LeftRowAnchor is { } la && rowOp.RightRowAnchor is { } ra
+                && leftRows.TryGetValue(la, out var lr) && rightRows.TryGetValue(ra, out var rr))
+                EmitRowAndCellShellRevisions(lr, rr, ctx, sink);
+        }
+    }
+
+    private static void EmitTableLevelShellRevisions(IrTable left, IrTable right, in Context ctx, List<IrRevision> sink)
+    {
+        if (!left.TblPrDigest.Equals(right.TblPrDigest))
+            sink.Add(TableShellRevision(IrFormatChangeScope.Table, "shell",
+                left.Anchor.ToString(), right.Anchor.ToString(), ctx));
+        if (!left.TblGridDigest.Equals(right.TblGridDigest))
+            sink.Add(TableShellRevision(IrFormatChangeScope.Table, "grid",
+                left.Anchor.ToString(), right.Anchor.ToString(), ctx));
+    }
+
+    private static void EmitRowAndCellShellRevisions(IrRow left, IrRow right, in Context ctx, List<IrRevision> sink)
+    {
+        if (!left.TrPrDigest.Equals(right.TrPrDigest))
+            sink.Add(TableShellRevision(IrFormatChangeScope.TableRow, "shell",
+                left.Anchor.ToString(), right.Anchor.ToString(), ctx));
+
+        int cn = System.Math.Min(left.Cells.Count, right.Cells.Count);
+        for (int c = 0; c < cn; c++)
+            if (!left.Cells[c].ShellDigest.Equals(right.Cells[c].ShellDigest))
+                sink.Add(TableShellRevision(IrFormatChangeScope.TableCell, "shell",
+                    left.Cells[c].Anchor.ToString(), right.Cells[c].Anchor.ToString(), ctx));
     }
 
     // ------------------------------------------------------------------ text + token helpers

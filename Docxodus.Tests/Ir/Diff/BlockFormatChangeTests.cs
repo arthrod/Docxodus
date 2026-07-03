@@ -211,29 +211,228 @@ public class BlockFormatChangeTests
         Assert.Single(BodyOf(result).Descendants(W + "shd"));
     }
 
-    // ------------------------------------------------------------------ trailing sectPr-only (w:pgSz)
+    // ------------------------------------------------------------------ table family (Phase 2)
+
+    private static string Table(string trPr, string tcPr, string tblPr = "<w:tblW w:w=\"0\" w:type=\"auto\"/>",
+                                string grid = "<w:gridCol w:w=\"4000\"/>") =>
+        $"<w:tbl><w:tblPr>{tblPr}</w:tblPr><w:tblGrid>{grid}</w:tblGrid>" +
+        $"<w:tr>{trPr}<w:tc><w:tcPr>{tcPr}</w:tcPr><w:p><w:r><w:t>Cell text</w:t></w:r></w:p></w:tc></w:tr></w:tbl>" +
+        "<w:p><w:r><w:t>After.</w:t></w:r></w:p>";
 
     [Fact]
-    public void TrailingSectPrOnly_is_silently_dropped_today()
+    public void TrPrOnly_change_is_tracked_with_native_trPrChange()
     {
-        var left = IrTestDocuments.FromBodyXml(
-            "<w:p><w:r><w:t>Body text.</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>");
-        var right = IrTestDocuments.FromBodyXml(
-            "<w:p><w:r><w:t>Body text.</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"15840\" w:h=\"12240\" w:orient=\"landscape\"/></w:sectPr>");
+        var left = IrTestDocuments.FromBodyXml(Table("<w:trPr><w:trHeight w:val=\"400\"/></w:trPr>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+        var right = IrTestDocuments.FromBodyXml(Table("<w:trPr><w:trHeight w:val=\"800\"/></w:trPr>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
 
-        Assert.Empty(DocxDiff.GetRevisions(left, right, ModeledOnly));
-
-        // Pin: the LEFT trailing sectPr is preserved verbatim — the right page-size change is DROPPED,
-        // so accept ≠ right at the sectPr level (the one silent-drop row of the family).
         var result = DocxDiff.Compare(left, right, ModeledOnly);
         var body = BodyOf(result);
-        Assert.Empty(body.Descendants(W + "sectPrChange"));
-        var pgSz = body.Elements(W + "sectPr").Single().Element(W + "pgSz")!;
-        Assert.Equal("12240", (string?)pgSz.Attribute(W + "w"));
+        var trPrChange = body.Descendants(W + "trPrChange").Single();
+        Assert.Same(trPrChange, trPrChange.Parent!.Elements().Last());                     // last child of trPr
+        Assert.NotNull(trPrChange.Attribute(W + "author"));
+        Assert.Equal("400", (string?)trPrChange.Element(W + "trPr")!.Element(W + "trHeight")?.Attribute(W + "val"));
+        Assert.Equal("800", (string?)trPrChange.Parent!.Element(W + "trHeight")?.Attribute(W + "val")); // right applied
 
         var accepted = RevisionProcessor.AcceptRevisions(result);
-        var acceptedPgSz = BodyOf(accepted).Elements(W + "sectPr").Single().Element(W + "pgSz")!;
-        Assert.Equal("12240", (string?)acceptedPgSz.Attribute(W + "w"));                    // accept ≠ right
+        Assert.Equal("800", (string?)BodyOf(accepted).Descendants(W + "trHeight").Single().Attribute(W + "val"));
+        Assert.Empty(BodyOf(accepted).Descendants(W + "trPrChange"));
+        var rejected = RevisionProcessor.RejectRevisions(result);
+        Assert.Equal("400", (string?)BodyOf(rejected).Descendants(W + "trHeight").Single().Attribute(W + "val")); // reject ≡ left
+
+        var rev = Assert.Single(DocxDiff.GetRevisions(left, right, ModeledOnly));
+        Assert.Equal(DocxDiffRevisionType.FormatChanged, rev.Type);
+        Assert.Equal(DocxDiffFormatChangeScope.TableRow, rev.FormatChange!.Scope);
+        Assert.Equal(new[] { "shell" }, rev.FormatChange.ChangedPropertyNames);
+    }
+
+    [Fact]
+    public void TblPrOnly_change_is_tracked_with_native_tblPrChange()
+    {
+        var borders = "<w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\"/></w:tblBorders>";
+        var left = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+        var right = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>", tblPr: borders));
+
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var body = BodyOf(result);
+        var tblPrChange = body.Descendants(W + "tblPrChange").Single();
+        Assert.Same(tblPrChange, tblPrChange.Parent!.Elements().Last());                   // last child of tblPr
+        Assert.Empty(tblPrChange.Element(W + "tblPr")!.Elements(W + "tblBorders"));        // old = no borders
+        Assert.Single(body.Descendants(W + "tblBorders"));                                 // right applied
+
+        var accepted = RevisionProcessor.AcceptRevisions(result);
+        Assert.Single(BodyOf(accepted).Descendants(W + "tblBorders"));
+        Assert.Empty(BodyOf(accepted).Descendants(W + "tblPrChange"));
+        var rejected = RevisionProcessor.RejectRevisions(result);
+        Assert.Empty(BodyOf(rejected).Descendants(W + "tblBorders"));                      // reject ≡ left
+
+        var rev = Assert.Single(DocxDiff.GetRevisions(left, right, ModeledOnly));
+        Assert.Equal(DocxDiffFormatChangeScope.Table, rev.FormatChange!.Scope);
+        Assert.Equal(new[] { "shell" }, rev.FormatChange.ChangedPropertyNames);
+    }
+
+    [Fact]
+    public void TblGridOnly_change_is_tracked_with_native_tblGridChange()
+    {
+        var left = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+        var right = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>", grid: "<w:gridCol w:w=\"6000\"/>"));
+
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var body = BodyOf(result);
+        var gridChange = body.Descendants(W + "tblGridChange").Single();
+        Assert.Equal(W + "tblGrid", gridChange.Parent!.Name);                              // inside the grid
+        Assert.NotNull(gridChange.Attribute(W + "id"));
+        Assert.Null(gridChange.Attribute(W + "author"));                                   // CT_Markup: id only
+        Assert.Equal("4000", (string?)gridChange.Element(W + "tblGrid")!.Element(W + "gridCol")?.Attribute(W + "w"));
+        // The applied (right) grid col is 6000; the OLD grid rides only inside the change marker.
+        Assert.Equal("6000", (string?)gridChange.Parent!.Elements(W + "gridCol").Single().Attribute(W + "w"));
+
+        var accepted = RevisionProcessor.AcceptRevisions(result);
+        Assert.Equal("6000", (string?)BodyOf(accepted).Descendants(W + "gridCol").Single().Attribute(W + "w"));
+        Assert.Empty(BodyOf(accepted).Descendants(W + "tblGridChange"));
+        var rejected = RevisionProcessor.RejectRevisions(result);
+        Assert.Equal("4000", (string?)BodyOf(rejected).Descendants(W + "gridCol").Single().Attribute(W + "w"));
+
+        var rev = Assert.Single(DocxDiff.GetRevisions(left, right, ModeledOnly));
+        Assert.Equal(DocxDiffFormatChangeScope.Table, rev.FormatChange!.Scope);
+        Assert.Equal(new[] { "grid" }, rev.FormatChange.ChangedPropertyNames);
+    }
+
+    [Fact]
+    public void TcPrOnly_change_is_tracked_with_native_tcPrChange()
+    {
+        var left = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+        var right = IrTestDocuments.FromBodyXml(Table("",
+            "<w:tcW w:w=\"4000\" w:type=\"dxa\"/><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"FFFF00\"/>"));
+
+        // The shell digest participates in cell ContentHash → the table pair is Modified; the right tcPr
+        // is applied WITH a tcPrChange carrying the old (left) shell — closing the #250-noted gap.
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var body = BodyOf(result);
+        var tcPrChange = body.Descendants(W + "tcPrChange").Single();
+        Assert.Same(tcPrChange, tcPrChange.Parent!.Elements().Last());                     // last child of tcPr
+        Assert.Empty(tcPrChange.Element(W + "tcPr")!.Elements(W + "shd"));                 // old = no shading
+        Assert.Single(body.Descendants(W + "tc").Elements(W + "tcPr").Elements(W + "shd"));
+
+        var accepted = RevisionProcessor.AcceptRevisions(result);
+        Assert.Single(BodyOf(accepted).Descendants(W + "tc").Elements(W + "tcPr").Elements(W + "shd"));
+        Assert.Empty(BodyOf(accepted).Descendants(W + "tcPrChange"));
+        var rejected = RevisionProcessor.RejectRevisions(result);
+        Assert.Empty(BodyOf(rejected).Descendants(W + "tc").Elements(W + "tcPr").Elements(W + "shd")); // reject ≡ left
+
+        var rev = Assert.Single(DocxDiff.GetRevisions(left, right, ModeledOnly));
+        Assert.Equal(DocxDiffFormatChangeScope.TableCell, rev.FormatChange!.Scope);
+        Assert.Equal(new[] { "shell" }, rev.FormatChange.ChangedPropertyNames);
+    }
+
+    [Fact]
+    public void TableFamily_and_pPr_outputs_are_schema_valid()
+    {
+        var pairs = new (WmlDocument Left, WmlDocument Right)[]
+        {
+            (PPrLeft, PPrRight),
+            (IrTestDocuments.FromBodyXml(Table("<w:trPr><w:trHeight w:val=\"400\"/></w:trPr>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>")),
+             IrTestDocuments.FromBodyXml(Table("<w:trPr><w:trHeight w:val=\"800\"/></w:trPr>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"))),
+            (IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>")),
+             IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"FFFF00\"/>", tblPr: "<w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\"/></w:tblBorders>", grid: "<w:gridCol w:w=\"6000\"/>"))),
+        };
+        foreach (var (left, right) in pairs)
+        {
+            var result = DocxDiff.Compare(left, right, ModeledOnly);
+            using var ms = new MemoryStream(result.DocumentByteArray);
+            using var wd = WordprocessingDocument.Open(ms, false);
+            var errors = new DocumentFormat.OpenXml.Validation.OpenXmlValidator()
+                .Validate(wd)
+                .Where(e => e.ErrorType == DocumentFormat.OpenXml.Validation.ValidationErrorType.Schema)
+                .Select(e => e.Description)
+                .ToList();
+            Assert.True(errors.Count == 0, string.Join("\n", errors));
+        }
+    }
+
+    // ------------------------------------------------------------------ trailing sectPr-only (w:pgSz)
+
+    private static readonly WmlDocument SectLeft = IrTestDocuments.FromBodyXml(
+        "<w:p><w:r><w:t>Body text.</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>");
+
+    private static readonly WmlDocument SectRight = IrTestDocuments.FromBodyXml(
+        "<w:p><w:r><w:t>Body text.</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"15840\" w:h=\"12240\" w:orient=\"landscape\"/></w:sectPr>");
+
+    [Fact]
+    public void TrailingSectPrOnly_change_is_tracked_with_native_sectPrChange()
+    {
+        var result = DocxDiff.Compare(SectLeft, SectRight, ModeledOnly);
+        var body = BodyOf(result);
+        var sectPr = body.Elements(W + "sectPr").Single();
+        var sectPrChange = sectPr.Element(W + "sectPrChange")!;
+        Assert.Same(sectPrChange, sectPr.Elements().Last());                               // last child of sectPr
+        Assert.NotNull(sectPrChange.Attribute(W + "author"));
+        // Right (accepted-state) page size applied; the OLD (left) page size rides in the change inner.
+        Assert.Equal("15840", (string?)sectPr.Element(W + "pgSz")?.Attribute(W + "w"));
+        Assert.Equal("12240", (string?)sectPrChange.Element(W + "sectPr")!.Element(W + "pgSz")?.Attribute(W + "w"));
+        Assert.Empty(sectPrChange.Element(W + "sectPr")!.Elements(W + "sectPrChange"));     // CT_SectPrBase
+
+        var accepted = RevisionProcessor.AcceptRevisions(result);
+        Assert.Equal("15840", (string?)BodyOf(accepted).Elements(W + "sectPr").Single().Element(W + "pgSz")?.Attribute(W + "w"));
+        Assert.Empty(BodyOf(accepted).Descendants(W + "sectPrChange"));
+        var rejected = RevisionProcessor.RejectRevisions(result);
+        Assert.Equal("12240", (string?)BodyOf(rejected).Elements(W + "sectPr").Single().Element(W + "pgSz")?.Attribute(W + "w")); // reject ≡ left
+
+        var rev = Assert.Single(DocxDiff.GetRevisions(SectLeft, SectRight, ModeledOnly));
+        Assert.Equal(DocxDiffRevisionType.FormatChanged, rev.Type);
+        Assert.Equal(DocxDiffFormatChangeScope.Section, rev.FormatChange!.Scope);
+        Assert.Contains("pageWidth", rev.FormatChange.ChangedPropertyNames);
+        Assert.Contains("pageHeight", rev.FormatChange.ChangedPropertyNames);
+    }
+
+    [Fact]
+    public void SectPrChange_reject_preserves_header_footer_references()
+    {
+        // The sectPrChange inner is CT_SectPrBase (no references); rejecting must NOT drop the section's
+        // header/footer references (RevisionProcessor fix). Left = a header-referencing section whose margins
+        // change on the right.
+        var left = IrTestDocuments.FromBodyAndHeaderXml(
+            "<w:p><w:r><w:t>Body.</w:t></w:r></w:p>", "<w:p><w:r><w:t>HEADER</w:t></w:r></w:p>");
+        // Build the RIGHT with the SAME header wiring but a different margin by editing the left bytes' sectPr.
+        var right = WithSectPrMargin(left, "1440");
+
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        Assert.Single(BodyOf(result).Descendants(W + "sectPrChange"));
+
+        var rejected = RevisionProcessor.RejectRevisions(result);
+        var rejSect = BodyOf(rejected).Elements(W + "sectPr").Single();
+        Assert.NotEmpty(rejSect.Elements(W + "headerReference"));                           // reference survives reject
+    }
+
+    [Fact]
+    public void SectPr_family_output_is_schema_valid()
+    {
+        var result = DocxDiff.Compare(SectLeft, SectRight, ModeledOnly);
+        using var ms = new MemoryStream(result.DocumentByteArray);
+        using var wd = WordprocessingDocument.Open(ms, false);
+        var errors = new DocumentFormat.OpenXml.Validation.OpenXmlValidator()
+            .Validate(wd)
+            .Where(e => e.ErrorType == DocumentFormat.OpenXml.Validation.ValidationErrorType.Schema)
+            .Select(e => e.Description)
+            .ToList();
+        Assert.True(errors.Count == 0, string.Join("\n", errors));
+    }
+
+    // Return a copy of <paramref name="doc"/> whose trailing sectPr has a w:pgMar with the given uniform margin.
+    private static WmlDocument WithSectPrMargin(WmlDocument doc, string margin)
+    {
+        using var ms = new MemoryStream();
+        ms.Write(doc.DocumentByteArray, 0, doc.DocumentByteArray.Length);
+        using (var wd = WordprocessingDocument.Open(ms, true))
+        {
+            var xdoc = wd.MainDocumentPart!.GetXDocument();
+            var sectPr = xdoc.Root!.Element(W + "body")!.Elements(W + "sectPr").Last();
+            sectPr.Elements(W + "pgMar").Remove();
+            sectPr.Add(new XElement(W + "pgMar",
+                new XAttribute(W + "top", margin), new XAttribute(W + "bottom", margin),
+                new XAttribute(W + "left", margin), new XAttribute(W + "right", margin)));
+            wd.MainDocumentPart.PutXDocument();
+        }
+        return new WmlDocument("sect-right.docx", ms.ToArray());
     }
 
     // ------------------------------------------------------------------ direct numbering is modeled (Phase 1)

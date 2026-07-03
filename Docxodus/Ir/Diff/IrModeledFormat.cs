@@ -248,6 +248,52 @@ internal static class IrModeledFormat
         "keepNext", "keepLines", "pageBreakBefore", "numId", "numLevel",
     };
 
+    /// <summary>Project a SECTION format's modeled fields to a property dictionary (block-format-change family,
+    /// Phase 3): the section analogue of <see cref="ModeledParaProperties"/>; null fields omitted.</summary>
+    public static IReadOnlyDictionary<string, string> ModeledSectionProperties(IrSectionFormat? f)
+    {
+        var dict = new Dictionary<string, string>();
+        if (f is null)
+            return dict;
+
+        AddInt(dict, "pageWidth", f.PageWidthTwips);
+        AddInt(dict, "pageHeight", f.PageHeightTwips);
+        AddBool(dict, "landscape", f.Landscape);
+        AddInt(dict, "marginTop", f.MarginTopTwips);
+        AddInt(dict, "marginBottom", f.MarginBottomTwips);
+        AddInt(dict, "marginLeft", f.MarginLeftTwips);
+        AddInt(dict, "marginRight", f.MarginRightTwips);
+        AddProp(dict, "sectionType", f.SectionType);
+        return dict;
+    }
+
+    /// <summary>Build the Section-scope <see cref="IrFormatChangeDetails"/> for a (left, right) section-format
+    /// pair — modeled fields only (page setup/margins/orientation/type). An unmodeled-only section change
+    /// (e.g. <c>w:cols</c>) yields empty changed names: it is tracked by the markup (canonical) but not
+    /// described here — the modeled-only-revision limitation, consistent with the run/paragraph scopes.</summary>
+    public static IrFormatChangeDetails SectionFormatChangeDetails(IrSectionFormat? left, IrSectionFormat? right)
+    {
+        var oldProps = ModeledSectionProperties(left);
+        var newProps = ModeledSectionProperties(right);
+
+        var changed = new List<string>();
+        foreach (var name in ModeledSectionFieldOrder)
+        {
+            bool hasOld = oldProps.TryGetValue(name, out var oldVal);
+            bool hasNew = newProps.TryGetValue(name, out var newVal);
+            if (hasOld != hasNew || (hasOld && hasNew && oldVal != newVal))
+                changed.Add(name);
+        }
+
+        return new IrFormatChangeDetails(oldProps, newProps, changed, IrFormatChangeScope.Section);
+    }
+
+    private static readonly string[] ModeledSectionFieldOrder =
+    {
+        "pageWidth", "pageHeight", "landscape", "marginTop", "marginBottom",
+        "marginLeft", "marginRight", "sectionType",
+    };
+
     private static void AddProp(Dictionary<string, string> dict, string name, string? value)
     {
         if (value is not null)

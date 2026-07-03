@@ -194,11 +194,19 @@ public class IrMarkupRendererTests
                 sink.Add("pf:" + IrModeledFormat.BlockSignature(p, settings));
                 break;
             case IrTable t:
-                sink.Add("tblf:" + t.ContentHash.ToHex());
+                // Include the SHELL digests (block-format-change family): tblPr/tblGrid are in the
+                // FormatFingerprint (not ContentHash), so without them the round-trip assertion would be
+                // blind to a w:tblPrChange / w:tblGridChange / w:trPrChange that failed to restore. (tcPr is
+                // already in ContentHash via ShellDigest, so it rides BodyContentHashes.)
+                sink.Add("tblf:" + t.ContentHash.ToHex()
+                    + "|tblPr:" + t.TblPrDigest.ToHex() + "|tblGrid:" + t.TblGridDigest.ToHex());
                 foreach (var row in t.Rows)
+                {
+                    sink.Add("trf:" + row.TrPrDigest.ToHex());
                     foreach (var cell in row.Cells)
                         foreach (var b in cell.Blocks)
                             CollectFormatSignatures(b, settings, sink);
+                }
                 break;
             default:
                 sink.Add(block.GetType().Name + "f:" + block.ContentHash.ToHex());
@@ -257,6 +265,30 @@ public class IrMarkupRendererTests
             $"ACCEPT-STORIES≠RIGHT {label}\n  accept: [{string.Join(", ", acceptStories)}]\n  right:  [{string.Join(", ", rightStories)}]");
         Assert.True(rejectStories.SequenceEqual(leftStories),
             $"REJECT-STORIES≠LEFT {label}\n  reject: [{string.Join(", ", rejectStories)}]\n  left:   [{string.Join(", ", leftStories)}]");
+
+        // STRENGTHENED (block-format-change family, Phase 3): the trailing section PROPERTIES must round-trip —
+        // accept ≡ right, reject ≡ left. Reference-normalized (header/footer references are owned by the
+        // header/footer machinery and compared by StoryContentHashes above), so this checks page setup only.
+        Assert.Equal(TrailingSectPrPropsDigest(right), TrailingSectPrPropsDigest(accepted));
+        Assert.Equal(TrailingSectPrPropsDigest(left), TrailingSectPrPropsDigest(rejected));
+    }
+
+    /// <summary>Canonical hash of the trailing sectPr's PROPERTY children (ignoring header/footer references,
+    /// the sectPrChange marker, and rsids); "none" when the body has no trailing sectPr. The reference-normalized
+    /// section-property fingerprint the block-format-change round-trip compares.</summary>
+    private static string TrailingSectPrPropsDigest(WmlDocument doc)
+    {
+        using var ms = new MemoryStream(doc.DocumentByteArray);
+        using var wd = WordprocessingDocument.Open(ms, false);
+        var body = wd.MainDocumentPart!.GetXDocument().Root?.Element(W.body);
+        var sectPr = body?.Elements(W.sectPr).LastOrDefault();
+        if (sectPr == null)
+            return "none";
+        var c = new XElement("sect");
+        foreach (var e in sectPr.Elements().Where(e =>
+                     e.Name != W.headerReference && e.Name != W.footerReference && e.Name != W.sectPrChange))
+            c.Add(new XElement(e));
+        return Docxodus.Ir.IrHasher.CanonicalHash(c).ToHex();
     }
 
     /// <summary>
