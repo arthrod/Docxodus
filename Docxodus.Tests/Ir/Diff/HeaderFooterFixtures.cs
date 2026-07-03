@@ -171,4 +171,19 @@ internal static class HeaderFooterFixtures
         var xd = XDocument.Load(s);
         return string.Concat(xd.Descendants(Wn + "t").Select(t => t.Value));
     }
+
+    /// <summary>Raw XML of every header part then footer part, in part-enumeration order.</summary>
+    public static List<string> StoryPartsXml(WmlDocument d)
+    {
+        var result = new List<string>();
+        using var ms = new MemoryStream(d.DocumentByteArray);
+        using var doc = WordprocessingDocument.Open(ms, false);
+        var main = doc.MainDocumentPart!;
+        foreach (var p in main.HeaderParts.Cast<OpenXmlPart>().Concat(main.FooterParts))
+        {
+            using var s = p.GetStream(FileMode.Open, FileAccess.Read);
+            result.Add(XDocument.Load(s).ToString(SaveOptions.DisableFormatting));
+        }
+        return result;
+    }
 }

@@ -1353,6 +1353,89 @@ public class IrMarkupRendererTests
             !OxPt.WcTests.ExpectedErrors.Contains(e.Description));
     }
 
+    // ----------------------------------------------------------------- header/footer story markup (2026-07-03)
+
+    [Fact]
+    public void Render_matched_header_story_marks_up_and_round_trips()
+    {
+        var left = HeaderFooterFixtures.Simple(new[] { "Body" }, headerParas: new[] { "CONFIDENTIAL Draft 1" });
+        var right = HeaderFooterFixtures.Simple(new[] { "Body" }, headerParas: new[] { "CONFIDENTIAL Draft 2" });
+
+        var rendered = RenderMarkup(left, right);
+
+        var headerXml = Assert.Single(HeaderFooterFixtures.StoryPartsXml(rendered));
+        Assert.Contains("<w:ins", headerXml);
+        Assert.Contains("<w:del", headerXml);
+        Assert.Contains("Open-Xml-PowerTools", headerXml);
+
+        Assert.Equal("CONFIDENTIAL Draft 2",
+            Assert.Single(HeaderFooterFixtures.StoryTexts(RevisionProcessor.AcceptRevisions(rendered))));
+        Assert.Equal("CONFIDENTIAL Draft 1",
+            Assert.Single(HeaderFooterFixtures.StoryTexts(RevisionProcessor.RejectRevisions(rendered))));
+        Assert.Equal(0, SchemaErrorCount(rendered));
+    }
+
+    [Fact]
+    public void Render_matched_footer_story_round_trips()
+    {
+        var left = HeaderFooterFixtures.Simple(
+            new[] { "Body" }, headerParas: new[] { "Same header" }, footerParas: new[] { "Acme Corp 2025" });
+        var right = HeaderFooterFixtures.Simple(
+            new[] { "Body" }, headerParas: new[] { "Same header" }, footerParas: new[] { "Acme Corp 2026" });
+
+        var rendered = RenderMarkup(left, right);
+
+        // The unchanged header part is carried verbatim (no markup); the footer carries the diff.
+        var parts = HeaderFooterFixtures.StoryPartsXml(rendered);
+        Assert.Equal(2, parts.Count);
+        Assert.DoesNotContain("<w:ins", parts[0]);
+        Assert.Contains("<w:ins", parts[1]);
+
+        Assert.Equal(new[] { "Same header", "Acme Corp 2026" },
+            HeaderFooterFixtures.StoryTexts(RevisionProcessor.AcceptRevisions(rendered)));
+        Assert.Equal(new[] { "Same header", "Acme Corp 2025" },
+            HeaderFooterFixtures.StoryTexts(RevisionProcessor.RejectRevisions(rendered)));
+        Assert.Equal(0, SchemaErrorCount(rendered));
+    }
+
+    [Fact]
+    public void Render_header_revision_ids_unique_across_scopes()
+    {
+        var left = HeaderFooterFixtures.Simple(new[] { "Body one" }, headerParas: new[] { "Header v1" });
+        var right = HeaderFooterFixtures.Simple(new[] { "Body two" }, headerParas: new[] { "Header v2" });
+
+        var rendered = RenderMarkup(left, right);
+
+        using var ms = new MemoryStream(rendered.DocumentByteArray);
+        using var wd = WordprocessingDocument.Open(ms, false);
+        var main = wd.MainDocumentPart!;
+        var ids = new List<string>();
+        foreach (var part in new[] { (OpenXmlPart)main }.Concat(main.HeaderParts))
+        {
+            var root = XDocument.Load(part.GetStream(FileMode.Open, FileAccess.Read)).Root!;
+            ids.AddRange(root.Descendants()
+                .Where(e => e.Name == W.ins || e.Name == W.del)
+                .Select(e => (string?)e.Attribute(W.id))
+                .Where(v => v != null)!);
+        }
+        Assert.True(ids.Count >= 2, "expected revisions in both body and header");
+        Assert.Equal(ids.Count, ids.Distinct().Count());
+    }
+
+    [Fact]
+    public void Render_gate_off_keeps_left_header_verbatim()
+    {
+        var left = HeaderFooterFixtures.Simple(new[] { "Body" }, headerParas: new[] { "Header v1" });
+        var right = HeaderFooterFixtures.Simple(new[] { "Body" }, headerParas: new[] { "Header v2" });
+
+        var rendered = RenderMarkup(left, right, new IrDiffSettings { CompareHeadersFooters = false });
+
+        var headerXml = Assert.Single(HeaderFooterFixtures.StoryPartsXml(rendered));
+        Assert.DoesNotContain("<w:ins", headerXml);
+        Assert.Contains("Header v1", headerXml);
+        Assert.DoesNotContain("Header v2", headerXml);
+    }
+
     // ----------------------------------------------------------------- author override (composite groundwork)
 
     /// <summary>Regression pin: the two-way render path leaves <see cref="RenderState.AuthorOverride"/> null,
