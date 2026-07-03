@@ -1223,13 +1223,136 @@ internal static class IrMarkupRenderer
     {
         foreach (var diff in hfOps)
         {
-            if (diff.LeftPartUri is null || diff.RightPartUri is null)
-                continue; // inserted/deleted stories are rendered by the dedicated paths (below)
-            var part = FindHeaderFooterPart(main, diff.IsHeader, diff.LeftPartUri);
-            if (part is null)
-                continue; // left part vanished (malformed input) — keep the carry-over, body still round-trips
-            ApplyHeaderFooterDiffToPart(diff, part, state, settings, rightMain, leftStreamDoc, rightStreamDoc);
+            if (diff.LeftPartUri is { } leftUri)
+            {
+                // Matched (rebuild with token-level markup) or deleted-only (all content marked w:del —
+                // the part and its reference stay; accept leaves an empty story, Word's own behavior).
+                var part = FindHeaderFooterPart(main, diff.IsHeader, leftUri);
+                if (part is null)
+                    continue; // left part vanished (malformed input) — keep the carry-over
+                ApplyHeaderFooterDiffToPart(diff, part, state, settings, rightMain, leftStreamDoc, rightStreamDoc);
+            }
+            else
+            {
+                InsertHeaderFooterStory(diff, state, main, rightMain, settings, leftStreamDoc, rightStreamDoc);
+            }
         }
+    }
+
+    /// <summary>
+    /// Render a RIGHT-only (inserted) story: create a fresh header/footer part seeded from the right
+    /// part's root shell, render the all-insert ops into it, attach a <c>w:headerReference</c>/
+    /// <c>w:footerReference</c> (typed by the story's kind) to the output body's sectPr at the story's
+    /// section ordinal, and ensure the visibility flag the story needs — <c>w:titlePg</c> on that sectPr
+    /// for a First story, <c>w:evenAndOddHeaders</c> in the settings part for an Even story (ensured,
+    /// not revision-tracked — sectPr/settings changes are outside w:sectPrChange scope in v1). Accept
+    /// keeps the inserted content; reject strips it, leaving an EMPTY story — text-level ≡ the left's
+    /// absent story, matching Word's own reject behavior for an inserted header.
+    /// </summary>
+    private static void InsertHeaderFooterStory(
+        IrHeaderFooterDiff diff, RenderState state, MainDocumentPart main, MainDocumentPart? rightMain,
+        IrDiffSettings settings, OpenXmlMemoryStreamDocument leftStreamDoc,
+        OpenXmlMemoryStreamDocument rightStreamDoc)
+    {
+        if (rightMain is null || diff.RightPartUri is null)
+            return;
+        var rightPart = FindHeaderFooterPart(rightMain, diff.IsHeader, diff.RightPartUri);
+        var rightRoot = rightPart?.GetXDocument().Root;
+        if (rightRoot is null)
+            return;
+
+        // Locate the target sectPr FIRST — a story that cannot attach must not create an orphan part.
+        // Document-order sectPr enumeration matches the reader's section ordinals. A section ordinal the
+        // output body cannot represent (the section structure itself changed) is skipped: the revisions
+        // surface still reports the story, the markup omission is a documented v1 ceiling.
+        var mainXDoc = main.GetXDocument();
+        var body = mainXDoc.Root?.Element(W.body);
+        if (body is null)
+            return;
+        var sectPrs = body.Descendants(W.sectPr).ToList();
+        if (diff.SectionIndex >= sectPrs.Count)
+            return;
+        var sectPr = sectPrs[diff.SectionIndex];
+
+        OpenXmlPart newPart = diff.IsHeader
+            ? main.AddNewPart<HeaderPart>()
+            : main.AddNewPart<FooterPart>();
+        var newRoot = new XElement(rightRoot.Name, rightRoot.Attributes());
+        var xDoc = newPart.GetXDocument();
+        if (xDoc.Root == null)
+            xDoc.Add(newRoot);
+        else
+            xDoc.Root.ReplaceWith(newRoot);
+
+        int clonesBefore = state.RightSourcedClones.Count;
+        var blocks = new List<XElement>();
+        foreach (var op in diff.Ops)
+            RenderBlockOp(op, state, blocks);
+        if (settings is { RenderMoves: true, SimplifyMoveMarkup: true })
+            foreach (var b in blocks)
+                SimplifyMoveMarkup(b);
+        newRoot.Add(blocks);
+
+        ImportStorySourcedRelationships(diff, state, clonesBefore, newPart, rightMain,
+            leftStreamDoc, rightStreamDoc);
+
+        foreach (var attr in newRoot.DescendantsAndSelf().Attributes()
+                     .Where(a => a.Name.Namespace == PtOpenXml.pt).ToList())
+            attr.Remove();
+        newPart.PutXDocument();
+
+        // Attach the reference (header/footer references lead the CT_SectPr sequence, so AddFirst is
+        // always schema-ordered — the DocumentBuilder convention) and ensure the visibility flag.
+        var refName = diff.IsHeader ? W.headerReference : W.footerReference;
+        string typeValue = diff.Kind switch
+        {
+            IrHeaderFooterKind.First => "first",
+            IrHeaderFooterKind.Even => "even",
+            _ => "default",
+        };
+        sectPr.AddFirst(new XElement(refName,
+            new XAttribute(W.type, typeValue),
+            new XAttribute(R.id, main.GetIdOfPart(newPart))));
+        if (diff.Kind == IrHeaderFooterKind.First && sectPr.Element(W.titlePg) is null)
+            InsertIntoSectPr(sectPr, new XElement(W.titlePg));
+        if (diff.Kind == IrHeaderFooterKind.Even)
+            EnsureEvenAndOddHeaders(main);
+        main.PutXDocument();
+    }
+
+    /// <summary>Elements that FOLLOW <c>w:titlePg</c> in the CT_SectPr sequence — an insertion lands
+    /// before the first of these (or at the end), keeping the sectPr schema-ordered.</summary>
+    private static readonly XName[] SectPrAfterTitlePg =
+        { W.textDirection, W.bidi, W.rtlGutter, W.docGrid, W.printerSettings, W.sectPrChange };
+
+    private static void InsertIntoSectPr(XElement sectPr, XElement element)
+    {
+        var firstTail = sectPr.Elements().FirstOrDefault(e => SectPrAfterTitlePg.Contains(e.Name));
+        if (firstTail is null)
+            sectPr.Add(element);
+        else
+            firstTail.AddBeforeSelf(element);
+    }
+
+    /// <summary>Ensure the settings part carries <c>w:evenAndOddHeaders</c> (required for an Even story
+    /// to be effective), reordering the settings children per the standard afterwards.</summary>
+    private static void EnsureEvenAndOddHeaders(MainDocumentPart main)
+    {
+        var settingsPart = main.DocumentSettingsPart ?? main.AddNewPart<DocumentSettingsPart>();
+        var xDoc = settingsPart.GetXDocument();
+        var root = xDoc.Root;
+        if (root is null)
+        {
+            root = new XElement(W.settings, new XAttribute(XNamespace.Xmlns + "w", W.w));
+            xDoc.Add(root);
+        }
+        if (root.Element(W.evenAndOddHeaders) is null)
+        {
+            root.Add(new XElement(W.evenAndOddHeaders));
+            var ordered = (XElement)WordprocessingMLUtil.WmlOrderElementsPerStandard(root);
+            root.ReplaceWith(ordered);
+        }
+        settingsPart.PutXDocument();
     }
 
     /// <summary>The output package's header (or footer) part with the given URI, or null.</summary>

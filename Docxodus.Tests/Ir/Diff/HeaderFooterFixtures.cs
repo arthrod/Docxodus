@@ -60,10 +60,10 @@ internal static class HeaderFooterFixtures
 
             foreach (var (id, paras) in headerParts)
                 WritePart(main.AddNewPart<HeaderPart>(id),
-                    $"<w:hdr xmlns:w=\"{Wns}\">{Paras(paras)}</w:hdr>");
+                    $"<w:hdr xmlns:w=\"{Wns}\" xmlns:r=\"{Rns}\">{Paras(paras)}</w:hdr>");
             foreach (var (id, paras) in footerParts)
                 WritePart(main.AddNewPart<FooterPart>(id),
-                    $"<w:ftr xmlns:w=\"{Wns}\">{Paras(paras)}</w:ftr>");
+                    $"<w:ftr xmlns:w=\"{Wns}\" xmlns:r=\"{Rns}\">{Paras(paras)}</w:ftr>");
 
             var body = new StringBuilder();
             for (int s = 0; s < sections.Count; s++)
@@ -170,6 +170,41 @@ internal static class HeaderFooterFixtures
         using var s = part.GetStream(FileMode.Open, FileAccess.Read);
         var xd = XDocument.Load(s);
         return string.Concat(xd.Descendants(Wn + "t").Select(t => t.Value));
+    }
+
+    /// <summary>A minimal valid 1×1 transparent PNG (for image-in-story fixtures).</summary>
+    public static readonly byte[] OnePixelPng = Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
+
+    /// <summary>A <c>w:p</c> carrying an inline picture whose blip references <paramref name="relId"/>.</summary>
+    public static string ImageParagraphXml(string relId) =>
+        "<w:p><w:r><w:drawing>" +
+        "<wp:inline xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" " +
+        "distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">" +
+        "<wp:extent cx=\"95250\" cy=\"95250\"/><wp:docPr id=\"1\" name=\"Logo\"/>" +
+        "<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">" +
+        "<a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
+        "<pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
+        "<pic:nvPicPr><pic:cNvPr id=\"1\" name=\"Logo\"/><pic:cNvPicPr/></pic:nvPicPr>" +
+        $"<pic:blipFill><a:blip r:embed=\"{relId}\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>" +
+        "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"95250\" cy=\"95250\"/></a:xfrm>" +
+        "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr>" +
+        "</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>";
+
+    /// <summary>Add a 1×1 PNG <see cref="ImagePart"/> under the FIRST header part with relationship id
+    /// <paramref name="relId"/>, so a story block built with <see cref="ImageParagraphXml"/> resolves.</summary>
+    public static WmlDocument WithImageInFirstHeaderPart(WmlDocument d, string relId)
+    {
+        using var ms = new MemoryStream();
+        ms.Write(d.DocumentByteArray, 0, d.DocumentByteArray.Length);
+        using (var doc = WordprocessingDocument.Open(ms, true))
+        {
+            var headerPart = doc.MainDocumentPart!.HeaderParts.First();
+            var imagePart = headerPart.AddNewPart<ImagePart>("image/png", relId);
+            using var s = imagePart.GetStream(FileMode.Create, FileAccess.Write);
+            s.Write(OnePixelPng, 0, OnePixelPng.Length);
+        }
+        return new WmlDocument(d.FileName, ms.ToArray());
     }
 
     /// <summary>Raw XML of every header part then footer part, in part-enumeration order.</summary>

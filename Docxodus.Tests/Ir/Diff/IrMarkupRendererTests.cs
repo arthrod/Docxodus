@@ -1436,6 +1436,129 @@ public class IrMarkupRendererTests
         Assert.DoesNotContain("Header v2", headerXml);
     }
 
+    [Fact]
+    public void Render_inserted_first_page_header_adds_part_reference_and_titlePg()
+    {
+        var left = HeaderFooterFixtures.Simple(new[] { "Body" }, headerParas: new[] { "Running" });
+        var right = HeaderFooterFixtures.Build(
+            new[]
+            {
+                new HeaderFooterFixtures.Section(
+                    new[] { "Body" },
+                    Headers: new[] { ("default", "rIdH1"), ("first", "rIdH2") }),
+            },
+            headerParts: new Dictionary<string, string[]>
+            {
+                ["rIdH1"] = new[] { "Running" },
+                ["rIdH2"] = new[] { "Cover page banner" },
+            },
+            titlePg: true);
+
+        var rendered = RenderMarkup(left, right);
+
+        // The output gains the first-page story: part + w:headerReference@first + w:titlePg on the sectPr.
+        Assert.Equal("Cover page banner",
+            HeaderFooterFixtures.ReferencedStoryText(rendered, isHeader: true, sectionIndex: 0, kind: "first"));
+        using (var ms = new MemoryStream(rendered.DocumentByteArray))
+        using (var wd = WordprocessingDocument.Open(ms, false))
+        {
+            var body = wd.MainDocumentPart!.GetXDocument().Root!.Element(W.body)!;
+            var sectPr = body.Elements(W.sectPr).Last();
+            Assert.NotNull(sectPr.Element(W.titlePg));
+        }
+
+        // Accept keeps the inserted story; reject empties it (empty ≡ absent at the text level — Word's
+        // own behavior for rejecting an inserted header story).
+        var accepted = RevisionProcessor.AcceptRevisions(rendered);
+        Assert.Equal("Cover page banner",
+            HeaderFooterFixtures.ReferencedStoryText(accepted, isHeader: true, sectionIndex: 0, kind: "first"));
+        var rejected = RevisionProcessor.RejectRevisions(rendered);
+        Assert.Equal("",
+            HeaderFooterFixtures.ReferencedStoryText(rejected, isHeader: true, sectionIndex: 0, kind: "first"));
+
+        Assert.Equal(0, SchemaErrorCount(rendered));
+        Assert.Equal(0, SchemaErrorCount(accepted));
+        Assert.Equal(0, SchemaErrorCount(rejected));
+    }
+
+    [Fact]
+    public void Render_deleted_footer_story_marks_content_deleted()
+    {
+        var left = HeaderFooterFixtures.Simple(
+            new[] { "Body" }, headerParas: new[] { "Running" }, footerParas: new[] { "Legacy footer line" });
+        var right = HeaderFooterFixtures.Simple(new[] { "Body" }, headerParas: new[] { "Running" });
+
+        var rendered = RenderMarkup(left, right);
+
+        // The part and its reference stay; the content is marked deleted.
+        var footerXml = HeaderFooterFixtures.StoryPartsXml(rendered)[1];
+        Assert.Contains("<w:del", footerXml);
+
+        // Accept empties the story (≡ right's absent story at the text level); reject restores it.
+        Assert.Equal("",
+            HeaderFooterFixtures.ReferencedStoryText(
+                RevisionProcessor.AcceptRevisions(rendered), isHeader: false, sectionIndex: 0, kind: "default"));
+        Assert.Equal("Legacy footer line",
+            HeaderFooterFixtures.ReferencedStoryText(
+                RevisionProcessor.RejectRevisions(rendered), isHeader: false, sectionIndex: 0, kind: "default"));
+
+        Assert.Equal(0, SchemaErrorCount(rendered));
+        Assert.Equal(0, SchemaErrorCount(RevisionProcessor.AcceptRevisions(rendered)));
+    }
+
+    [Fact]
+    public void Render_inserted_even_footer_ensures_evenAndOddHeaders()
+    {
+        var left = HeaderFooterFixtures.Simple(new[] { "Body" }, footerParas: new[] { "Odd pages" });
+        var right = HeaderFooterFixtures.Build(
+            new[]
+            {
+                new HeaderFooterFixtures.Section(
+                    new[] { "Body" },
+                    Footers: new[] { ("default", "rIdF1"), ("even", "rIdF2") }),
+            },
+            footerParts: new Dictionary<string, string[]>
+            {
+                ["rIdF1"] = new[] { "Odd pages" },
+                ["rIdF2"] = new[] { "Even pages" },
+            },
+            evenAndOddHeaders: true);
+
+        var rendered = RenderMarkup(left, right);
+
+        Assert.Equal("Even pages",
+            HeaderFooterFixtures.ReferencedStoryText(rendered, isHeader: false, sectionIndex: 0, kind: "even"));
+        using var ms = new MemoryStream(rendered.DocumentByteArray);
+        using var wd = WordprocessingDocument.Open(ms, false);
+        var settingsRoot = wd.MainDocumentPart!.DocumentSettingsPart!.GetXDocument().Root!;
+        Assert.NotNull(settingsRoot.Element(W.evenAndOddHeaders));
+        Assert.Equal(0, SchemaErrorCount(rendered));
+    }
+
+    [Fact]
+    public void Render_image_added_to_header_imports_media_into_header_part()
+    {
+        var left = HeaderFooterFixtures.Simple(new[] { "Body" }, headerParas: new[] { "Notice" });
+        var right = HeaderFooterFixtures.WithImageInFirstHeaderPart(
+            HeaderFooterFixtures.Simple(new[] { "Body" },
+                headerParas: new[] { "Notice", HeaderFooterFixtures.ImageParagraphXml("rIdImg1") }),
+            "rIdImg1");
+
+        var rendered = RenderMarkup(left, right);
+
+        using var ms = new MemoryStream(rendered.DocumentByteArray);
+        using var wd = WordprocessingDocument.Open(ms, false);
+        var headerPart = wd.MainDocumentPart!.HeaderParts.Single();
+        var headerRoot = XDocument.Load(headerPart.GetStream(FileMode.Open, FileAccess.Read)).Root!;
+        XNamespace a = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        XNamespace r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        var embedId = (string?)headerRoot.Descendants(a + "blip").Single().Attribute(r + "embed");
+        Assert.NotNull(embedId);
+        // The embed id resolves against the HEADER part's own relationships (rels are part-scoped).
+        var imagePart = headerPart.GetPartById(embedId!);
+        Assert.StartsWith("image/", imagePart.ContentType);
+    }
+
     // ----------------------------------------------------------------- author override (composite groundwork)
 
     /// <summary>Regression pin: the two-way render path leaves <see cref="RenderState.AuthorOverride"/> null,
