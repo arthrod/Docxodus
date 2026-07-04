@@ -35,6 +35,13 @@ internal static class IrCompositeMerger
         // MergeNoteScopes (simpler — story pairing is by scope, no id-map machinery needed).
         settings = settings with { CompareHeadersFooters = false };
 
+        // v1 ceiling (block-format-change family, 2026-07-03): block-property changes are NOT consolidated.
+        // The compose path clones the BASE paragraph's pPr and the by-base grouping has no handling for
+        // FormatOnly-with-block-delta ops, so detection is forced OFF here — a reviewer's pPr/shell-only edit
+        // is ignored by Consolidate, exactly the pre-campaign behavior (text+pPr edits keep routing to the
+        // conflict path). Pinned by BlockFormatChangeTests.Consolidate_ignores_block_format_changes_v1_ceiling.
+        settings = settings with { TrackBlockFormatChanges = false };
+
         // 1. Raw pairwise scripts, NOT yet lowered — so PlanMoves can inspect every reviewer's move groups
         //    against the shared base anchor space before any move is collapsed to del/ins.
         var rawScripts = reviewers

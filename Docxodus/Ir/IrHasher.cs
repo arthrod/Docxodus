@@ -203,6 +203,8 @@ internal static class IrHasher
         AppendField(sb, "KeepNext", f.KeepNext);
         AppendField(sb, "KeepLines", f.KeepLines);
         AppendField(sb, "PageBreakBefore", f.PageBreakBefore);
+        AppendField(sb, "NumId", f.NumId);
+        AppendField(sb, "Ilvl", f.Ilvl);
         return HashFields(sb, f.UnmodeledDigest);
     }
 

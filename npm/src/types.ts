@@ -375,6 +375,21 @@ export interface Revision {
 }
 
 /**
+ * Which property container a FormatChanged revision describes.
+ * `run` (the default) is an rPr-grade report (bold/italic/fontSize/…); the others are the
+ * block-and-above scopes tracked by the block-format-change family: `paragraph` (pPr),
+ * `tableCell`/`tableRow`/`table` (tcPr/trPr/tblPr+tblGrid), and `section` (sectPr).
+ * Non-`run` scopes are only reported under Fine revision granularity.
+ */
+export type FormatChangeScope =
+  | "run"
+  | "paragraph"
+  | "tableCell"
+  | "tableRow"
+  | "table"
+  | "section";
+
+/**
  * Details about formatting changes for FormatChanged revisions.
  */
 export interface FormatChangeDetails {
@@ -389,8 +404,13 @@ export interface FormatChangeDetails {
   newProperties?: Record<string, string>;
   /**
    * List of property names that changed (e.g., "bold", "italic", "fontSize").
+   * For the table/section scopes this is a digest-grade marker (`["shell"]`, `["grid"]`).
    */
   changedPropertyNames?: string[];
+  /**
+   * Which property container this change describes (default `"run"`).
+   */
+  scope?: FormatChangeScope;
 }
 
 // ─── DocxDiff (IR diff engine) ──────────────────────────────────────────────

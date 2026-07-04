@@ -52,6 +52,10 @@ internal static class IrCompositeRevisionRenderer
         IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
         IrDiffSettings settings)
     {
+        // Consolidate v1 ceiling (block-format-change family, 2026-07-03): mirror IrCompositeMerger's
+        // forcing so per-op mini-script revision rendering never emits block-scope FormatChanged entries.
+        settings = settings with { TrackBlockFormatChanges = false };
+
         // Move-source pre-pass over the WHOLE composite script. Single-source ops are each rendered in
         // their own one-op mini-script (so IrRevisionRenderer honours per-op granularity/author), but a
         // MoveModifyBlock destination's token diff Delete spans index its SOURCE block's tokens — and the

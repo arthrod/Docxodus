@@ -787,12 +787,52 @@ public sealed class DocxDiffFormatChange
     /// <summary>The friendly names of the properties that differ between the two sides.</summary>
     public IReadOnlyList<string> ChangedPropertyNames { get; }
 
+    /// <summary>
+    /// Which property container this format change describes (block-format-change family, 2026-07-03).
+    /// <see cref="DocxDiffFormatChangeScope.Run"/> (the default and the pre-existing behavior) is an
+    /// rPr-grade report whose dictionaries carry run fields (bold, italic, fontSize, …);
+    /// <see cref="DocxDiffFormatChangeScope.Paragraph"/> is a <c>w:pPrChange</c>-grade report whose
+    /// dictionaries carry paragraph fields (style, justification, indentLeft, …, numId, numLevel).
+    /// Non-Run scopes appear only under <see cref="DocxDiffRevisionGranularity.Fine"/> —
+    /// <see cref="DocxDiffRevisionGranularity.WmlComparerCompatible"/> excludes them by construction
+    /// (the legacy comparer cannot produce them).
+    /// </summary>
+    public DocxDiffFormatChangeScope Scope { get; }
+
     internal DocxDiffFormatChange(IrFormatChangeDetails details)
     {
         OldProperties = details.OldProperties;
         NewProperties = details.NewProperties;
         ChangedPropertyNames = details.ChangedPropertyNames;
+        Scope = (DocxDiffFormatChangeScope)details.Scope;
     }
+}
+
+/// <summary>
+/// The property container a <see cref="DocxDiffFormatChange"/> describes. Members mirror the internal
+/// <c>IrFormatChangeScope</c> one-for-one (the cast in <see cref="DocxDiffFormatChange"/> relies on it).
+/// <see cref="TableCell"/>/<see cref="TableRow"/>/<see cref="Table"/> and <see cref="Section"/> are
+/// produced by the table-family and section phases of the block-format-change campaign.
+/// </summary>
+public enum DocxDiffFormatChangeScope
+{
+    /// <summary>Run properties (<c>w:rPr</c> / <c>w:rPrChange</c>-grade) — the pre-existing report.</summary>
+    Run,
+
+    /// <summary>Paragraph properties (<c>w:pPr</c> / <c>w:pPrChange</c>-grade).</summary>
+    Paragraph,
+
+    /// <summary>Table-cell shell properties (<c>w:tcPr</c> / <c>w:tcPrChange</c>-grade).</summary>
+    TableCell,
+
+    /// <summary>Table-row properties (<c>w:trPr</c> / <c>w:trPrChange</c>-grade).</summary>
+    TableRow,
+
+    /// <summary>Table-level properties (<c>w:tblPr</c>+<c>w:tblGrid</c> / <c>w:tblPrChange</c>-grade).</summary>
+    Table,
+
+    /// <summary>Section properties (<c>w:sectPr</c> / <c>w:sectPrChange</c>-grade).</summary>
+    Section,
 }
 
 /// <summary>

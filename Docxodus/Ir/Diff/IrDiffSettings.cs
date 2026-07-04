@@ -266,6 +266,20 @@ internal sealed record IrDiffSettings
     public bool CompareHeadersFooters { get; init; } = true;
 
     /// <summary>
+    /// DIFF-TIME setting (block-format-change family, 2026-07-03). When true (the DEFAULT), paragraph-and-above
+    /// property changes are DETECTED and TRACKED: the aligner's modeled-only block signature includes the
+    /// paragraph's modeled <see cref="IrParaFormat"/> key (so a pPr-only change classifies FormatOnly instead of
+    /// Unchanged), and the markup renderer emits native property-revision markup (<c>w:pPrChange</c>, and — as
+    /// later phases land — the table-shell and section variants) at the sites that clone right-side properties.
+    /// When false, the pre-campaign behavior is restored exactly: block-property deltas are invisible to
+    /// classification and applied untracked. Forced off by <see cref="IrCompositeMerger"/> for its per-reviewer
+    /// diffs — the Consolidate v1 ceiling, pinned by
+    /// <c>BlockFormatChangeTests.Consolidate_ignores_block_format_changes_v1_ceiling</c> (the
+    /// <see cref="CompareHeadersFooters"/> precedent).
+    /// </summary>
+    public bool TrackBlockFormatChanges { get; init; } = true;
+
+    /// <summary>
     /// REVISIONS-SURFACE setting (M2.3 Task 1). Author name stamped on every <see cref="IrRevision"/>'s
     /// <see cref="IrRevision.Author"/>. Default <c>"Open-Xml-PowerTools"</c> — copied verbatim from
     /// <c>WmlComparerSettings.AuthorForRevisions</c> (Docxodus/WmlComparer.cs ~line 54) so an IR-rendered

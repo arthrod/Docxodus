@@ -101,7 +101,8 @@ A `ModifyBlock` over a paragraph carries a `tokenDiff`; over a table, a `tableDi
 | `MoveSimilarityThreshold` | `0.8` | same | |
 | `MoveMinimumWordCount` | `3` | `MoveMinimumTokenCount` | |
 | `RevisionGranularity` | `Fine` | `RevisionGranularity` | `Fine` = engine-native one-revision-per-token-span (byte-stable); `WmlComparerCompatible` = coalesce/trim/prune to match the legacy comparer's coarser revision set |
-| `FormatComparison` | `ModeledOnly` | `IrFormatComparison` | `ModeledOnly` reports only modeled-field deltas (false-negative on unmodeled rPr); `Full` sees every rPr difference |
+| `FormatComparison` | `ModeledOnly` | `IrFormatComparison` | `ModeledOnly` reports only modeled-field deltas (false-negative on unmodeled rPr); `Full` sees every rPr difference. Governs paragraph-property comparison too (block-format-change family — see below) |
+| _(internal)_ `TrackBlockFormatChanges` | `true` | `IrDiffSettings.TrackBlockFormatChanges` | not on the public `DocxDiffSettings`; detect+track paragraph/table/section property changes (below). Forced OFF by `IrCompositeMerger` — the Consolidate v1 ceiling, pinned |
 | `PreAcceptInputRevisions` | `false` | — (a pre-pass, not an `IrDiffSettings` field) | when true, runs `RevisionProcessor.AcceptRevisions` on EACH input before diffing — the first-class "accept-all both sides, then compare" wrapper. See [Inputs that already carry tracked changes](#inputs-that-already-carry-tracked-changes-rule-n13--preacceptinputrevisions). .NET-only in v1 (no bridge ripple). |
 | `CompareHeadersFooters` | `true` | `CompareHeadersFooters` | diff header/footer stories (Word Compare's own default-on granularity — see the Edit script section). `false` restores the carry-left-verbatim behavior. Wire: `compareHeadersFooters` (Ops JSON + npm/python types). |
 
@@ -109,6 +110,28 @@ A `ModifyBlock` over a paragraph carries a `tokenDiff`; over a table, a `tableDi
 
 1. **Deterministic dates.** `WmlComparerSettings.DateTimeForRevisions` defaults to `DateTime.Now` — the same compare twice yields different dates. `DocxDiff` pins a fixed epoch by default so output is reproducible. Opt into wall-clock via `Deterministic = false`.
 2. **`FormatComparison = ModeledOnly`.** A `w:rPrChange`-grade report can only DESCRIBE modeled fields, so a format change driven by an undescribable unmodeled-only rPr flip (`w:lang`, `w:bCs`, complex-script toggles) is noise. `ModeledOnly` collapses that noise; the trade-off is a false negative on a visible-but-unmodeled change (e.g. `w:shd` run shading). `Full` restores byte-fidelity comparison.
+
+### Paragraph-and-above formatting changes (the block-format-change family)
+
+Word's Compare tracks *paragraph-and-above* property changes, not just run formatting. `DocxDiff` produces the native markup Word renders for each (2026-07-03 campaign — strictly ahead of the `WmlComparer` oracle, which emits none of these):
+
+| Scope | Markup | Detection substrate | Round-trip |
+|---|---|---|---|
+| Paragraph | `w:pPrChange` (+ `w:pPr/w:rPr/w:rPrChange` for a changed paragraph mark) | modeled `IrParaFormat` (incl. direct `w:numPr` numId/ilvl) under `ModeledOnly`; the stored fingerprint under `Full` | inner = OLD (left) pPr, minus `w:rPr`/`w:sectPr`/`w:pPrChange` (CT_PPrBase) |
+| Table cell | `w:tcPrChange` | `IrCell.ShellDigest` (whole `w:tcPr`, folded into cell `ContentHash` → a shell edit makes the table *Modified*) | inner = OLD tcPr, minus cellIns/cellDel/cellMerge/tcPrChange (CT_TcPrInner) |
+| Table row | `w:trPrChange` | `IrRow.TrPrDigest` (row shell, folded into the table *fingerprint* → *FormatOnly*) | inner = OLD trPr, minus ins/del/trPrChange (CT_TrPrBase) |
+| Table | `w:tblPrChange` + `w:tblGridChange` | `IrTable.TblPrDigest` / `TblGridDigest` (fingerprint → *FormatOnly*) | tblPrChange inner = OLD tblPr; tblGridChange is CT_Markup (bare `w:id`, no author/date), inner = OLD gridCol run |
+| Section | `w:sectPrChange` on the trailing body `w:sectPr` | modeled `IrSectionFormat` (revision) / canonical props-diff excluding references (markup) | inner = OLD section properties (CT_SectPrBase — no header/footer references) |
+
+Key design points:
+
+- **`FormatComparison` governs paragraphs too.** A modeled paragraph delta (jc/indent/spacing/style/numbering) is detected under `ModeledOnly`; an unmodeled-only pPr delta (e.g. `w:shd`) is the documented false-negative (untracked right-apply) under `ModeledOnly`, seen under `Full` — exactly the run-format trade-off. Table shells and section props are compared canonically (byte-grade) under both policies (there is no modeled/unmodeled split that changes emission there — a documented asymmetry).
+- **The emitted change carries the FULL old properties**, so `accept ≡ right` and `reject ≡ left` hold at the property-byte level (canonical, reference/rsid-normalized) for every detected change — the same rule `w:rPrChange` follows. The reader digests flatten shell *children* (not the wrapper element), so an empty shell ≡ an absent shell — no spurious change from a render→reject-cycle empty `<w:trPr/>`.
+- **Ops carry no new payload.** Detection happens at block pairing (an alignment kind flips Unchanged→FormatOnly, or a shell digest flips ContentHash→Modified); the renderers recompute the delta from the source elements by anchor — the established `w:rPrChange` architecture. The edit-script JSON is unchanged; only the **revisions** wire gains an additive `scope`.
+- **Revision surface.** `DocxDiffRevision.FormatChange` gains `Scope` (`DocxDiffFormatChangeScope`: `Run` default + `Paragraph`/`TableCell`/`TableRow`/`Table`/`Section`). Paragraph/section scopes carry modeled property dictionaries; table scopes are digest-grade (`ChangedPropertyNames = ["shell"]` or `["grid"]`). **`WmlComparerCompatible` excludes every non-`Run` scope** by construction (the oracle produces none — keeps the 179-count parity scoreboard meaningful, the hdr/ftr precedent). `Full`/`Fine` reports them.
+- **A consume-side fix rode along:** rejecting a `w:sectPrChange` (or a `w:pPrChange` on a section-final paragraph) used to drop the section's header/footer references / inline `w:sectPr`, because those live OUTSIDE the tracked change (CT_SectPrBase / CT_PPrBase). `RevisionProcessor` now preserves them. See `docs/ooxml_corner_cases.md`.
+
+**v1 ceilings (documented):** `Consolidate` does not track block-format changes (`IrCompositeMerger` forces `TrackBlockFormatChanges` off — a reviewer's pPr/shell/section-only edit is ignored; text+pPr edits route to the conflict path). Split/merge members, note-scope, and header/footer-scope paragraphs do not emit `w:pPrChange` (their round-trip contracts are content-grade in v1). `w:tblPrExChange` (row-level table exceptions) is not tracked (the row shell digest still flips the fingerprint, so a tblPrEx-only change is a *visible* but untracked right-apply). Mid-document `w:sectPr` (inside a `w:pPr`) is not tracked. Proof: `BlockFormatChangeTests`, `BlockFormatChangeRealDocTests`, and the strengthened `IrMarkupRendererTests` round-trip battery.
 
 ### Inputs that already carry tracked changes (rule N13 + `PreAcceptInputRevisions`)
 
@@ -244,7 +267,7 @@ One before-paragraph whose content migrates across N after-paragraphs (the user 
 | Comparison substrate | Atom streams | Modeled IR (blocks/runs/format records) |
 | Revisions | `WmlComparerRevision` (OOXML members, no anchors) | `DocxDiffRevision` (anchor-addressed; no OOXML members) |
 | Move markup | `GetRevisions`-only post-process; **native `w:moveFrom`/`w:moveTo` IS produced** by the IR markup renderer | native `w:moveFrom`/`w:moveTo` |
-| Format change | detected + described (`w:rPrChange`) | detected + described (modeled-only by default) |
+| Format change | run-level only (`w:rPrChange`) | run + **paragraph/table/section** (`w:rPrChange`/`w:pPrChange`/`w:tcPrChange`/`w:trPrChange`/`w:tblPrChange`/`w:tblGridChange`/`w:sectPrChange`); modeled-only by default |
 | Diff-as-data | none | edit-script JSON |
 | Determinism | wall-clock dates by default | deterministic by default |
 
