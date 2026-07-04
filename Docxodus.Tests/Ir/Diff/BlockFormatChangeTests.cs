@@ -349,6 +349,71 @@ public class BlockFormatChangeTests
         }
     }
 
+    [Fact]
+    public void Consolidate_ignores_table_shell_changes_v1_ceiling()
+    {
+        // Review finding 1: the table-shell REVISION emitters must respect the Consolidate ceiling too — a
+        // reviewer's tcPr/trPr/tblPr-only edit produces neither markup nor a consolidated revision.
+        var baseDoc = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+        var reviewerDoc = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>",
+            grid: "<w:gridCol w:w=\"6000\"/>", tblPr: "<w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\"/></w:tblBorders>"));
+        var reviewer = new DocxDiffReviewer { Document = reviewerDoc, Author = "Reviewer A" };
+
+        var merged = DocxDiff.Consolidate(baseDoc, new[] { reviewer });
+        var body = BodyOf(merged);
+        Assert.Empty(body.Descendants(W + "tblPrChange"));
+        Assert.Empty(body.Descendants(W + "tblGridChange"));
+
+        var revs = DocxDiff.GetConsolidatedRevisions(baseDoc, new[] { reviewer });
+        Assert.DoesNotContain(revs, r => r.FormatChange is { } fc && fc.Scope != DocxDiffFormatChangeScope.Run);
+    }
+
+    [Fact]
+    public void TblPrEx_only_change_is_untracked_and_unreported_consistently()
+    {
+        // Review finding 3a: a w:tblPrEx-only row change is a documented v1 untracked case — it must be
+        // untracked in BOTH the markup (no w:trPrChange) AND the revisions (no TableRow revision), never
+        // reported by one surface and ignored by the other.
+        var left = IrTestDocuments.FromBodyXml(Table(
+            "<w:tblPrEx><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\"/></w:tblBorders></w:tblPrEx>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+        var right = IrTestDocuments.FromBodyXml(Table(
+            "<w:tblPrEx><w:tblBorders><w:top w:val=\"double\" w:sz=\"8\"/></w:tblBorders></w:tblPrEx>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+
+        var body = BodyOf(DocxDiff.Compare(left, right, ModeledOnly));
+        Assert.Empty(body.Descendants(W + "trPrChange"));                                  // untracked in markup
+        Assert.DoesNotContain(DocxDiff.GetRevisions(left, right, ModeledOnly),
+            r => r.FormatChange is { } fc && fc.Scope == DocxDiffFormatChangeScope.TableRow); // and in revisions
+    }
+
+    [Fact]
+    public void Fresh_trPr_is_placed_after_an_existing_tblPrEx()
+    {
+        // Review finding 2: when the RIGHT row has a tblPrEx but no trPr and the LEFT row has a trPr, the
+        // emitted (right-cloned) row gains a fresh trPr for the trPrChange — which must land AFTER the
+        // tblPrEx (CT_Row orders tblPrEx before trPr), or the output is schema-invalid.
+        var left = IrTestDocuments.FromBodyXml(Table(
+            "<w:tblPrEx><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\"/></w:tblBorders></w:tblPrEx><w:trPr><w:trHeight w:val=\"400\"/></w:trPr>",
+            "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+        var right = IrTestDocuments.FromBodyXml(Table(
+            "<w:tblPrEx><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\"/></w:tblBorders></w:tblPrEx>",
+            "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var body = BodyOf(result);
+        var tr = body.Descendants(W + "tr").First();
+        var kids = tr.Elements().Select(e => e.Name.LocalName).ToList();
+        int exIdx = kids.IndexOf("tblPrEx"), trPrIdx = kids.IndexOf("trPr");
+        Assert.True(exIdx >= 0 && trPrIdx > exIdx, $"trPr must follow tblPrEx; order was [{string.Join(",", kids)}]");
+        Assert.Single(body.Descendants(W + "trPrChange"));
+
+        using var ms = new MemoryStream(result.DocumentByteArray);
+        using var wd = WordprocessingDocument.Open(ms, false);
+        var errors = new DocumentFormat.OpenXml.Validation.OpenXmlValidator().Validate(wd)
+            .Where(e => e.ErrorType == DocumentFormat.OpenXml.Validation.ValidationErrorType.Schema)
+            .Select(e => e.Description).ToList();
+        Assert.True(errors.Count == 0, string.Join("\n", errors));
+    }
+
     // ------------------------------------------------------------------ trailing sectPr-only (w:pgSz)
 
     private static readonly WmlDocument SectLeft = IrTestDocuments.FromBodyXml(

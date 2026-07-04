@@ -3542,13 +3542,19 @@ internal static class IrMarkupRenderer
     }
 
     /// <summary>Insert a freshly-created shell element at its schema position: <c>w:tblPr</c> first in the
-    /// table; <c>w:tblGrid</c> after <c>w:tblPr</c>; <c>w:trPr</c>/<c>w:tcPr</c> first in the row/cell.</summary>
+    /// table; <c>w:tblGrid</c> after <c>w:tblPr</c>; <c>w:trPr</c> after an existing <c>w:tblPrEx</c> (CT_Row
+    /// orders <c>tblPrEx</c> before <c>trPr</c>), else first; <c>w:tcPr</c> first in the cell.</summary>
     private static void InsertShellInSchemaOrder(XElement host, XElement shell, XName shellName)
     {
         if (shellName == W.tblGrid)
         {
             var tblPr = host.Element(W.tblPr);
             if (tblPr != null) { tblPr.AddAfterSelf(shell); return; }
+        }
+        else if (shellName == W.trPr)
+        {
+            var tblPrEx = host.Element(W.tblPrEx);
+            if (tblPrEx != null) { tblPrEx.AddAfterSelf(shell); return; }
         }
         host.AddFirst(shell);
     }

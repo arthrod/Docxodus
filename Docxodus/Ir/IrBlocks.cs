@@ -132,6 +132,14 @@ internal sealed record IrRow(IrAnchor Anchor, IrNodeList<IrCell> Cells, IrHash C
     public IrHash TrPrDigest { get; init; }
 
     /// <summary>
+    /// Canonical hash of the row's `w:trPr` FLATTENED children ONLY (excludes `w:tblPrEx`; empty ≡ absent).
+    /// This is the exactly-trackable subset the markup's `w:trPrChange` attribution and the revision surface
+    /// compare — so `GetRevisions`, `Compare`'s markup, and the round-trip contract agree (a `w:tblPrEx`-only
+    /// change is untracked in ALL three, not reported by one and ignored by another). NOT in the fingerprint.
+    /// </summary>
+    public IrHash TrPrShellDigest { get; init; }
+
+    /// <summary>
     /// True when this row was delivered by a table-level <c>w:sdt</c> wrapping a <c>w:tr</c> (e.g. a
     /// repeating-section content control), rather than being a direct <c>w:tr</c> child of the
     /// <c>w:tbl</c>. Equality-participating (the same table read twice yields the same flag; a row
@@ -163,6 +171,16 @@ internal sealed record IrCell(IrAnchor Anchor, IrNodeList<IrBlock> Blocks,
     /// (attribute a single shell edit / conflict competing ones) without source-element access.
     /// </summary>
     public IrHash ShellDigest { get; init; }
+
+    /// <summary>
+    /// Canonical hash of the cell's `w:tcPr` FLATTENED children (empty ≡ absent) — the revision-surface
+    /// analogue of <see cref="ShellDigest"/>. <see cref="ShellDigest"/> (the whole `w:tcPr` element, folded
+    /// into <see cref="IrBlock.ContentHash"/>) distinguishes an empty `&lt;w:tcPr/&gt;` from an absent one;
+    /// the markup's `CleanShell` and this digest do NOT, so the `w:tcPrChange` markup and the `TableCell`
+    /// revision agree (no spurious revision from an empty-vs-absent shell a reject-cycle can leave). NOT in
+    /// <see cref="IrBlock.ContentHash"/> — a separate projection, so the alignment substrate is unchanged.
+    /// </summary>
+    public IrHash TcPrShellDigest { get; init; }
 
     /// <summary>
     /// True when this cell was delivered by a row-level <c>w:sdt</c> wrapping a <c>w:tc</c>

@@ -202,7 +202,11 @@ public class IrMarkupRendererTests
                     + "|tblPr:" + t.TblPrDigest.ToHex() + "|tblGrid:" + t.TblGridDigest.ToHex());
                 foreach (var row in t.Rows)
                 {
-                    sink.Add("trf:" + row.TrPrDigest.ToHex());
+                    // The TRACKABLE row-shell subset (w:trPr children only — TrPrShellDigest, not the
+                    // fingerprint's tblPrEx-inclusive TrPrDigest), so the round-trip contract verifies exactly
+                    // what the markup tracks: a w:tblPrEx-only change is untracked (right-applied) in BOTH the
+                    // markup and this assertion, mirroring how the pPr signature is modeled-grade.
+                    sink.Add("trf:" + row.TrPrShellDigest.ToHex());
                     foreach (var cell in row.Cells)
                         foreach (var b in cell.Blocks)
                             CollectFormatSignatures(b, settings, sink);

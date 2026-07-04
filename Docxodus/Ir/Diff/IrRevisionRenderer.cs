@@ -557,8 +557,11 @@ internal static class IrRevisionRenderer
             }
             RenderTableDiff(tableDiff, ctx, sink);
             // Block-format-change family (2026-07-03): report table/row/cell SHELL changes (tblPr/tblGrid/
-            // trPr/tcPr) as digest-grade FormatChanged revisions, after the cell text revisions.
-            if (ResolveTable(op.LeftAnchor, ctx.Left) is { } lt && ResolveTable(op.RightAnchor, ctx.Right) is { } rt)
+            // trPr/tcPr) as digest-grade FormatChanged revisions, after the cell text revisions. Gated on
+            // TrackBlockFormatChanges so the Consolidate ceiling holds on the REVISIONS surface too — the
+            // composite renderers force the flag off, and the markup emits no *PrChange there.
+            if (ctx.Settings.TrackBlockFormatChanges
+                && ResolveTable(op.LeftAnchor, ctx.Left) is { } lt && ResolveTable(op.RightAnchor, ctx.Right) is { } rt)
                 EmitTableModifiedShellRevisions(lt, rt, tableDiff, ctx, sink);
             return;
         }
@@ -1259,7 +1262,7 @@ internal static class IrRevisionRenderer
         // nothing describable at token grain.
         if (leftTokens.Count == 0 && rightTokens.Count == 0)
         {
-            if (!paraEmitted
+            if (!paraEmitted && ctx.Settings.TrackBlockFormatChanges
                 && ResolveTable(op.LeftAnchor, ctx.Left) is { } lt
                 && ResolveTable(op.RightAnchor, ctx.Right) is { } rt)
                 EmitTableFormatOnlyShellRevisions(lt, rt, ctx, sink);
@@ -1519,13 +1522,16 @@ internal static class IrRevisionRenderer
 
     private static void EmitRowAndCellShellRevisions(IrRow left, IrRow right, in Context ctx, List<IrRevision> sink)
     {
-        if (!left.TrPrDigest.Equals(right.TrPrDigest))
+        // Compare the flattened trackable projections (w:trPr children only, empty ≡ absent) — the exact
+        // subset the markup's w:trPrChange/w:tcPrChange attribution uses — so GetRevisions and Compare agree
+        // (a w:tblPrEx-only or empty-vs-absent-shell change is untracked in BOTH, never reported by one alone).
+        if (!left.TrPrShellDigest.Equals(right.TrPrShellDigest))
             sink.Add(TableShellRevision(IrFormatChangeScope.TableRow, "shell",
                 left.Anchor.ToString(), right.Anchor.ToString(), ctx));
 
         int cn = System.Math.Min(left.Cells.Count, right.Cells.Count);
         for (int c = 0; c < cn; c++)
-            if (!left.Cells[c].ShellDigest.Equals(right.Cells[c].ShellDigest))
+            if (!left.Cells[c].TcPrShellDigest.Equals(right.Cells[c].TcPrShellDigest))
                 sink.Add(TableShellRevision(IrFormatChangeScope.TableCell, "shell",
                     left.Cells[c].Anchor.ToString(), right.Cells[c].Anchor.ToString(), ctx));
     }

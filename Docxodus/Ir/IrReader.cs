@@ -1921,11 +1921,15 @@ internal static class IrReader
         // the wrapper element) makes an EMPTY shell hash-equal to an ABSENT shell — so an empty `<w:trPr/>`
         // left by a render→reject cycle is not a spurious change (matching the renderer's CleanShell rule).
         var trPrDigest = ShellChildrenDigest(tr.Elements().Where(e => e.Name != W + "tc" && e.Name != W + "sdt"));
+        // The trackable subset the markup + revision surfaces agree on: w:trPr children ONLY (no tblPrEx).
+        var trPr = tr.Element(W + "trPr");
+        var trPrShellDigest = ShellChildrenDigest(trPr != null ? new[] { trPr } : System.Array.Empty<XElement>());
 
         var row = new IrRow(AnchorFor(IrAnchorKind.Tr, tr, ctx), IrNodeList.From(cells), rowBuilder.Build())
         {
             Source = ctx.Provenance(tr),
             TrPrDigest = trPrDigest,
+            TrPrShellDigest = trPrShellDigest,
         };
         return (row, cellFingerprints);
     }
@@ -2007,6 +2011,8 @@ internal static class IrReader
         // soundness bug). Also stored on the IrCell so the N-way merger can attribute/conflict competing
         // shell edits without re-resolving source elements.
         var shellDigest = tcPr != null ? IrHasher.CanonicalHash(tcPr) : default;
+        // Flattened tcPr projection (empty ≡ absent) for the revision surface — see IrCell.TcPrShellDigest.
+        var tcPrShellDigest = ShellChildrenDigest(tcPr != null ? new[] { tcPr } : System.Array.Empty<XElement>());
 
         var blocks = new List<IrBlock>();
         var fingerprints = new List<IrHash>();
@@ -2038,6 +2044,7 @@ internal static class IrReader
         {
             Source = ctx.Provenance(tc),
             ShellDigest = shellDigest,
+            TcPrShellDigest = tcPrShellDigest,
         };
         return (cell, fingerprints);
     }
