@@ -334,6 +334,62 @@ public class BlockFormatChangeTests
         (string?)BodyOf(doc).Elements(W + "p").First().Element(W + "pPr")?.Element(W + "sectPr")?.Element(W + "pgSz")?.Attribute(W + "w");
 
     [Fact]
+    public void Paragraph_with_both_pPr_and_inline_sectPr_change_is_schema_valid_and_round_trips()
+    {
+        // Review Note C: exercise the BOTH-fire path (a modeled pPr change AND an inline sectPr change on the
+        // same paragraph) — the pPrChange (last pPr child) must sit AFTER the sectPr, and both round-trip.
+        const string body = "<w:p><w:pPr>{P}<w:sectPr>{S}</w:sectPr></w:pPr><w:r><w:t>Section body.</w:t></w:r></w:p>"
+            + "<w:p><w:r><w:t>Next.</w:t></w:r></w:p>";
+        var left = IrTestDocuments.FromBodyXml(body.Replace("{P}", "").Replace("{S}", "<w:pgSz w:w=\"12240\" w:h=\"15840\"/>"));
+        var right = IrTestDocuments.FromBodyXml(body.Replace("{P}", "<w:jc w:val=\"center\"/>").Replace("{S}", "<w:pgSz w:w=\"15840\" w:h=\"12240\"/>"));
+
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var pPr = BodyOf(result).Elements(W + "p").First().Element(W + "pPr")!;
+        Assert.Single(pPr.Elements(W + "pPrChange"));                                       // pPr change
+        Assert.Single(pPr.Element(W + "sectPr")!.Elements(W + "sectPrChange"));             // inline sect change
+        // Schema order: sectPr must precede pPrChange (both present).
+        var kids = pPr.Elements().Select(e => e.Name.LocalName).ToList();
+        Assert.True(kids.IndexOf("sectPr") < kids.IndexOf("pPrChange"),
+            $"sectPr must precede pPrChange; order was [{string.Join(",", kids)}]");
+
+        using (var ms = new MemoryStream(result.DocumentByteArray))
+        using (var wd = WordprocessingDocument.Open(ms, false))
+            Assert.Empty(new DocumentFormat.OpenXml.Validation.OpenXmlValidator().Validate(wd)
+                .Where(e => e.ErrorType == DocumentFormat.OpenXml.Validation.ValidationErrorType.Schema)
+                .Select(e => e.Description));
+
+        // Both changes round-trip: reject restores left jc-absence AND left page size.
+        var rejected = RevisionProcessor.RejectRevisions(result);
+        Assert.Empty(BodyOf(rejected).Elements(W + "p").First().Element(W + "pPr")!.Elements(W + "jc"));
+        Assert.Equal("12240", InlinePgW(rejected));
+        Assert.Equal("15840", InlinePgW(RevisionProcessor.AcceptRevisions(result)));
+    }
+
+    [Fact]
+    public void Fresh_tblPrEx_is_placed_before_an_existing_trPr()
+    {
+        // Review Note C: the removal-direction of the schema-order guard — a fresh w:tblPrEx (right row had
+        // none) must land BEFORE an existing w:trPr (CT_Row: tblPrEx, then trPr).
+        var left = IrTestDocuments.FromBodyXml(Table("<w:trPr><w:trHeight w:val=\"400\"/></w:trPr>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+        var right = IrTestDocuments.FromBodyXml(Table(
+            "<w:tblPrEx><w:tblBorders><w:top w:val=\"double\" w:sz=\"8\"/></w:tblBorders></w:tblPrEx><w:trPr><w:trHeight w:val=\"400\"/></w:trPr>",
+            "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var tr = BodyOf(result).Descendants(W + "tr").First();
+        var kids = tr.Elements().Select(e => e.Name.LocalName).ToList();
+        Assert.True(kids.IndexOf("tblPrEx") >= 0 && kids.IndexOf("tblPrEx") < kids.IndexOf("trPr"),
+            $"tblPrEx must precede trPr; order was [{string.Join(",", kids)}]");
+        Assert.Single(tr.Descendants(W + "tblPrExChange"));
+
+        using var ms = new MemoryStream(result.DocumentByteArray);
+        using var wd = WordprocessingDocument.Open(ms, false);
+        Assert.Empty(new DocumentFormat.OpenXml.Validation.OpenXmlValidator().Validate(wd)
+            .Where(e => e.ErrorType == DocumentFormat.OpenXml.Validation.ValidationErrorType.Schema)
+            .Select(e => e.Description));
+    }
+
+    [Fact]
     public void Inline_sectPr_props_participate_in_paragraph_fingerprint()
     {
         var opts = new IrReaderOptions { RetainSources = false };
