@@ -102,7 +102,7 @@ A `ModifyBlock` over a paragraph carries a `tokenDiff`; over a table, a `tableDi
 | `MoveMinimumWordCount` | `3` | `MoveMinimumTokenCount` | |
 | `RevisionGranularity` | `Fine` | `RevisionGranularity` | `Fine` = engine-native one-revision-per-token-span (byte-stable); `WmlComparerCompatible` = coalesce/trim/prune to match the legacy comparer's coarser revision set |
 | `FormatComparison` | `ModeledOnly` | `IrFormatComparison` | `ModeledOnly` reports only modeled-field deltas (false-negative on unmodeled rPr); `Full` sees every rPr difference. Governs paragraph-property comparison too (block-format-change family — see below) |
-| _(internal)_ `TrackBlockFormatChanges` | `true` | `IrDiffSettings.TrackBlockFormatChanges` | not on the public `DocxDiffSettings`; detect+track paragraph/table/section property changes (below). Forced OFF by `IrCompositeMerger` — the Consolidate v1 ceiling, pinned |
+| `TrackBlockFormatChanges` | `true` | `IrDiffSettings.TrackBlockFormatChanges` | public opt-out; detect+track paragraph/table/section property changes (below). Forced OFF by `IrCompositeMerger` — the Consolidate v1 ceiling, pinned — regardless of this value. Wire: `trackBlockFormatChanges` (Ops JSON + npm/python) |
 | `PreAcceptInputRevisions` | `false` | — (a pre-pass, not an `IrDiffSettings` field) | when true, runs `RevisionProcessor.AcceptRevisions` on EACH input before diffing — the first-class "accept-all both sides, then compare" wrapper. See [Inputs that already carry tracked changes](#inputs-that-already-carry-tracked-changes-rule-n13--preacceptinputrevisions). .NET-only in v1 (no bridge ripple). |
 | `CompareHeadersFooters` | `true` | `CompareHeadersFooters` | diff header/footer stories (Word Compare's own default-on granularity — see the Edit script section). `false` restores the carry-left-verbatim behavior. Wire: `compareHeadersFooters` (Ops JSON + npm/python types). |
 
@@ -119,9 +119,11 @@ Word's Compare tracks *paragraph-and-above* property changes, not just run forma
 |---|---|---|---|
 | Paragraph | `w:pPrChange` (+ `w:pPr/w:rPr/w:rPrChange` for a changed paragraph mark) | modeled `IrParaFormat` (incl. direct `w:numPr` numId/ilvl) under `ModeledOnly`; the stored fingerprint under `Full` | inner = OLD (left) pPr, minus `w:rPr`/`w:sectPr`/`w:pPrChange` (CT_PPrBase) |
 | Table cell | `w:tcPrChange` | `IrCell.ShellDigest` (whole `w:tcPr`, folded into cell `ContentHash` → a shell edit makes the table *Modified*) | inner = OLD tcPr, minus cellIns/cellDel/cellMerge/tcPrChange (CT_TcPrInner) |
-| Table row | `w:trPrChange` | `IrRow.TrPrDigest` (row shell, folded into the table *fingerprint* → *FormatOnly*) | inner = OLD trPr, minus ins/del/trPrChange (CT_TrPrBase) |
+| Table row | `w:trPrChange` | `IrRow.TrPrShellDigest` (trPr-only) for attribution; `TrPrDigest` (row shell incl tblPrEx) folds into the *fingerprint* → *FormatOnly* | inner = OLD trPr, minus ins/del/trPrChange (CT_TrPrBase) |
+| Table row (exceptions) | `w:tblPrExChange` | `IrRow.TrPrExDigest` (tblPrEx-only flattened) | inner = OLD tblPrEx (CT_TblPrExBase); a `TableRow` revision with changed-name `"tblPrEx"` |
 | Table | `w:tblPrChange` + `w:tblGridChange` | `IrTable.TblPrDigest` / `TblGridDigest` (fingerprint → *FormatOnly*) | tblPrChange inner = OLD tblPr; tblGridChange is CT_Markup (bare `w:id`, no author/date), inner = OLD gridCol run |
-| Section | `w:sectPrChange` on the trailing body `w:sectPr` | modeled `IrSectionFormat` (revision) / canonical props-diff excluding references (markup) | inner = OLD section properties (CT_SectPrBase — no header/footer references) |
+| Section (trailing) | `w:sectPrChange` on the trailing body `w:sectPr` | modeled `IrSectionFormat` (revision) / canonical props-diff excluding references (markup) | inner = OLD section properties (CT_SectPrBase — no header/footer references) |
+| Section (mid-document) | `w:sectPrChange` inside a paragraph's `w:pPr/w:sectPr` | `IrParagraph.InlineSectionFormat` (folded into the paragraph fingerprint + `BlockSignature`) | inner = OLD inline section properties; a per-paragraph Section revision. One-sided add/remove is structural (untracked) |
 
 Key design points:
 
@@ -131,7 +133,17 @@ Key design points:
 - **Revision surface.** `DocxDiffRevision.FormatChange` gains `Scope` (`DocxDiffFormatChangeScope`: `Run` default + `Paragraph`/`TableCell`/`TableRow`/`Table`/`Section`). Paragraph/section scopes carry modeled property dictionaries; table scopes are digest-grade (`ChangedPropertyNames = ["shell"]` or `["grid"]`). **`WmlComparerCompatible` excludes every non-`Run` scope** by construction (the oracle produces none — keeps the 179-count parity scoreboard meaningful, the hdr/ftr precedent). `Full`/`Fine` reports them.
 - **A consume-side fix rode along:** rejecting a `w:sectPrChange` (or a `w:pPrChange` on a section-final paragraph) used to drop the section's header/footer references / inline `w:sectPr`, because those live OUTSIDE the tracked change (CT_SectPrBase / CT_PPrBase). `RevisionProcessor` now preserves them. See `docs/ooxml_corner_cases.md`.
 
-**v1 ceilings (documented):** `Consolidate` does not track block-format changes (`IrCompositeMerger` forces `TrackBlockFormatChanges` off — a reviewer's pPr/shell/section-only edit is ignored; text+pPr edits route to the conflict path). Split/merge members, note-scope, and header/footer-scope paragraphs do not emit `w:pPrChange` (their round-trip contracts are content-grade in v1). `w:tblPrExChange` (row-level table exceptions) is not tracked (the row shell digest still flips the fingerprint, so a tblPrEx-only change is a *visible* but untracked right-apply). Mid-document `w:sectPr` (inside a `w:pPr`) is not tracked. Proof: `BlockFormatChangeTests`, `BlockFormatChangeRealDocTests`, and the strengthened `IrMarkupRendererTests` round-trip battery.
+**Scope coverage (two-way engine — the follow-up A batch, 2026-07-03, closed the gaps below):**
+- **`w:tblPrExChange`** (row-level table property exceptions) is now **tracked** — `IrRow.TrPrExDigest` (a flattened `tblPrEx`-only projection, parallel to `TrPrShellDigest`) drives a `w:tblPrExChange` marker + a `TableRow`-scope revision with the distinct changed-name `"tblPrEx"`; reject restores the left bytes.
+- **Mid-document `w:sectPrChange`** (an inline `w:sectPr` inside a `w:pPr`) is now **tracked** — the reader models it as `IrParagraph.InlineSectionFormat` (folded into the paragraph `FormatFingerprint` AND `IrModeledFormat.BlockSignature` so a sectPr-only change classifies FormatOnly under `ModeledOnly`), and the emit stamps `w:sectPrChange` inside the paragraph's `w:pPr/w:sectPr` (not the `pPrChange` inner — CT_PPrBase excludes sectPr) with a per-paragraph Section revision. A *one-sided* inline sectPr (added/removed) is a structural change, not a property change — untracked.
+- **Note-scope and header/footer-scope `w:pPrChange`** already work (they route through the same `RenderBlockOp` dispatch as the body, with no per-scope gate) — proven by `BlockFormatChangeTests` (footnote + header pPrChange), not a ceiling.
+- **`TrackBlockFormatChanges`** is now a **public opt-out** on `DocxDiffSettings` (default true; wire key `trackBlockFormatChanges`, npm/python surfaced).
+
+**Remaining v1 ceilings (documented + pinned):**
+- **`Consolidate` does not track block-format changes** (`IrCompositeMerger` forces `TrackBlockFormatChanges` off — a reviewer's pPr/shell/section-only edit is ignored; text+pPr edits route to the conflict path). This is **sub-project B** (the N-way merge), still open.
+- **Split/merge members do not emit `w:pPrChange`** — a **deliberate, principled decline**: a split's members are brand-new right paragraphs already tracked by the inserted pilcrow mark (there is no per-member left baseline to diff against), and a merge's non-final members carry deleted marks; a pPr "change" on them is not well-defined and would fight the reject-fuse. Pinned by `Split_members_do_not_emit_pPrChange_declined_v1`.
+
+Proof: `BlockFormatChangeTests`, `BlockFormatChangeRealDocTests` (a real corpus doc mutated across the full table + section family), and the strengthened `IrMarkupRendererTests` round-trip battery.
 
 ### Inputs that already carry tracked changes (rule N13 + `PreAcceptInputRevisions`)
 
