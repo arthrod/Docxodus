@@ -1901,9 +1901,15 @@ namespace Docxodus
                     if (savedSectPr != null)
                     {
                         var xd = wDocWithRevisions.MainDocumentPart.GetXDocument();
-                        // add everything but headers/footers
+                        // Header/footer parts stay in the source package; keep the section references so Word renders them.
+                        // NOTE: WmlComparer does NOT compare header/footer content — these references (and their parts)
+                        // are the LEFT (before) document's, carried as-is. This is safe because savedSectPr comes from
+                        // wDoc1 and the output package is a copy of source1, so the r:ids always resolve. Actual
+                        // header/footer comparison is DocxDiff's CompareHeadersFooters.
                         var clonedSectPr = new XElement(W.sectPr,
                             savedSectPr.Attributes(),
+                            savedSectPr.Elements(W.headerReference),
+                            savedSectPr.Elements(W.footerReference),
                             savedSectPr.Element(W.type),
                             savedSectPr.Element(W.pgSz),
                             savedSectPr.Element(W.pgMar),
