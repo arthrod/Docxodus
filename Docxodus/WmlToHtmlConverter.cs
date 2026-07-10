@@ -6472,12 +6472,14 @@ namespace Docxodus
             // packages without word/settings.xml fine. Missing DocumentSettingsPart used
             // to throw ArgumentNullException("part") via GetXDocument and abort conversion
             // for the bulk of minimal fixtures (id_paraid_overflow / style demos).
-            var settingsPart = wordDoc.MainDocumentPart?.DocumentSettingsPart;
+            // MainDocumentPart is non-null by this point in ConvertToHtml (used directly below).
+            var settingsPart = wordDoc.MainDocumentPart.DocumentSettingsPart;
             var defaultTabStop = 720;
             if (settingsPart != null)
             {
                 var sxd = settingsPart.GetXDocument();
-                var defaultTabStopValue = (string)sxd.Descendants(W.defaultTabStop).Attributes(W.val).FirstOrDefault();
+                // w:defaultTabStop is a direct child of w:settings (not nested).
+                var defaultTabStopValue = (string)sxd.Root?.Element(W.defaultTabStop)?.Attribute(W.val);
                 if (defaultTabStopValue != null)
                     defaultTabStop = WordprocessingMLUtil.StringToTwips(defaultTabStopValue);
             }
