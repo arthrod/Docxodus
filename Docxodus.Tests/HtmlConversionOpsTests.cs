@@ -348,4 +348,126 @@ public class HtmlConversionOpsTests
         string html = HtmlConversionOps.ConvertToHtml(ms.ToArray(), new HtmlConversionOptions());
         Assert.Contains("Hello no-settings package", html);
     }
+
+    // CalculateSpanWidthForTabs (WmlToHtmlConverter.cs) computes a tab's rendered width from
+    // w:defaultTabStop. This pins the actual numeric fallback (720 twips == 0.5in) that
+    // HCO057 only proved didn't crash — i.e. the missing-settings path doesn't just avoid
+    // throwing, it produces the SAME width Word itself defaults to for an unset tab stop.
+    [Fact]
+    public void HCO058_MissingDocumentSettingsPart_TabWidthDefaultsTo720Twips()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Wp.Document(
+                new Wp.Body(
+                    new Wp.Paragraph(
+                        new Wp.Run(new Wp.TabChar()),
+                        new Wp.Run(new Wp.Text("AfterTab")))));
+            main.AddNewPart<StyleDefinitionsPart>().Styles = new Wp.Styles();
+            // DocumentSettingsPart intentionally omitted.
+            main.Document.Save();
+        }
+
+        string html = HtmlConversionOps.ConvertToHtml(ms.ToArray(), new HtmlConversionOptions());
+
+        Assert.Contains("AfterTab", html);
+        // 720 twips (Word's implicit default tab stop) == 0.5in from position 0.
+        Assert.Contains("margin: 0 0 0 0.50in", html);
+    }
+
+    // Same computation, but with an explicit DocumentSettingsPart that overrides
+    // w:defaultTabStop — proves the "settingsPart != null" branch introduced by the same
+    // refactor still reads the configured value correctly (not just the null-guard path).
+    [Fact]
+    public void HCO059_DocumentSettingsPartWithCustomDefaultTabStop_TabWidthUsesConfiguredValue()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Wp.Document(
+                new Wp.Body(
+                    new Wp.Paragraph(
+                        new Wp.Run(new Wp.TabChar()),
+                        new Wp.Run(new Wp.Text("AfterTab")))));
+            main.AddNewPart<StyleDefinitionsPart>().Styles = new Wp.Styles();
+            main.AddNewPart<DocumentSettingsPart>().Settings =
+                new Wp.Settings(new Wp.DefaultTabStop { Val = 1440 }); // 1 inch
+            main.Document.Save();
+        }
+
+        string html = HtmlConversionOps.ConvertToHtml(ms.ToArray(), new HtmlConversionOptions());
+
+        Assert.Contains("AfterTab", html);
+        Assert.Contains("margin: 0 0 0 1.00in", html);
+        Assert.DoesNotContain("margin: 0 0 0 0.50in", html);
+    }
+
+    // DocumentSettingsPart present but with no w:defaultTabStop element at all (legal — the
+    // element is optional within w:settings). Must fall back to the same 720-twip default as
+    // when the whole part is absent, not throw and not silently use 0.
+    [Fact]
+    public void HCO060_DocumentSettingsPartWithoutDefaultTabStopElement_FallsBackTo720Twips()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Wp.Document(
+                new Wp.Body(
+                    new Wp.Paragraph(
+                        new Wp.Run(new Wp.TabChar()),
+                        new Wp.Run(new Wp.Text("AfterTab")))));
+            main.AddNewPart<StyleDefinitionsPart>().Styles = new Wp.Styles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Wp.Settings(); // no DefaultTabStop child
+            main.Document.Save();
+        }
+
+        string html = HtmlConversionOps.ConvertToHtml(ms.ToArray(), new HtmlConversionOptions());
+
+        Assert.Contains("AfterTab", html);
+        Assert.Contains("margin: 0 0 0 0.50in", html);
+    }
+
+    // AddFormattingParts (HtmlConversionOps.cs) copies formatting parts into the RenderBlockHtml
+    // throwaway doc and always injects an empty DocumentSettingsPart when the source has none, so
+    // the single-block path never even reaches the null-settings branch of
+    // CalculateSpanWidthForTabs. Regression check that a source docx with no
+    // DocumentSettingsPart at all still round-trips through RenderBlockHtml without crashing.
+    [Fact]
+    public void HCO061_RenderBlockHtml_SourceMissingDocumentSettingsPart_DoesNotCrash()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Wp.Document(
+                new Wp.Body(
+                    new Wp.Paragraph(
+                        new Wp.Run(new Wp.Text("HCO061 block text")))));
+            main.AddNewPart<StyleDefinitionsPart>().Styles = new Wp.Styles();
+            // DocumentSettingsPart intentionally omitted from the source document.
+            main.Document.Save();
+        }
+        byte[] bytes = ms.ToArray();
+
+        using (var reopenStream = new MemoryStream(bytes))
+        using (var reopen = WordprocessingDocument.Open(reopenStream, false))
+        {
+            Assert.Null(reopen.MainDocumentPart!.DocumentSettingsPart);
+        }
+
+        var opts = new HtmlConversionOptions { FabricateCssClasses = false };
+        string full = HtmlConversionOps.ConvertToHtml(bytes,
+            new HtmlConversionOptions { StampAnchors = true, FabricateCssClasses = false });
+        var anchorEl = System.Xml.Linq.XElement.Parse(full).Descendants()
+            .First(e => (string?)e.Attribute("data-anchor") != null);
+        string anchorId = (string)anchorEl.Attribute("data-anchor")!;
+
+        string block = HtmlConversionOps.RenderBlockHtml(bytes, anchorId, opts);
+
+        Assert.Contains("HCO061 block text", block);
+    }
 }
