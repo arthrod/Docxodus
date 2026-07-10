@@ -431,11 +431,9 @@ public class HtmlConversionOpsTests
         Assert.Contains("margin: 0 0 0 0.50in", html);
     }
 
-    // AddFormattingParts (HtmlConversionOps.cs) copies formatting parts into the RenderBlockHtml
-    // throwaway doc and always injects an empty DocumentSettingsPart when the source has none, so
-    // the single-block path never even reaches the null-settings branch of
-    // CalculateSpanWidthForTabs. Regression check that a source docx with no
-    // DocumentSettingsPart at all still round-trips through RenderBlockHtml without crashing.
+    // AddFormattingParts copies formatting parts into the RenderBlockHtml throwaway doc but no
+    // longer invents a dummy DocumentSettingsPart. Regression: a source with no settings part
+    // must still round-trip through RenderBlockHtml without crashing (converter defaults tab stop).
     [Fact]
     public void HCO061_RenderBlockHtml_SourceMissingDocumentSettingsPart_DoesNotCrash()
     {
