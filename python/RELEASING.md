@@ -97,7 +97,7 @@ The matrix is in `.github/workflows/python-publish.yml` under `build-wheel`. Eac
 
 - **Code signing on macOS** — wheels ship an unsigned `docxodus-pyhost`. First launch may trigger a Gatekeeper warning; user can bypass via right-click → Open or `xattr -d com.apple.quarantine`. Proper signing + notarization is a future ask; needs an Apple Developer ID and an `APPLE_*` secret bundle in CI.
 - **Authenticode signing on Windows** — same story. Unsigned `.exe` triggers SmartScreen on first run. Needs a code-signing cert.
-- **Glibc compliance for Linux ARM** — `ubuntu-22.04-arm` runner has glibc 2.35; we claim `manylinux_2_28_aarch64`. The .NET 8 self-contained binary should be glibc-2.28-compatible but we don't run `auditwheel` to enforce it. If users on older arm64 distros report `GLIBC_2.34 not found`, build inside a `quay.io/pypa/manylinux_2_28_aarch64` container instead.
+- **Glibc compliance for Linux ARM** — `ubuntu-22.04-arm` runner has glibc 2.35; we claim `manylinux_2_28_aarch64`. The .NET 10 self-contained binary should be glibc-2.28-compatible but we don't run `auditwheel` to enforce it. If users on older arm64 distros report `GLIBC_2.34 not found`, build inside a `quay.io/pypa/manylinux_2_28_aarch64` container instead.
 
 ## Troubleshooting
 

@@ -124,6 +124,36 @@ The `DocxSession` class exposes every op in `Docxodus.Internal.DocxSessionOps` a
 
 Every mutation method returns an `EditResult` envelope — transport-level failures raise `DocxodusTransportError`, but a business outcome (`anchor_not_found`, `malformed_markdown`, etc.) returns `EditResult(success=False, error=EditError(...))`. **Never** an exception across the API boundary.
 
+### Stateless functions
+
+Alongside the session API, the package exposes stateless one-shot functions at the module root — no session handle, they take DOCX bytes in and return bytes / data out:
+
+| Function | Signature | Returns |
+|---|---|---|
+| `convert_docx_to_html` | `(data, options=None)` | HTML `str` |
+| `docx_diff_compare` | `(left, right, settings=None)` | redlined DOCX `bytes` (native `w:ins`/`w:del`/`w:moveFrom`/`w:moveTo`/`w:rPrChange` markup) |
+| `docx_diff_get_revisions` | `(left, right, settings=None)` | `tuple[DocxDiffRevision, ...]` |
+| `docx_diff_get_edit_script` | `(left, right, settings=None)` | edit-script JSON `str` |
+| `docx_diff_accept_revisions` | `(redline)` | `bytes` — accept every tracked change (≡ the right side of the diff) |
+| `docx_diff_reject_revisions` | `(redline)` | `bytes` — reject every tracked change (≡ the left side) |
+| `docx_diff_consolidate` | `(base, reviewers, settings=None)` | multi-author redlined DOCX `bytes` — merge N `DocxDiffReviewer` diffs against one shared base |
+| `docx_diff_get_conflicts` | `(base, reviewers, settings=None)` | `tuple[DocxDiffConflict, ...]` |
+| `docx_diff_get_consolidated_revisions` | `(base, reviewers, settings=None)` | `tuple[DocxDiffConsolidatedRevision, ...]` |
+| `docx_diff_get_consolidated_edit_script` | `(base, reviewers, settings=None)` | edit-script JSON `str` |
+
+The `docx_diff_*` family is a thin client over Docxodus' `DocxDiff` IR diff engine. Tune pairwise comparisons with `DocxDiffSettings` and N-way consolidation with `DocxDiffConsolidateSettings` (whose `conflict_resolution` takes a `ConflictResolution` value). `DetectMoves`/format-change tracking, header/footer comparison, and per-reviewer attribution all round-trip through these calls.
+
+```python
+from docx_scalpel import docx_diff_compare, docx_diff_get_revisions, DocxDiffSettings
+
+with open("v1.docx", "rb") as f: left = f.read()
+with open("v2.docx", "rb") as f: right = f.read()
+
+redline = docx_diff_compare(left, right, DocxDiffSettings(author_for_revisions="Reviewer"))
+for rev in docx_diff_get_revisions(left, right):
+    print(rev.type, rev.text)
+```
+
 ## License
 
 MIT. Built on top of [Docxodus](https://github.com/JSv4/Docxodus), which is itself a fork of Open-Xml-PowerTools.
