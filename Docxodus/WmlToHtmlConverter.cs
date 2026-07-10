@@ -6155,6 +6155,16 @@ namespace Docxodus
             return root.Annotation<ThemeColorScheme>();
         }
 
+        /// <summary>Settings is optional in OOXML — Word opens packages without word/settings.xml
+        /// fine — so callers that need w:settings content must null-check DocumentSettingsPart
+        /// before calling GetXDocument (which throws ArgumentNullException("part") on a null part).
+        /// Returns null when the part is absent.</summary>
+        private static XDocument GetSettingsXDocumentOrNull(WordprocessingDocument wordDoc)
+        {
+            var settingsPart = wordDoc.MainDocumentPart?.DocumentSettingsPart;
+            return settingsPart?.GetXDocument();
+        }
+
         /// <summary>
         /// Extracts the document's default language from settings.
         /// Priority: 1) themeFontLang, 2) default paragraph style lang, 3) "en-US"
@@ -6164,10 +6174,9 @@ namespace Docxodus
             const string fallbackLanguage = "en-US";
 
             // Try 1: themeFontLang in DocumentSettingsPart
-            var settingsPart = wordDoc.MainDocumentPart?.DocumentSettingsPart;
-            if (settingsPart != null)
+            var settingsXDoc = GetSettingsXDocumentOrNull(wordDoc);
+            if (settingsXDoc != null)
             {
-                var settingsXDoc = settingsPart.GetXDocument();
                 var themeFontLang = settingsXDoc.Descendants(W.themeFontLang).FirstOrDefault();
                 if (themeFontLang != null)
                 {
@@ -6463,6 +6472,11 @@ namespace Docxodus
                 toBorder.SetAttributeValue(W.themeTint, fromBorder.Attribute(W.themeTint).Value);
         }
 
+        /// <summary>Fallback w:defaultTabStop (in twips) used whenever settings.xml is absent or does
+        /// not specify one. Shared by <see cref="CalculateSpanWidthForTabs"/> and
+        /// <see cref="AddDefaultTabsAfterLastTab"/> so the default only lives in one place.</summary>
+        private const int DefaultTabStopTwips = 720;
+
         private static void CalculateSpanWidthForTabs(WordprocessingDocument wordDoc)
         {
             // Note: when implementing a paging version of the HTML transform, this needs to be done
@@ -6472,11 +6486,10 @@ namespace Docxodus
             // packages without word/settings.xml fine. Missing DocumentSettingsPart used
             // to throw ArgumentNullException("part") via GetXDocument and abort conversion
             // for the bulk of minimal fixtures (id_paraid_overflow / style demos).
-            var settingsPart = wordDoc.MainDocumentPart?.DocumentSettingsPart;
-            var defaultTabStop = 720;
-            if (settingsPart != null)
+            var sxd = GetSettingsXDocumentOrNull(wordDoc);
+            var defaultTabStop = DefaultTabStopTwips;
+            if (sxd != null)
             {
-                var sxd = settingsPart.GetXDocument();
                 var defaultTabStopValue = (string)sxd.Descendants(W.defaultTabStop).Attributes(W.val).FirstOrDefault();
                 if (defaultTabStopValue != null)
                     defaultTabStop = WordprocessingMLUtil.StringToTwips(defaultTabStopValue);
@@ -6868,7 +6881,7 @@ namespace Docxodus
             if (lastTabElement != null)
             {
                 if (defaultTabStop == 0)
-                    defaultTabStop = 720;
+                    defaultTabStop = DefaultTabStopTwips;
                 var rangeStart = WordprocessingMLUtil.StringToTwips((string)lastTabElement.Attribute(W.pos)) / defaultTabStop + 1;
                 var tempTabs = new XElement(W.tabs,
                     tabs.Elements().Where(t => (string)t.Attribute(W.val) != "clear" && (string)t.Attribute(W.val) != "bar"),
