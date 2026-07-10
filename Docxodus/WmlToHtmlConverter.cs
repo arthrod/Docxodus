@@ -6468,10 +6468,19 @@ namespace Docxodus
             // Note: when implementing a paging version of the HTML transform, this needs to be done
             // for all content parts, not just the main document part.
 
-            // w:defaultTabStop in settings
-            var sxd = wordDoc.MainDocumentPart.DocumentSettingsPart.GetXDocument();
-            var defaultTabStopValue = (string)sxd.Descendants(W.defaultTabStop).Attributes(W.val).FirstOrDefault();
-            var defaultTabStop = defaultTabStopValue != null ? WordprocessingMLUtil.StringToTwips(defaultTabStopValue) : 720;
+            // w:defaultTabStop in settings. Settings is optional in OOXML — Word opens
+            // packages without word/settings.xml fine. Missing DocumentSettingsPart used
+            // to throw ArgumentNullException("part") via GetXDocument and abort conversion
+            // for the bulk of minimal fixtures (id_paraid_overflow / style demos).
+            var settingsPart = wordDoc.MainDocumentPart?.DocumentSettingsPart;
+            var defaultTabStop = 720;
+            if (settingsPart != null)
+            {
+                var sxd = settingsPart.GetXDocument();
+                var defaultTabStopValue = (string)sxd.Descendants(W.defaultTabStop).Attributes(W.val).FirstOrDefault();
+                if (defaultTabStopValue != null)
+                    defaultTabStop = WordprocessingMLUtil.StringToTwips(defaultTabStopValue);
+            }
 
             var pxd = wordDoc.MainDocumentPart.GetXDocument();
             var root = pxd.Root;

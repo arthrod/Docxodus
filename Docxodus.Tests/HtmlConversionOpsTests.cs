@@ -312,4 +312,40 @@ public class HtmlConversionOpsTests
         Assert.Contains("LeftCellText", html);
         Assert.Contains("RightCellText", html);
     }
+
+    // Minimal OOXML packages (document.xml + styles.xml only — no word/settings.xml) are legal:
+    // ECMA-376 does not require DocumentSettingsPart, and Word opens them without repair.
+    // CalculateSpanWidthForTabs used to call DocumentSettingsPart.GetXDocument() unconditionally,
+    // which threw ArgumentNullException("part") and aborted conversion. Default tab stop is 720 twips.
+    [Fact]
+    public void HCO057_MissingDocumentSettingsPart_DoesNotCrashConverter()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Wp.Document(
+                new Wp.Body(
+                    new Wp.Paragraph(
+                        new Wp.Run(
+                            new Wp.Text("Hello no-settings package")))));
+            // Styles are required by FormattingAssembler; settings intentionally omitted.
+            main.AddNewPart<StyleDefinitionsPart>().Styles = new Wp.Styles(
+                new Wp.DocDefaults(
+                    new Wp.RunPropertiesDefault(
+                        new Wp.RunPropertiesBaseStyle(
+                            new Wp.RunFonts { Ascii = "Calibri", HighAnsi = "Calibri" },
+                            new Wp.FontSize { Val = "24" }))));
+            main.Document.Save();
+        }
+
+        // Prove the part is absent (not just that we forgot to assert the repro shape).
+        using (var reopen = WordprocessingDocument.Open(ms, false))
+        {
+            Assert.Null(reopen.MainDocumentPart!.DocumentSettingsPart);
+        }
+
+        string html = HtmlConversionOps.ConvertToHtml(ms.ToArray(), new HtmlConversionOptions());
+        Assert.Contains("Hello no-settings package", html);
+    }
 }

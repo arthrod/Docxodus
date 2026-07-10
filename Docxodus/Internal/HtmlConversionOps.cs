@@ -319,8 +319,8 @@ internal static class HtmlConversionOps
     }
 
     /// <summary>Copy the formatting parts (styles/numbering/theme/font/settings) from src into the
-    /// throwaway doc, ensuring a DocumentSettingsPart exists (the converter reads w:defaultTabStop
-    /// with no null check).</summary>
+    /// throwaway doc, ensuring a DocumentSettingsPart exists when the source had none (converter
+    /// defaults tab stop to 720 twips if settings are absent).</summary>
     private static void AddFormattingParts(WordprocessingDocument blockDoc, WordprocessingDocument sourceDoc)
     {
         CopyPartXml(sourceDoc, blockDoc, p => p.StyleDefinitionsPart);
