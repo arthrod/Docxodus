@@ -21,6 +21,7 @@ not run at all during interpreter shutdown.
 from __future__ import annotations
 
 import base64
+from types import TracebackType
 from typing import Any, Callable, Iterable, Mapping
 
 from ._transport import call as _call
@@ -372,7 +373,12 @@ class DocxSession:
     def __enter__(self) -> "DocxSession":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def __del__(self) -> None:
