@@ -21,8 +21,10 @@ not run at all during interpreter shutdown.
 from __future__ import annotations
 
 import base64
-from types import TracebackType
-from typing import Any, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 from ._transport import call as _call
 from .enums import (
