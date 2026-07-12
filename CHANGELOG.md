@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **`ConvertToHtml` no longer crashes when `word/settings.xml` is absent.** `DocumentSettingsPart` is optional in OOXML (ECMA-376 does not require it, and Word opens such packages without repair), but `CalculateSpanWidthForTabs` called `DocumentSettingsPart.GetXDocument()` unconditionally, so any minimal package without a settings part threw `ArgumentNullException("part")` before producing any HTML. Settings are now treated as optional: when the part (or its `w:defaultTabStop`) is missing, the converter keeps Word's implicit 720-twip default tab stop; `w:defaultTabStop` is read as a direct child of `w:settings` (per the schema) instead of a full `Descendants` walk; and `HtmlConversionOps.AddFormattingParts` no longer synthesizes a throwaway settings part for `RenderBlockHtml`. Regression coverage: `HCO057`–`HCO061` (missing part, 720-twip fallback, custom `w:defaultTabStop`, empty settings, `RenderBlockHtml` on a settings-less source). (#264)
+- **`scripts/build-wasm.sh`: per-asset `integrity` keys in `dotnet.boot.js` are normalized to `hash`** so the .NET 10 loader — which honors only `hash` (see dotnet/runtime#122391) — applies subresource integrity to framework asset fetches. A no-op on SDKs that already emit `hash`. (#264)
+
 ## [7.0.0] - 2026-07-09
 
 ### Added
