@@ -99,6 +99,8 @@ Each mutation reports which anchors it created, removed, or modified. This table
 | `SetListLevel(p, delta)` | — | — | `p` | enclosing list (downstream items renumber) |
 | `RemoveListMembership(p)` | — | — | `p` (kind flips `li`→`p`) | enclosing list |
 | `ReplaceCellContent(tc, md)` | — | descendant inline anchors (rare) | `tc` | `tc` |
+| `SetHeaderText(p, kind, md)` / `SetFooterText(...)` | the new header/footer paragraph anchors (scope `hdr{N}`/`ftr{N}`) | — (reused-part old paragraphs cease to exist; not separately reported in v1) | — | whole document |
+| `InsertPageNumberField(p, field?)` | — | — | `p` (the paragraph the field is appended to) | `p` |
 | `Raw.InsertXml(a, pos, xml)` | every block in the new XML | — | — | enclosing parent |
 | `Raw.ReplaceXml(a, xml)` | unids present in the new XML but not the old (typical for caller-authored XML) | unids present in the old element but not the new (when `a` itself is gone) | unids present in both (typical for the `GetXml → mutate → ReplaceXml` round trip, which preserves Unids) | enclosing parent |
 | `Undo()` / `Redo()` | (diff vs current) | (diff vs current) | (diff vs current) | `null` — caller re-projects |
@@ -147,6 +149,13 @@ What am I editing?
 │
 ├── Replacing the contents of a table cell?
 │       → ReplaceCellContent(tcAnchor, markdown)
+│
+├── Setting a section's running header/footer (any body block anchors the section)?
+│       → SetHeaderText(bodyAnchor, HeaderFooterKind.Default|First|Even, markdown)
+│       → SetFooterText(bodyAnchor, ...)   # Created lists the hdr{N}/ftr{N} paragraphs
+│
+├── Putting a page number in a header/footer paragraph?
+│       → InsertPageNumberField(hdrOrFtrAnchor, PageNumberField.CurrentPage|TotalPages)
 │
 ├── Inserting/deleting table rows or columns, merging cells,
 │   embedding a chart, inserting a math equation,
@@ -236,6 +245,96 @@ Two caveats that are explicitly out of scope for v1 (tracked in [#132](https://g
 - **Mutations don't auto-update bookmarks.** A `ReplaceText` / `SplitParagraph` / `MergeParagraphs` call can invalidate the bookmark covering the affected region. Bookmark preservation across mutations is a separate follow-up.
 
 The agent's prompt should also be aware: it can call `session.ListAnnotations()` once at session start to enumerate available labels (e.g., "you can target: INDEMNIFICATION, TERMINATION, GOVERNING_LAW") and present those as tools rather than asking the LLM to discover them from text.
+
+## Headers, footers, and page-number fields
+
+Running headers/footers and page-number fields live in their own OOXML parts
+(`HeaderPart`/`FooterPart`), *outside* the body — so before issue #236 the session
+could only *inspect* them (`GetSectionInfo` → `HeaderPartUris`/`FooterPartUris`),
+never author them. These three methods close that gap; they're exposed in .NET,
+WASM/npm, and stdio/`docx-scalpel`.
+
+### Methods
+
+| Method | What it does |
+|---|---|
+| `SetHeaderText(anchorId, HeaderFooterKind, markdown)` | Set the running header story for the section that owns `anchorId`. |
+| `SetFooterText(anchorId, HeaderFooterKind, markdown)` | Same, for the footer. |
+| `InsertPageNumberField(anchorId, PageNumberField = CurrentPage)` | Append a `PAGE`/`NUMPAGES` field to a paragraph (usually a header/footer one). |
+
+**Addressing.** `SetHeaderText`/`SetFooterText` take *any body block* in the target
+section — the governing `w:sectPr` is resolved the same way `GetSectionInfo` resolves
+it (a forward mid-document section break, else the body's trailing `sectPr`; if the
+body has none, a trailing `sectPr` is synthesized). This mirrors `GetSectionInfo`
+returning `null` for non-body anchors: passing a header/footer/footnote anchor is an
+`AnchorWrongKind` error, because a story attaches to a *body* section.
+
+**`HeaderFooterKind`** = `Default` / `First` / `Even`, mapping to the reference's
+`w:type`. `First` additionally sets the section's `w:titlePg`; `Even` sets
+`w:evenAndOddHeaders` in the settings part — without those flags Word ignores the
+first/even story. Calling the same kind twice **reuses** the existing part and
+replaces its content (so `SetFooterText` is an idempotent "set the footer to this");
+a different kind creates a second part/reference.
+
+Two `Even` sharp edges worth knowing:
+
+- `w:evenAndOddHeaders` is **document-global and governs footers too**. Once set,
+  even pages stop inheriting the Default stories entirely — a section with only a
+  Default footer shows *no footer at all* on even pages (spec-correct Word behavior,
+  observed identically in LibreOffice). If you set an Even header and want footers to
+  keep appearing on every page, set an Even footer too.
+- The flag is inserted at its CT_Settings schema slot via
+  `WordprocessingMLUtil.EnsureEvenAndOddHeaders` (shared with the DocxDiff
+  header/footer renderer); every other settings child — including ones the ordering
+  table doesn't know, like `w:hdrShapeDefaults`/`w:shapeDefaults` that real Word
+  documents carry — stays exactly where it was. (An earlier whole-part reorder
+  corrupted such documents; `DS263`/`DS264` pin the fix.)
+
+**Content & styling.** The `markdown` uses the same subset as `InsertParagraph`
+(bold/italic/links/etc.). Each paragraph with no explicit style gets the built-in
+`Header`/`Footer` paragraph style, so it inherits Word's centre-of-page and
+right-margin tab stops — the layout page-number footers rely on. An empty payload
+yields one empty story paragraph.
+
+**Return shape.** `SetHeaderText`/`SetFooterText` report the new story paragraphs in
+`EditResult.Created` (scope `hdr{N}`/`ftr{N}`, 1-based by part-collection order) — pass
+one to `InsertPageNumberField`. `InsertPageNumberField` reports the target paragraph in
+`Modified`. The field is a native complex field (`fldChar`/`instrText`, cached "1"
+result), so it renders and updates like a hand-authored field.
+
+### Recipe — the S-1 running footer ("Last Updated … / centered page N")
+
+```csharp
+var body = session.Project().AnchorIndex.Values
+    .First(t => t.Anchor.Kind == "p" && t.Anchor.Scope == "body").Anchor.Id;
+
+var footer = session.SetFooterText(body, HeaderFooterKind.Default, "Last Updated October 2025");
+var footerPara = footer.Created[0].Id;                       // scope "ftr1"
+session.SetParagraphFormat(footerPara, new ParagraphFormatOp { Alignment = ParagraphAlignment.Center });
+session.InsertPageNumberField(footerPara, PageNumberField.CurrentPage);
+```
+
+### Undo/redo and the snapshot reconcile
+
+`SetHeaderText`/`SetFooterText` can *add* an OOXML part, which the session's per-part
+snapshot didn't previously track (only the annotations custom-XML part was
+create/delete-reconciled). `DocumentSnapshot` now also records each header/footer
+part's relationship id, and `RestoreSnapshot` reconciles them: on undo it deletes
+parts the snapshot lacks; on redo it re-creates the ones it has **with their original
+relationship id** (via `AddNewPart<HeaderPart>(relId)`) so the just-restored `sectPr`
+reference resolves. Content of surviving parts restores by URI as before. One edge is
+documented as intentional: the `w:evenAndOddHeaders` settings flag (only set by the
+`Even` kind) isn't reverted by undo — it's idempotent and has no visual effect without
+an even story.
+
+### Not yet
+
+- **A visual header/footer editing region in the browser `DocxEditor`.** The engine +
+  wire ship here; the editor UI (a separate editable region, since the parts live
+  outside the body) is a deliberate follow-up.
+- **Footnote/endnote authoring** is tracked separately (still `FootnoteRefNotSupported`).
+- **Page-number formatting** (`w:pgNumType` start/format, `PAGE \* roman`) — v1 emits a
+  plain `PAGE`/`NUMPAGES`; field switches are a follow-up.
 
 ## Tier E: Annotations
 
